@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ailoop_core::{ToolDefinition, ToolResultContent};
+use ailoop_core::{ToolDefinition, ToolResultContent, ToolTag};
 use indexmap::{IndexMap, IndexSet};
 use serde::Serialize;
 
@@ -81,13 +81,17 @@ impl ToolRegistry {
     }
 
     pub fn active_tools(&self) -> impl Iterator<Item = &Arc<dyn ToolDyn>> {
-        self.tools.values()
+        self.tools
+            .iter()
+            .filter(|(name, _)| self.active_tools.contains(*name))
+            .map(|(_, tool)| tool)
     }
 
     pub fn inactive_tools(&self) -> impl Iterator<Item = &Arc<dyn ToolDyn>> {
         self.tools
-            .values()
-            .filter(|tool| !self.active_tools.contains(&tool.tool_definition().name))
+            .iter()
+            .filter(|(name, _)| !self.active_tools.contains(*name))
+            .map(|(_, tool)| tool)
     }
 
     pub fn register(&mut self, tool: Arc<dyn ToolDyn>) -> Result<(), ToolRegistryError> {
@@ -96,6 +100,7 @@ impl ToolRegistry {
             return Err(ToolRegistryError::AlreadyRegistered(name));
         }
 
+        self.active_tools.insert(name.clone());
         self.tools.insert(name, tool);
         Ok(())
     }
@@ -112,12 +117,61 @@ impl ToolRegistry {
         self.active_tools.shift_remove(tool_name);
         Ok(())
     }
+
+    /// Activate every registered tool whose declared tags overlap with `tags`.
+    ///
+    /// Additive: tools already active stay active. Tools with no declared
+    /// tags are never matched.
+    pub fn activate_by_tags(&mut self, tags: &[ToolTag]) {
+        let to_activate: Vec<String> = self
+            .tools
+            .iter()
+            .filter_map(|(name, tool)| {
+                let def = tool.tool_definition();
+                def.tags
+                    .iter()
+                    .any(|t| tags.contains(t))
+                    .then(|| name.clone())
+            })
+            .collect();
+
+        for name in to_activate {
+            self.active_tools.insert(name);
+        }
+    }
+
+    /// Deactivate every registered tool whose declared tags overlap with `tags`.
+    ///
+    /// Subtractive: tools with no declared tags are never matched and stay
+    /// in whichever state they were.
+    pub fn deactivate_by_tags(&mut self, tags: &[ToolTag]) {
+        let to_deactivate: Vec<String> = self
+            .tools
+            .iter()
+            .filter_map(|(name, tool)| {
+                let def = tool.tool_definition();
+                def.tags
+                    .iter()
+                    .any(|t| tags.contains(t))
+                    .then(|| name.clone())
+            })
+            .collect();
+
+        for name in to_deactivate {
+            self.active_tools.shift_remove(&name);
+        }
+    }
+
+    /// Clear the active set. Every registered tool becomes inactive.
+    pub fn deactivate_all(&mut self) {
+        self.active_tools.clear();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ailoop_core::request::ToolDefinition;
+    use ailoop_core::request::{ToolDefinition, ToolTag};
     use serde::Deserialize;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -202,5 +256,127 @@ mod tests {
             ToolResultContent::Text(text) => assert_eq!("content", text),
             ToolResultContent::Error(error) => panic!("Failed to read"),
         }
+    }
+
+    struct TaggedTool {
+        name: &'static str,
+        tags: Vec<ToolTag>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolDyn for TaggedTool {
+        fn name(&self) -> String {
+            self.name.into()
+        }
+
+        fn tool_definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name.into(),
+                description: "tagged".into(),
+                input_schema: serde_json::json!({"type":"object","properties":{},"required":[]}),
+                tags: self.tags.clone(),
+            }
+        }
+
+        async fn call(&self, _args: serde_json::Value) -> ToolResultContent {
+            ToolResultContent::Text(String::new())
+        }
+    }
+
+    fn names<'a>(iter: impl Iterator<Item = &'a Arc<dyn ToolDyn>>) -> Vec<String> {
+        iter.map(|t| t.tool_definition().name).collect()
+    }
+
+    #[test]
+    fn register_auto_activates() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(TaggedTool {
+                name: "fetch",
+                tags: vec![ToolTag::ReadOnly, ToolTag::Network],
+            }))
+            .unwrap();
+
+        assert_eq!(names(registry.active_tools()), vec!["fetch"]);
+    }
+
+    #[test]
+    fn deactivate_tool_removes_from_active() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(TaggedTool {
+                name: "fetch",
+                tags: vec![ToolTag::ReadOnly],
+            }))
+            .unwrap();
+
+        registry.deactivate_tool("fetch").unwrap();
+        assert!(names(registry.active_tools()).is_empty());
+        assert_eq!(names(registry.inactive_tools()), vec!["fetch"]);
+    }
+
+    #[test]
+    fn activate_by_tags_only_matches_overlapping() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(TaggedTool {
+                name: "fetch",
+                tags: vec![ToolTag::ReadOnly, ToolTag::Network],
+            }))
+            .unwrap();
+        registry
+            .register(Arc::new(TaggedTool {
+                name: "rm",
+                tags: vec![ToolTag::Destructive, ToolTag::WritesFiles],
+            }))
+            .unwrap();
+        registry
+            .register(Arc::new(TaggedTool {
+                name: "noop",
+                tags: vec![],
+            }))
+            .unwrap();
+
+        registry.deactivate_all();
+        registry.activate_by_tags(&[ToolTag::ReadOnly]);
+
+        assert_eq!(names(registry.active_tools()), vec!["fetch"]);
+    }
+
+    #[test]
+    fn deactivate_by_tags_removes_matching() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(TaggedTool {
+                name: "fetch",
+                tags: vec![ToolTag::ReadOnly],
+            }))
+            .unwrap();
+        registry
+            .register(Arc::new(TaggedTool {
+                name: "rm",
+                tags: vec![ToolTag::Destructive],
+            }))
+            .unwrap();
+
+        registry.deactivate_by_tags(&[ToolTag::Destructive]);
+
+        assert_eq!(names(registry.active_tools()), vec!["fetch"]);
+    }
+
+    #[test]
+    fn untagged_tool_never_matches_capability_filter() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(TaggedTool {
+                name: "noop",
+                tags: vec![],
+            }))
+            .unwrap();
+
+        registry.deactivate_all();
+        registry.activate_by_tags(&[ToolTag::ReadOnly, ToolTag::Network]);
+
+        assert!(names(registry.active_tools()).is_empty());
     }
 }

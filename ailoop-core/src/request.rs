@@ -40,7 +40,7 @@ impl ToolDefinition {
     }
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 pub enum ToolTag {
     Destructive,
     ReadOnly,
