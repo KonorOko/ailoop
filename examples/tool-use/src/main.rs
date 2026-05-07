@@ -1,58 +1,18 @@
-use ailoop::{Conversation, StreamChunk, Tool, ToolDefinition};
+use ailoop::{Conversation, StreamChunk, ailoop_tool};
 use ailoop_anthropic::AnthropicClient;
 use futures::StreamExt;
-use serde::Deserialize;
-use serde_json::json;
-use std::convert::Infallible;
 use std::io::{self, Write};
 
-struct Add;
-
-#[derive(Deserialize)]
-struct AddArgs {
-    a: f64,
-    b: f64,
-}
-
-impl Tool for Add {
-    const NAME: &'static str = "add";
-
-    type Args = AddArgs;
-    type Output = String;
-    type Error = Infallible;
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(
-            Self::NAME,
-            "Add two numbers and return the sum.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "a": { "type": "number", "description": "First addend." },
-                    "b": { "type": "number", "description": "Second addend." }
-                },
-                "required": ["a", "b"]
-            }),
-            vec![],
-        )
-    }
-
-    fn call(
-        &self,
-        args: Self::Args,
-    ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
-        async move { Ok(format!("{}", args.a + args.b)) }
-    }
+#[ailoop_tool(description = "Sum two numbers")]
+async fn add(a: i32, b: i32) -> i32 {
+    a + b
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = AnthropicClient::from_env()?.model("claude-sonnet-4-6");
     let mut chat = Conversation::builder(model)
-        .system_prompt(
-            "You are a helpful math assistant. \
-             Use the `add` tool whenever the user asks you to sum two numbers.",
-        )
+        .system_prompt("You are a helpful math assistant.")
         .tool(Add)
         .build()?;
 
