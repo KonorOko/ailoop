@@ -39,17 +39,21 @@ impl CompletionModel for AnthropicModel {
     ) -> Result<BoxStream<'static, Result<StreamChunk, AnthropicError>>, AnthropicError> {
         let body = build_body(&self.model, &req);
 
-        let response = self
+        let mut req_builder = self
             .client
             .http_client
             .post(&self.client.base_url)
             .header("x-api-key", &self.client.api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", &self.client.anthropic_version)
             .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .json(&body)
-            .send()
-            .await?;
+            .header("accept", "text/event-stream");
+
+        if !self.client.beta_features.is_empty() {
+            req_builder =
+                req_builder.header("anthropic-beta", self.client.beta_features.join(","));
+        }
+
+        let response = req_builder.json(&body).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
