@@ -25,6 +25,7 @@ ailoop-prompts = { path = "ailoop-prompts" }
 ailoop-context = { path = "ailoop-context" }
 ailoop-tools = { path = "ailoop-tools" }
 ailoop-anthropic = { path = "ailoop-anthropic" }
+ailoop-derive = { path = "ailoop-derive" }
 
 async-trait = "0.1.89"
 async-stream = "0.3.6"
@@ -38,4 +39,8 @@ eventsource-stream = "0.2.3"
 tokio = { version = "1", features = ["full"] }
 dotenvy = "0.15.7"
 tempfile = "3"
-syn = "2.0.117"
+syn = { version = "2.0.117", features = ["full"] }
+quote = "1.0.45"
+proc-macro2 = "1.0.106"
+proc-macro-crate = "3.4.0"
+convert_case = "0.11.0"

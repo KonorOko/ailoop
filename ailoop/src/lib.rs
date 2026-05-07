@@ -8,6 +8,7 @@ pub use ailoop_core::{
     AssistantBlock, ChatMiddleware, Message, RunConfig, StreamChunk, ToolDecision, ToolDefinition,
     ToolResultContent, Usage,
 };
+pub use ailoop_derive::ailoop_tool;
 pub use ailoop_prompts::{Prompt, PromptSection};
 pub use ailoop_tools::{Tool, ToolRegistry};
 pub use conversation::Conversation;

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use ailoop_core::{ToolDefinition, ToolResultContent};
 use indexmap::{IndexMap, IndexSet};
+use serde::Serialize;
 
 use crate::errors::ToolRegistryError;
 
@@ -14,7 +15,7 @@ pub trait Tool: Send + Sync + Sized {
     const NAME: &'static str;
 
     type Args: for<'a> serde::Deserialize<'a> + Send;
-    type Output: Into<ToolResultContent> + Send;
+    type Output: Serialize + Send;
     type Error: std::error::Error + Send + Sync + 'static;
 
     fn definition(&self) -> ToolDefinition;
@@ -48,7 +49,11 @@ impl<T: Tool> ToolDyn for T {
         };
 
         match T::call(&self, typed).await {
-            Ok(out) => out.into(),
+            Ok(out) => match serde_json::to_value(&out) {
+                Ok(serde_json::Value::String(s)) => ToolResultContent::Text(s),
+                Ok(v) => ToolResultContent::Text(v.to_string()),
+                Err(e) => ToolResultContent::Error(format!("Failed to serialize tool output: {e}")),
+            },
             Err(e) => ToolResultContent::Error(format!("{e}")),
         }
     }
