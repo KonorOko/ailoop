@@ -18,3 +18,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

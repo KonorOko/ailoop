@@ -12,6 +12,7 @@ struct MacroArgs {
     description: Option<String>,
     param_descriptions: HashMap<String, String>,
     required: Vec<String>,
+    tags: Vec<Ident>,
 }
 
 /// Resolve the path to an item that lives in (or is re-exported by) one of the
@@ -46,6 +47,10 @@ fn ailoop_tool_path() -> proc_macro2::TokenStream {
 
 fn ailoop_tool_definition_path() -> proc_macro2::TokenStream {
     resolve_item_path(&["ailoop", "ailoop-core"], "ToolDefinition")
+}
+
+fn ailoop_tool_tag_path() -> proc_macro2::TokenStream {
+    resolve_item_path(&["ailoop", "ailoop-core"], "ToolTag")
 }
 
 fn parse_string_literal(expr: &Expr, field_name: &str) -> syn::Result<String> {
@@ -100,6 +105,7 @@ impl Parse for MacroArgs {
         let mut description = None;
         let mut param_descriptions = HashMap::new();
         let mut required = Vec::new();
+        let mut tags = Vec::new();
 
         // If the input is empty, return default values
         if input.is_empty() {
@@ -108,6 +114,7 @@ impl Parse for MacroArgs {
                 description,
                 param_descriptions,
                 required,
+                tags,
             });
         }
 
@@ -182,6 +189,14 @@ impl Parse for MacroArgs {
                                 required.push(x.to_string());
                             });
                         }
+                        "tags" => {
+                            let tag_idents: Punctuated<Ident, Token![,]> =
+                                list.parse_args_with(Punctuated::parse_terminated)?;
+
+                            tag_idents.into_iter().for_each(|x| {
+                                tags.push(x);
+                            });
+                        }
                         _ => {
                             return Err(syn::Error::new_spanned(
                                 &list.path,
@@ -210,6 +225,7 @@ impl Parse for MacroArgs {
             description,
             param_descriptions,
             required,
+            tags,
         })
     }
 }
@@ -388,6 +404,18 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let tool_path = ailoop_tool_path();
     let tool_definition_path = ailoop_tool_definition_path();
+    let tool_tag_path = ailoop_tool_tag_path();
+
+    let tags_expr = if args.tags.is_empty() {
+        quote! { ::std::vec::Vec::new() }
+    } else {
+        let tag_paths: Vec<proc_macro2::TokenStream> = args
+            .tags
+            .iter()
+            .map(|v| quote!(#tool_tag_path::#v))
+            .collect();
+        quote! { ::std::vec![#(#tag_paths),*] }
+    };
 
     let expanded = quote! {
         #[derive(serde::Deserialize)]
@@ -425,7 +453,7 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
                     #tool_name,
                     &#tool_description,
                     input_schema,
-                    ::std::vec::Vec::new(),
+                    #tags_expr,
                 )
             }
 

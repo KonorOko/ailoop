@@ -6,7 +6,7 @@ mod middleware;
 pub use ailoop_context::ContextManager;
 pub use ailoop_core::{
     AssistantBlock, ChatMiddleware, Message, RunConfig, StreamChunk, ToolDecision, ToolDefinition,
-    ToolResultContent, Usage,
+    ToolResultContent, ToolTag, Usage,
 };
 pub use ailoop_derive::ailoop_tool;
 pub use ailoop_prompts::{Prompt, PromptSection};

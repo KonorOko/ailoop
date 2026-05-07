@@ -8,6 +8,6 @@ mod traits;
 pub use config::RunConfig;
 pub use message::{AssistantBlock, Message, ToolResultContent, UserBlock};
 pub use middleware::{ChatMiddleware, HookAction, ToolDecision};
-pub use request::{ChatRequest, ToolDefinition};
+pub use request::{ChatRequest, ToolDefinition, ToolTag};
 pub use stream::{FinishReason, StreamChunk, Usage};
 pub use traits::{CompletionClient, CompletionModel};
