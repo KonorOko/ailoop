@@ -1,0 +1,19 @@
+[package]
+name = "ailoop"
+description = "Ergonomic, provider-agnostic AI agent engine for Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ailoop-core.workspace = true
+ailoop-context.workspace = true
+ailoop-tools.workspace = true
+ailoop-prompts.workspace = true
+
+futures.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true

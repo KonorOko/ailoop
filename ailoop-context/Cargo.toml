@@ -1,0 +1,14 @@
+[package]
+name = "ailoop-context"
+description = "Conversation history and context management for ailoop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ailoop-core.workspace = true
+
+indexmap.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "ailoop-anthropic"
+description = "Anthropic provider adapter for ailoop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ailoop-core.workspace = true
+
+eventsource-stream.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+dotenvy.workspace = true

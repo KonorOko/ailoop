@@ -1,0 +1,6 @@
+/target
+.DS_Store
+/dev-notes
+.env
+.zed/
+
