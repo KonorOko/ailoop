@@ -70,7 +70,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                 tools: Some(tools.active_tools().map(|t| t.tool_definition()).collect()),
                 system_prompt: config.system_prompt.clone(),
                 max_tokens: config.max_tokens,
-                aditional_params: None,
+                additional_params: None,
                 temperature: None
             };
 

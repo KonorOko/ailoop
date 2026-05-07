@@ -10,7 +10,7 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     pub max_tokens: u32,
 
-    pub aditional_params: Option<Value>,
+    pub additional_params: Option<Value>,
 }
 
 #[derive(Debug, Serialize, Clone)]
