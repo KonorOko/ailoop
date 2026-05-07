@@ -13,3 +13,4 @@ pub use ailoop_prompts::{Prompt, PromptSection};
 pub use ailoop_tools::{Tool, ToolRegistry};
 pub use conversation::Conversation;
 pub use engine::run_chat;
+pub use middleware::ApprovalMiddleware;

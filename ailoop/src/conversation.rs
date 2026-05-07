@@ -3,11 +3,16 @@ use ailoop_core::{ChatMiddleware, CompletionModel, Message, RunConfig, StreamChu
 use ailoop_prompts::{Prompt, PromptSection};
 use ailoop_tools::{ToolRegistry, registry::ToolDyn};
 use futures::{Stream, StreamExt, stream::BoxStream};
-use std::{collections::HashMap, path::Path, sync::Arc, task::Poll};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+    task::Poll,
+};
 
 use crate::{
     errors::{BuildError, EngineError},
-    middleware::SystemPromptMiddleware,
+    middleware::{ApprovalCallback, ApprovalMiddleware, SystemPromptMiddleware, wrap_callback},
     run_chat,
 };
 
@@ -61,6 +66,11 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
     }
 }
 
+struct ApprovalSpec {
+    callback: ApprovalCallback,
+    tags: Option<Vec<ToolTag>>,
+}
+
 pub struct ConversationBuilder<M: CompletionModel> {
     model: M,
     prompt: Prompt,
@@ -69,6 +79,7 @@ pub struct ConversationBuilder<M: CompletionModel> {
     tool_prompts: HashMap<String, PromptSection>,
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
     capabilities: Option<Vec<ToolTag>>,
+    approval: Option<ApprovalSpec>,
     errors: Vec<BuildError>,
 }
 
@@ -87,6 +98,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             tools,
             middlewares: vec![],
             capabilities: None,
+            approval: None,
             errors: vec![],
         }
     }
@@ -143,6 +155,52 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
+    /// Run `callback` before every Destructive or WritesFiles tool call;
+    /// the callback's [`ToolDecision`] is forwarded to the engine.
+    ///
+    /// Tool name resolution happens at `build()` time and respects the
+    /// capability filter, so untagged or filtered-out tools never trigger
+    /// the callback.
+    ///
+    /// [`ToolDecision`]: ailoop_core::ToolDecision
+    pub fn with_approval<F, Fut>(self, callback: F) -> Self
+    where
+        F: Fn(String, serde_json::Value) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ailoop_core::ToolDecision> + Send + 'static,
+    {
+        self.with_approval_for_tags(&[ToolTag::Destructive, ToolTag::WritesFiles], callback)
+    }
+
+    /// Same as [`with_approval`](Self::with_approval) but with a custom
+    /// tag set. The callback fires for tool calls whose declared tags
+    /// overlap with `tags`. Pass an empty slice to disable the gate.
+    pub fn with_approval_for_tags<F, Fut>(mut self, tags: &[ToolTag], callback: F) -> Self
+    where
+        F: Fn(String, serde_json::Value) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ailoop_core::ToolDecision> + Send + 'static,
+    {
+        self.approval = Some(ApprovalSpec {
+            callback: wrap_callback(callback),
+            tags: Some(tags.to_vec()),
+        });
+        self
+    }
+
+    /// Run `callback` before every tool call (untagged or otherwise).
+    /// Useful for `Conversation::run` flows where every action is
+    /// surfaced to the human.
+    pub fn with_approval_for_all<F, Fut>(mut self, callback: F) -> Self
+    where
+        F: Fn(String, serde_json::Value) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ailoop_core::ToolDecision> + Send + 'static,
+    {
+        self.approval = Some(ApprovalSpec {
+            callback: wrap_callback(callback),
+            tags: None,
+        });
+        self
+    }
+
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.prompt.add_section(PromptSection::new(prompt));
         self
@@ -177,6 +235,26 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             tools.activate_by_tags(&capabilities);
         }
 
+        if let Some(spec) = self.approval {
+            let approval_mw = match spec.tags {
+                None => ApprovalMiddleware::from_parts_all(spec.callback),
+                Some(tags) => {
+                    let names: HashSet<String> = tools
+                        .active_tools()
+                        .filter(|tool| {
+                            tool.tool_definition()
+                                .tags
+                                .iter()
+                                .any(|tag| tags.contains(tag))
+                        })
+                        .map(|tool| tool.tool_definition().name)
+                        .collect();
+                    ApprovalMiddleware::from_parts(spec.callback, names)
+                }
+            };
+            middlewares.push(Arc::new(approval_mw));
+        }
+
         Ok(Conversation {
             model: self.model,
             history: self.history,
@@ -207,5 +285,217 @@ impl<'a, M: CompletionModel> Stream for RunStream<'a, M> {
         }
 
         polled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ailoop_core::{ChatRequest, CompletionModel, StreamChunk, ToolDecision};
+    use ailoop_tools::registry::ToolDyn as _;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct MockModel;
+
+    #[async_trait::async_trait]
+    impl CompletionModel for MockModel {
+        type Error = std::convert::Infallible;
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn model(&self) -> &str {
+            "mock"
+        }
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> Result<BoxStream<'static, Result<StreamChunk, Self::Error>>, Self::Error> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeTool {
+        name: &'static str,
+        tags: Vec<ToolTag>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolDyn for FakeTool {
+        fn name(&self) -> String {
+            self.name.into()
+        }
+        fn tool_definition(&self) -> ailoop_core::ToolDefinition {
+            ailoop_core::ToolDefinition {
+                name: self.name.into(),
+                description: "fake".into(),
+                input_schema: json!({"type":"object","properties":{},"required":[]}),
+                tags: self.tags.clone(),
+            }
+        }
+        async fn call(&self, _args: serde_json::Value) -> ailoop_core::ToolResultContent {
+            ailoop_core::ToolResultContent::Text(String::new())
+        }
+    }
+
+    async fn dispatch_through_chain(
+        chat: &Conversation<MockModel>,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> ToolDecision {
+        for mw in &chat.middlewares {
+            match mw.on_before_tool_call(name, args).await {
+                ToolDecision::Continue => continue,
+                other => return other,
+            }
+        }
+        ToolDecision::Continue
+    }
+
+    #[tokio::test]
+    async fn with_approval_gates_only_destructive_writesfiles_tools() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_cb = counter.clone();
+        let chat = Conversation::builder(MockModel)
+            .tool(FakeTool {
+                name: "list_dir",
+                tags: vec![ToolTag::ReadOnly],
+            })
+            .tool(FakeTool {
+                name: "delete_file",
+                tags: vec![ToolTag::Destructive, ToolTag::WritesFiles],
+            })
+            .tool(FakeTool {
+                name: "untagged",
+                tags: vec![],
+            })
+            .with_approval(move |_name, _args| {
+                let c = counter_cb.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    ToolDecision::Continue
+                }
+            })
+            .build()
+            .unwrap();
+
+        dispatch_through_chain(&chat, "list_dir", &json!({})).await;
+        dispatch_through_chain(&chat, "delete_file", &json!({})).await;
+        dispatch_through_chain(&chat, "untagged", &json!({})).await;
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn with_approval_for_tags_uses_custom_set() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_cb = counter.clone();
+        let chat = Conversation::builder(MockModel)
+            .tool(FakeTool {
+                name: "list_dir",
+                tags: vec![ToolTag::ReadOnly],
+            })
+            .tool(FakeTool {
+                name: "delete_file",
+                tags: vec![ToolTag::Destructive],
+            })
+            .with_approval_for_tags(&[ToolTag::ReadOnly], move |_name, _args| {
+                let c = counter_cb.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    ToolDecision::Continue
+                }
+            })
+            .build()
+            .unwrap();
+
+        dispatch_through_chain(&chat, "list_dir", &json!({})).await;
+        dispatch_through_chain(&chat, "delete_file", &json!({})).await;
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn with_approval_for_all_fires_for_untagged() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_cb = counter.clone();
+        let chat = Conversation::builder(MockModel)
+            .tool(FakeTool {
+                name: "untagged",
+                tags: vec![],
+            })
+            .with_approval_for_all(move |_name, _args| {
+                let c = counter_cb.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    ToolDecision::Continue
+                }
+            })
+            .build()
+            .unwrap();
+
+        dispatch_through_chain(&chat, "untagged", &json!({})).await;
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn approval_skip_decision_short_circuits_chain() {
+        let chat = Conversation::builder(MockModel)
+            .tool(FakeTool {
+                name: "delete_file",
+                tags: vec![ToolTag::Destructive],
+            })
+            .with_approval(|_name, _args| async move {
+                ToolDecision::Skip {
+                    reason: "user denied".into(),
+                }
+            })
+            .build()
+            .unwrap();
+
+        let decision = dispatch_through_chain(&chat, "delete_file", &json!({})).await;
+        match decision {
+            ToolDecision::Skip { reason } => assert_eq!(reason, "user denied"),
+            _ => panic!("expected Skip"),
+        }
+    }
+
+    #[tokio::test]
+    async fn capabilities_filter_runs_before_approval_resolution() {
+        // delete_file is filtered out by capabilities; the approval gate
+        // should not register it as a gated name (and the dispatch
+        // wouldn't reach it anyway because the engine wouldn't expose it).
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_cb = counter.clone();
+        let chat = Conversation::builder(MockModel)
+            .tool(FakeTool {
+                name: "list_dir",
+                tags: vec![ToolTag::ReadOnly],
+            })
+            .tool(FakeTool {
+                name: "delete_file",
+                tags: vec![ToolTag::Destructive],
+            })
+            .with_capabilities(&[ToolTag::ReadOnly])
+            .with_approval(move |_name, _args| {
+                let c = counter_cb.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    ToolDecision::Continue
+                }
+            })
+            .build()
+            .unwrap();
+
+        // delete_file is inactive (filtered out), so even if dispatched
+        // the approval gate wouldn't have it in its set.
+        dispatch_through_chain(&chat, "delete_file", &json!({})).await;
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "filtered-out tool should not be in approval gate"
+        );
     }
 }
