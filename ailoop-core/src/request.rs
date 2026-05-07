@@ -8,6 +8,9 @@ pub struct ChatRequest {
     pub system_prompt: Option<String>,
     pub tools: Option<Vec<ToolDefinition>>,
     pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<u32>,
+    pub stop_sequences: Vec<String>,
     pub max_tokens: u32,
 
     pub additional_params: Option<Value>,

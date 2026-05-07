@@ -71,7 +71,10 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                 system_prompt: config.system_prompt.clone(),
                 max_tokens: config.max_tokens,
                 additional_params: None,
-                temperature: None
+                temperature: None,
+                top_p: None,
+                top_k: None,
+                stop_sequences: Vec::new(),
             };
 
             for mw in &config.middlewares {

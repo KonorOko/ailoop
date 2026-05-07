@@ -23,6 +23,27 @@ pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
         }
     }
 
+    if let Some(t) = req.temperature {
+        body.insert("temperature".into(), json!(t));
+    }
+    if let Some(p) = req.top_p {
+        body.insert("top_p".into(), json!(p));
+    }
+    if let Some(k) = req.top_k {
+        body.insert("top_k".into(), json!(k));
+    }
+    if !req.stop_sequences.is_empty() {
+        body.insert("stop_sequences".into(), json!(req.stop_sequences));
+    }
+
+    if let Some(extra) = &req.additional_params {
+        if let Some(map) = extra.as_object() {
+            for (k, v) in map {
+                body.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
     serde_json::Value::Object(body)
 }
 
