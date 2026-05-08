@@ -40,6 +40,25 @@ pub fn process_response(
                             blocks.insert(index, BlockState::ToolUse { id: id.clone(), name: name.clone(), args_buf: String::new() });
                             yield StreamChunk::ToolCallStart { id, name };
                         }
+                        AnthropicBlock::Thinking { thinking, signature } => {
+                            // start values are usually empty; deltas fill them in.
+                            blocks.insert(index, BlockState::Thinking {
+                                signature: if signature.is_empty() { None } else { Some(signature) },
+                            });
+                            if !thinking.is_empty() {
+                                yield StreamChunk::ReasoningDelta { delta: thinking };
+                            }
+                        }
+                        AnthropicBlock::RedactedThinking { data } => {
+                            // Atomic block: emit immediately, no state needed.
+                            yield StreamChunk::RedactedReasoningBlock { data };
+                        }
+                        AnthropicBlock::Unknown => {
+                            // Unknown block type — track as Text-like so deltas
+                            // and stop events don't desync state, but emit
+                            // nothing.
+                            blocks.insert(index, BlockState::Unknown);
+                        }
                     }
                 }
                 AnthropicEvent::ContentBlockDelta {index, delta } => match delta {
@@ -58,12 +77,24 @@ pub fn process_response(
                     AnthropicDelta::ThinkingDelta { thinking } => {
                         yield StreamChunk::ReasoningDelta { delta: thinking };
                     }
+                    AnthropicDelta::SignatureDelta { signature } => {
+                        if let Some(BlockState::Thinking { signature: sig_slot }) = blocks.get_mut(&index) {
+                            *sig_slot = Some(signature);
+                        }
+                    }
+                    AnthropicDelta::Unknown => {}
                 }
                 AnthropicEvent::ContentBlockStop { index } => {
-                    if let Some(BlockState::ToolUse { id, name, args_buf }) = blocks.remove(&index) {
-                        let args = serde_json::from_str(&args_buf)
-                            .unwrap_or(serde_json::json!({}));
-                        yield StreamChunk::ToolCallEnd { id, name, args };
+                    match blocks.remove(&index) {
+                        Some(BlockState::ToolUse { id, name, args_buf }) => {
+                            let args = serde_json::from_str(&args_buf)
+                                .unwrap_or(serde_json::json!({}));
+                            yield StreamChunk::ToolCallEnd { id, name, args };
+                        }
+                        Some(BlockState::Thinking { signature }) => {
+                            yield StreamChunk::ReasoningEnd { signature };
+                        }
+                        Some(BlockState::Text) | Some(BlockState::Unknown) | None => {}
                     }
                 }
                 AnthropicEvent::MessageDelta { delta, usage: u } => {
@@ -101,5 +132,8 @@ pub enum BlockState {
         name: String,
         args_buf: String,
     },
-    Thinking,
+    Thinking {
+        signature: Option<String>,
+    },
+    Unknown,
 }
