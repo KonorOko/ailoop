@@ -24,6 +24,20 @@ pub enum StreamChunk {
     ReasoningDelta {
         delta: String,
     },
+    /// End of a visible reasoning block. Carries the provider signature when
+    /// applicable (Anthropic extended thinking); other providers may emit
+    /// `None`. Engines should pair this with the accumulated reasoning text
+    /// to materialize an `AssistantBlock::Reasoning`.
+    ReasoningEnd {
+        signature: Option<String>,
+    },
+    /// A complete redacted reasoning block delivered atomically. `data` is
+    /// opaque provider material that must be replayed verbatim on the next
+    /// request. Engines should materialize `AssistantBlock::RedactedReasoning`
+    /// directly from this chunk; no deltas are emitted around it.
+    RedactedReasoningBlock {
+        data: String,
+    },
     TurnFinished {
         reason: FinishReason,
         usage: Usage,
