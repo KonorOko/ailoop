@@ -49,8 +49,7 @@ impl CompletionModel for AnthropicModel {
             .header("accept", "text/event-stream");
 
         if !self.client.beta_features.is_empty() {
-            req_builder =
-                req_builder.header("anthropic-beta", self.client.beta_features.join(","));
+            req_builder = req_builder.header("anthropic-beta", self.client.beta_features.join(","));
         }
 
         let response = req_builder.json(&body).send().await?;
