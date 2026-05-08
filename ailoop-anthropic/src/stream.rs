@@ -4,6 +4,7 @@ use crate::events::{AnthropicBlock, AnthropicDelta, AnthropicEvent};
 use ailoop_core::{FinishReason, StreamChunk, Usage};
 use async_stream::try_stream;
 use eventsource_stream::Eventsource;
+use futures::Stream;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use reqwest::Response;
@@ -12,18 +13,37 @@ use std::collections::HashMap;
 pub fn process_response(
     response: Response,
 ) -> BoxStream<'static, Result<StreamChunk, AnthropicError>> {
+    let events = try_stream! {
+        let mut sse = response.bytes_stream().eventsource();
+        while let Some(event) = sse.next().await {
+            let event = event.map_err(AnthropicError::Sse)?;
+            if event.data.is_empty() { continue; }
+            let parsed: AnthropicEvent = serde_json::from_str(&event.data)
+                .map_err(AnthropicError::Json)?;
+            yield parsed;
+        }
+    };
+    process_events(Box::pin(events))
+}
+
+/// State-machine half of the SSE pipeline. Consumes a stream of parsed
+/// `AnthropicEvent`s and emits `StreamChunk`s in wire order. Split from
+/// `process_response` so it can be exercised with synthetic event sequences
+/// in unit tests.
+pub(crate) fn process_events<S>(
+    events: S,
+) -> BoxStream<'static, Result<StreamChunk, AnthropicError>>
+where
+    S: Stream<Item = Result<AnthropicEvent, AnthropicError>> + Send + Unpin + 'static,
+{
     let stream = try_stream! {
+        let mut events = events;
         let mut blocks: HashMap<u32, BlockState> = HashMap::new();
         let mut final_stop = FinishReason::EndTurn;
         let mut usage = Usage::default();
 
-        let mut events = response.bytes_stream().eventsource();
-
         while let Some(event) = events.next().await {
-            let event = event.map_err(AnthropicError::Sse)?;
-            if event.data.is_empty() {continue;}
-
-            let parsed: AnthropicEvent = serde_json::from_str(&event.data).map_err(AnthropicError::Json)?;
+            let parsed = event?;
 
             match parsed {
                 AnthropicEvent::MessageStart {message} => {
