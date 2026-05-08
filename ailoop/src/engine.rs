@@ -227,3 +227,154 @@ async fn run_tool_chain(
     }
     ToolDecision::Continue
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ailoop_core::{ChatRequest, ToolDefinition};
+    use ailoop_tools::registry::ToolDyn;
+    use serde_json::json;
+    use std::collections::VecDeque;
+    use std::convert::Infallible;
+    use std::sync::Mutex;
+
+    /// Replays a queue of pre-canned chunk lists. Each `chat_stream` call
+    /// pops the next list. Empty queue yields an empty stream — that's a
+    /// fine terminator for tests that don't expect another turn.
+    struct ScriptedModel {
+        scripts: Mutex<VecDeque<Vec<StreamChunk>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CompletionModel for ScriptedModel {
+        type Error = Infallible;
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        fn model(&self) -> &str {
+            "scripted"
+        }
+        async fn chat_stream(
+            &self,
+            _: ChatRequest,
+        ) -> Result<BoxStream<'static, Result<StreamChunk, Infallible>>, Infallible> {
+            let chunks = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
+            Ok(Box::pin(futures::stream::iter(chunks.into_iter().map(Ok))))
+        }
+    }
+
+    struct GetWeather;
+
+    #[async_trait::async_trait]
+    impl ToolDyn for GetWeather {
+        fn name(&self) -> String {
+            "get_weather".into()
+        }
+        fn tool_definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "get_weather".into(),
+                description: "stub".into(),
+                input_schema: json!({"type":"object","properties":{},"required":[]}),
+                tags: vec![],
+            }
+        }
+        async fn call(&self, _: serde_json::Value) -> ToolResultContent {
+            ToolResultContent::Text("sunny".into())
+        }
+    }
+
+    /// Engine-level counterpart to the state-machine test in
+    /// `ailoop-anthropic`: a thinking turn that ends in a tool call must
+    /// land in history as a single assistant message whose blocks are
+    /// `[Reasoning{text, signature}, ToolCall{...}]` in that order.
+    /// Anthropic rejects requests where the order does not match what was
+    /// streamed, so this is load-bearing for tool-use chains.
+    #[tokio::test]
+    async fn assistant_message_preserves_reasoning_then_tool_call_order() {
+        let turn1 = vec![
+            StreamChunk::ReasoningDelta {
+                delta: "thinking ".into(),
+            },
+            StreamChunk::ReasoningDelta {
+                delta: "step.".into(),
+            },
+            StreamChunk::ReasoningEnd {
+                signature: Some("sig-xyz".into()),
+            },
+            StreamChunk::ToolCallStart {
+                id: "toolu_1".into(),
+                name: "get_weather".into(),
+            },
+            StreamChunk::ToolCallEnd {
+                id: "toolu_1".into(),
+                name: "get_weather".into(),
+                args: json!({"location": "SF"}),
+            },
+            StreamChunk::TurnFinished {
+                reason: FinishReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ];
+        // Turn 2 just ends the run; we only care about the assistant
+        // turn that issued the tool call.
+        let turn2 = vec![StreamChunk::TurnFinished {
+            reason: FinishReason::EndTurn,
+            usage: Usage::default(),
+        }];
+
+        let model = ScriptedModel {
+            scripts: Mutex::new(VecDeque::from([turn1, turn2])),
+        };
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(GetWeather)).unwrap();
+
+        let stream = run_chat(
+            &model,
+            vec![Message::user("what's the weather?")],
+            &registry,
+            RunConfig::default(),
+        )
+        .await
+        .expect("run_chat should start");
+
+        let chunks: Vec<_> = stream.collect().await;
+
+        let new_messages = chunks
+            .into_iter()
+            .find_map(|c| match c {
+                Ok(StreamChunk::RunFinished { new_messages, .. }) => Some(new_messages),
+                _ => None,
+            })
+            .expect("run should emit RunFinished");
+
+        let assistant_blocks = new_messages
+            .iter()
+            .find_map(|m| match m {
+                Message::Assistant { blocks } => Some(blocks),
+                _ => None,
+            })
+            .expect("new_messages should contain the assistant turn");
+
+        assert_eq!(
+            assistant_blocks.len(),
+            2,
+            "expected exactly Reasoning + ToolCall, got {assistant_blocks:?}"
+        );
+        match &assistant_blocks[0] {
+            AssistantBlock::Reasoning { text, signature } => {
+                assert_eq!(text, "thinking step.");
+                assert_eq!(signature.as_deref(), Some("sig-xyz"));
+            }
+            other => panic!("expected Reasoning first, got {other:?}"),
+        }
+        match &assistant_blocks[1] {
+            AssistantBlock::ToolCall { id, name, args } => {
+                assert_eq!(id, "toolu_1");
+                assert_eq!(name, "get_weather");
+                assert_eq!(args, &json!({"location": "SF"}));
+            }
+            other => panic!("expected ToolCall second, got {other:?}"),
+        }
+    }
+}
