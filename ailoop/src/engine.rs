@@ -61,7 +61,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
 
             let mut assistant_blocks = Vec::new();
             let mut text_buf = String::new();
-
+            let mut reasoning_buf = String::new();
 
             let mut tool_calls = Vec::new();
 
@@ -94,6 +94,9 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                     StreamChunk::TextDelta { delta } => {
                         text_buf.push_str(delta);
                     },
+                    StreamChunk::ReasoningDelta { delta } => {
+                        reasoning_buf.push_str(delta);
+                    },
                     StreamChunk::ToolCallStart { .. } => {
                         if !text_buf.is_empty() {
                             assistant_blocks.push(AssistantBlock::Text(std::mem::take(&mut text_buf)));
@@ -102,6 +105,26 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                     StreamChunk::ToolCallEnd { id, name, args } => {
                         assistant_blocks.push(AssistantBlock::ToolCall { id: id.clone(), name: name.clone(), args: args.clone() });
                         tool_calls.push((id.clone(), name.clone(), args.clone()))
+                    },
+                    StreamChunk::ReasoningEnd { signature } => {
+                        // Reasoning blocks must keep their original position
+                        // relative to text and tool_use; flush any pending
+                        // text first so order on replay matches the wire.
+                        if !text_buf.is_empty() {
+                            assistant_blocks.push(AssistantBlock::Text(std::mem::take(&mut text_buf)));
+                        }
+                        assistant_blocks.push(AssistantBlock::Reasoning {
+                            text: std::mem::take(&mut reasoning_buf),
+                            signature: signature.clone(),
+                        });
+                    },
+                    StreamChunk::RedactedReasoningBlock { data } => {
+                        if !text_buf.is_empty() {
+                            assistant_blocks.push(AssistantBlock::Text(std::mem::take(&mut text_buf)));
+                        }
+                        assistant_blocks.push(AssistantBlock::RedactedReasoning {
+                            data: data.clone(),
+                        });
                     },
                     StreamChunk::TurnFinished { reason, usage } => {
                         finish_reason = reason.clone();
