@@ -157,3 +157,161 @@ pub enum BlockState {
     },
     Unknown,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::{MessageDeltaPayload, MessageStartPayload, MessageStartUsage, UsageDelta};
+    use futures::stream;
+    use serde_json::json;
+
+    fn ok(event: AnthropicEvent) -> Result<AnthropicEvent, AnthropicError> {
+        Ok(event)
+    }
+
+    async fn run(events: Vec<Result<AnthropicEvent, AnthropicError>>) -> Vec<StreamChunk> {
+        let mut out = Vec::new();
+        let mut s = process_events(stream::iter(events));
+        while let Some(chunk) = s.next().await {
+            out.push(chunk.expect("state machine should not error on this fixture"));
+        }
+        out
+    }
+
+    /// Reproduces the canonical Anthropic stream for an extended-thinking
+    /// turn that ends in a tool call: thinking → signature → tool_use →
+    /// stop. Verifies that the engine sees ReasoningDelta×N + ReasoningEnd
+    /// with the signature, then ToolCallStart, ToolCallArgsDelta×N,
+    /// ToolCallEnd with parsed args, and finally TurnFinished{ToolUse}.
+    #[tokio::test]
+    async fn thinking_then_tool_use_round_trip() {
+        let events = vec![
+            ok(AnthropicEvent::MessageStart {
+                message: MessageStartPayload {
+                    usage: MessageStartUsage {
+                        input_tokens: 12,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                    },
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockStart {
+                index: 0,
+                content_block: AnthropicBlock::Thinking {
+                    thinking: String::new(),
+                    signature: String::new(),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockDelta {
+                index: 0,
+                delta: AnthropicDelta::ThinkingDelta {
+                    thinking: "Let me ".into(),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockDelta {
+                index: 0,
+                delta: AnthropicDelta::ThinkingDelta {
+                    thinking: "check the weather.".into(),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockDelta {
+                index: 0,
+                delta: AnthropicDelta::SignatureDelta {
+                    signature: "sig-xyz".into(),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockStop { index: 0 }),
+            ok(AnthropicEvent::ContentBlockStart {
+                index: 1,
+                content_block: AnthropicBlock::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "get_weather".into(),
+                    input: json!({}),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockDelta {
+                index: 1,
+                delta: AnthropicDelta::InputJsonDelta {
+                    partial_json: "{\"location\":".into(),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockDelta {
+                index: 1,
+                delta: AnthropicDelta::InputJsonDelta {
+                    partial_json: "\"SF\"}".into(),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockStop { index: 1 }),
+            ok(AnthropicEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some("tool_use".into()),
+                    stop_sequence: None,
+                },
+                usage: UsageDelta { output_tokens: 50 },
+            }),
+            ok(AnthropicEvent::MessageStop),
+        ];
+
+        let chunks = run(events).await;
+
+        // Walk the chunks in order. The state machine guarantees:
+        //   thinking deltas → reasoning end (with sig) → tool call lifecycle → turn finished
+        let mut iter = chunks.into_iter();
+
+        match iter.next().expect("reasoning delta 1") {
+            StreamChunk::ReasoningDelta { delta } => assert_eq!(delta, "Let me "),
+            other => panic!("expected ReasoningDelta, got {other:?}"),
+        }
+        match iter.next().expect("reasoning delta 2") {
+            StreamChunk::ReasoningDelta { delta } => assert_eq!(delta, "check the weather."),
+            other => panic!("expected ReasoningDelta, got {other:?}"),
+        }
+        match iter.next().expect("reasoning end") {
+            StreamChunk::ReasoningEnd { signature } => {
+                assert_eq!(signature.as_deref(), Some("sig-xyz"));
+            }
+            other => panic!("expected ReasoningEnd, got {other:?}"),
+        }
+        match iter.next().expect("tool call start") {
+            StreamChunk::ToolCallStart { id, name } => {
+                assert_eq!(id, "toolu_1");
+                assert_eq!(name, "get_weather");
+            }
+            other => panic!("expected ToolCallStart, got {other:?}"),
+        }
+        match iter.next().expect("args delta 1") {
+            StreamChunk::ToolCallArgsDelta { id, delta } => {
+                assert_eq!(id, "toolu_1");
+                assert_eq!(delta, "{\"location\":");
+            }
+            other => panic!("expected ToolCallArgsDelta, got {other:?}"),
+        }
+        match iter.next().expect("args delta 2") {
+            StreamChunk::ToolCallArgsDelta { id, delta } => {
+                assert_eq!(id, "toolu_1");
+                assert_eq!(delta, "\"SF\"}");
+            }
+            other => panic!("expected ToolCallArgsDelta, got {other:?}"),
+        }
+        match iter.next().expect("tool call end") {
+            StreamChunk::ToolCallEnd { id, name, args } => {
+                assert_eq!(id, "toolu_1");
+                assert_eq!(name, "get_weather");
+                assert_eq!(args, json!({"location": "SF"}));
+            }
+            other => panic!("expected ToolCallEnd, got {other:?}"),
+        }
+        match iter.next().expect("turn finished") {
+            StreamChunk::TurnFinished { reason, usage } => {
+                assert!(matches!(reason, FinishReason::ToolUse));
+                assert_eq!(usage.input_tokens, 12);
+                assert_eq!(usage.output_tokens, 50);
+            }
+            other => panic!("expected TurnFinished, got {other:?}"),
+        }
+        assert!(
+            iter.next().is_none(),
+            "no chunks should follow TurnFinished"
+        );
+    }
+}
