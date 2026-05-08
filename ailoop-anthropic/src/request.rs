@@ -91,6 +91,22 @@ fn to_anthropic_assistant_block(block: &AssistantBlock) -> serde_json::Value {
             "name": name,
             "input": args,
         }),
+        AssistantBlock::Reasoning { text, signature } => {
+            // Anthropic requires the signature verbatim when this block lives
+            // in a turn that the next request continues with tool_result.
+            // Default to empty when absent (e.g. block was constructed from a
+            // snapshot or another provider) — the API will validate.
+            let sig = signature.as_deref().unwrap_or("");
+            json!({
+                "type": "thinking",
+                "thinking": text,
+                "signature": sig,
+            })
+        }
+        AssistantBlock::RedactedReasoning { data } => json!({
+            "type": "redacted_thinking",
+            "data": data,
+        }),
     }
 }
 
@@ -105,4 +121,51 @@ fn to_anthropic_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_block_serializes_with_signature() {
+        let block = AssistantBlock::Reasoning {
+            text: "step 1".into(),
+            signature: Some("abc123".into()),
+        };
+        let json = to_anthropic_assistant_block(&block);
+        assert_eq!(
+            json,
+            json!({
+                "type": "thinking",
+                "thinking": "step 1",
+                "signature": "abc123",
+            })
+        );
+    }
+
+    #[test]
+    fn reasoning_block_without_signature_serializes_with_empty_string() {
+        let block = AssistantBlock::Reasoning {
+            text: "step 1".into(),
+            signature: None,
+        };
+        let json = to_anthropic_assistant_block(&block);
+        assert_eq!(json["signature"], json!(""));
+    }
+
+    #[test]
+    fn redacted_reasoning_block_serializes_as_redacted_thinking() {
+        let block = AssistantBlock::RedactedReasoning {
+            data: "opaque-blob".into(),
+        };
+        let json = to_anthropic_assistant_block(&block);
+        assert_eq!(
+            json,
+            json!({
+                "type": "redacted_thinking",
+                "data": "opaque-blob",
+            })
+        );
+    }
 }

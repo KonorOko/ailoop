@@ -31,6 +31,15 @@ pub trait TokenEstimator {
                             + self.estimate_text(name)
                             + self.estimate_text(&args.to_string())
                     }
+                    AssistantBlock::Reasoning { text, signature } => {
+                        total += self.estimate_text(text);
+                        if let Some(sig) = signature {
+                            total += self.estimate_text(sig);
+                        }
+                    }
+                    AssistantBlock::RedactedReasoning { data } => {
+                        total += self.estimate_text(data);
+                    }
                 });
 
                 total
