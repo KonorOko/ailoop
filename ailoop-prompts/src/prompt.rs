@@ -76,6 +76,11 @@ impl Prompt {
         let mut out = String::new();
 
         for section in &self.sections {
+            if let Some(name) = section.name() {
+                out.push_str("## ");
+                out.push_str(name);
+                out.push_str("\n\n");
+            }
             out.push_str(&section.content);
             out.push_str("\n\n");
         }
@@ -85,14 +90,7 @@ impl Prompt {
 
 impl Display for Prompt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut prompt = String::new();
-
-        for section in self.sections.iter() {
-            prompt.push_str(&section.content);
-            prompt.push_str("\n\n");
-        }
-
-        write!(f, "{}", prompt)
+        write!(f, "{}", self.render())
     }
 }
 
@@ -145,5 +143,43 @@ mod tests {
             PromptSection::from_file(test_file.path()).expect("Error reading test 1 file.");
 
         assert_eq!(section.content, "Test 1");
+    }
+
+    #[test]
+    fn render_unnamed_section_has_no_header() {
+        let prompt = Prompt::builder()
+            .section(PromptSection::new("hello"))
+            .build();
+
+        assert_eq!(prompt.render(), "hello\n\n");
+    }
+
+    #[test]
+    fn render_named_section_emits_h2_header() {
+        let prompt = Prompt::builder()
+            .section(PromptSection::with_name("Tone", "Be concise."))
+            .build();
+
+        assert_eq!(prompt.render(), "## Tone\n\nBe concise.\n\n");
+    }
+
+    #[test]
+    fn render_mixes_named_and_unnamed_sections() {
+        let prompt = Prompt::builder()
+            .section(PromptSection::new("preamble"))
+            .section(PromptSection::with_name("Tone", "Be concise."))
+            .build();
+
+        assert_eq!(prompt.render(), "preamble\n\n## Tone\n\nBe concise.\n\n");
+    }
+
+    #[test]
+    fn display_matches_render() {
+        let prompt = Prompt::builder()
+            .section(PromptSection::with_name("Tone", "Be concise."))
+            .section(PromptSection::new("trailing"))
+            .build();
+
+        assert_eq!(format!("{}", prompt), prompt.render());
     }
 }
