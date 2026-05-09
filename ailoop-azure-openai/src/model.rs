@@ -60,6 +60,10 @@ impl CompletionModel for AzureOpenAIChatModel {
             AzureOpenAIAuth::Token(t) => {
                 req_builder = req_builder.header("Authorization", format!("Bearer {t}"));
             }
+            AzureOpenAIAuth::Provider(provider) => {
+                let token = provider.token().await?;
+                req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
+            }
         }
 
         let response = req_builder.json(&body).send().await?;
