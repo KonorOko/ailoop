@@ -3,8 +3,10 @@
 //! `ScriptedModel` is the canonical mock `CompletionModel`: pre-load it
 //! with a queue of "what to return on the Nth turn" entries and the
 //! engine drives it just like a real provider. Each turn entry can be
-//! either a successful list of chunks or a setup-time error (which the
-//! engine will surface through `EngineError::Model`). This is enough to
+//! either a setup-time error (the call itself fails, matching HTTP-level
+//! errors), or a list of per-chunk results — letting tests script
+//! streams that mix `Ok` chunks with an `Err` mid-stream (e.g. an SSE
+//! connection that drops after a few chunks). This is enough to
 //! exercise both the happy path and retryability of a future
 //! `RetryingModel<M>` decorator.
 
@@ -33,10 +35,12 @@ impl std::fmt::Display for ScriptedError {
 
 impl std::error::Error for ScriptedError {}
 
-/// One scripted "turn". `Ok(chunks)` is replayed to the engine on the
-/// next `chat_stream` call. `Err(e)` causes the call itself to fail,
-/// matching an HTTP-level error path.
-pub type ScriptedTurn = Result<Vec<StreamChunk>, ScriptedError>;
+/// One scripted "turn". The outer `Result` distinguishes a setup-time
+/// failure (the `chat_stream` call itself returns `Err`) from a stream
+/// that was successfully opened. The inner `Vec<Result<_, _>>` is the
+/// sequence of chunks the stream will yield, allowing an `Err` to
+/// appear mid-stream after some `Ok` chunks have been delivered.
+pub type ScriptedTurn = Result<Vec<Result<StreamChunk, ScriptedError>>, ScriptedError>;
 
 /// Replays a queue of pre-canned turns. Each `chat_stream` call pops
 /// the next entry. An exhausted queue yields an empty stream — that
@@ -49,13 +53,18 @@ pub struct ScriptedModel {
 }
 
 impl ScriptedModel {
-    /// Build with a sequence of successful turns. Equivalent to
-    /// `with_turns(turns.into_iter().map(Ok))`.
+    /// Build with a sequence of successful turns where every chunk is
+    /// an `Ok`. Equivalent to wrapping each chunk in `Ok` and each turn
+    /// in `Ok`, then forwarding to [`with_turns`](Self::with_turns).
     pub fn new<I>(turns: I) -> Self
     where
         I: IntoIterator<Item = Vec<StreamChunk>>,
     {
-        Self::with_turns(turns.into_iter().map(Ok))
+        Self::with_turns(
+            turns
+                .into_iter()
+                .map(|chunks| Ok(chunks.into_iter().map(Ok).collect())),
+        )
     }
 
     /// Build with explicit `Result` turns so callers can mix successful
@@ -107,7 +116,7 @@ impl CompletionModel for ScriptedModel {
         match next {
             None => Ok(Box::pin(stream::empty())),
             Some(Err(e)) => Err(e),
-            Some(Ok(chunks)) => Ok(Box::pin(stream::iter(chunks.into_iter().map(Ok)))),
+            Some(Ok(chunks)) => Ok(Box::pin(stream::iter(chunks))),
         }
     }
 }
@@ -146,6 +155,39 @@ mod tests {
             .unwrap();
         let chunks: Vec<_> = stream.collect().await;
         assert_eq!(chunks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn surfaces_mid_stream_error_after_chunks() {
+        let model = ScriptedModel::with_turns([Ok(vec![
+            Ok(StreamChunk::TextDelta {
+                delta: "partial".into(),
+            }),
+            Err(ScriptedError("connection dropped".into())),
+        ])]);
+
+        let stream = model
+            .chat_stream(ChatRequest {
+                messages: vec![],
+                tools: None,
+                system_prompt: None,
+                max_tokens: 0,
+                additional_params: None,
+                temperature: None,
+                top_p: None,
+                top_k: None,
+                stop_sequences: vec![],
+            })
+            .await
+            .expect("chat_stream should open the stream");
+
+        let chunks: Vec<_> = stream.collect().await;
+        assert_eq!(chunks.len(), 2, "expected one Ok chunk then one Err");
+        assert!(matches!(chunks[0], Ok(StreamChunk::TextDelta { .. })));
+        match &chunks[1] {
+            Err(ScriptedError(msg)) => assert_eq!(msg, "connection dropped"),
+            other => panic!("expected mid-stream Err, got {other:?}"),
+        }
     }
 
     #[tokio::test]
