@@ -39,6 +39,8 @@ indexmap = "2.14.0"
 reqwest = { version = "0.13.3", features = ["json", "stream"] }
 eventsource-stream = "0.2.3"
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
 uuid = { version = "1", features = ["v4"] }
 dotenvy = "0.15.7"
 tempfile = "3"

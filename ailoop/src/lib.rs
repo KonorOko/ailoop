@@ -2,6 +2,8 @@ mod conversation;
 mod engine;
 mod errors;
 mod middleware;
+#[cfg(feature = "tracing")]
+mod tracing_middleware;
 
 pub use ailoop_context::ContextManager;
 pub use ailoop_core::{
@@ -14,3 +16,5 @@ pub use ailoop_tools::{Tool, ToolRegistry};
 pub use conversation::Conversation;
 pub use engine::run_chat;
 pub use middleware::ApprovalMiddleware;
+#[cfg(feature = "tracing")]
+pub use tracing_middleware::TracingMiddleware;

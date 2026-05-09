@@ -31,7 +31,12 @@ pub trait ChatMiddleware: Send + Sync {
         new_messages: &[Message],
     ) {
     }
-    async fn on_run_error(&self, run_id: &RunId, err: &dyn std::error::Error) {}
+    async fn on_run_error(
+        &self,
+        run_id: &RunId,
+        err: &(dyn std::error::Error + Send + Sync),
+    ) {
+    }
 
     // tools
     async fn on_before_tool_call(
