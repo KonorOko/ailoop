@@ -117,9 +117,23 @@ impl ChatMiddleware for TracingMiddleware {
                     "history compacted",
                 );
             }
-            // RunStarted/StepStarted/StepFinished/RunFinished/ToolResult
-            // are handled in their dedicated hooks where we have richer
-            // context. Avoid double-logging them through `on_chunk`.
+            StreamChunk::StepFinished {
+                run_id,
+                step_id,
+                iteration,
+                ..
+            } => {
+                tracing::debug!(
+                    target: "ailoop.step",
+                    run_id = %run_id,
+                    step_id = %step_id,
+                    iteration = *iteration,
+                    "step finished",
+                );
+            }
+            // RunStarted/StepStarted/RunFinished/ToolResult are handled in
+            // their dedicated hooks where we have richer context. Avoid
+            // double-logging them through `on_chunk`.
             _ => {}
         }
     }
@@ -272,5 +286,59 @@ mod tests {
         assert!(log.contains("run finished"), "missing on_run_finished event");
         assert!(log.contains("history compacted"), "missing HistoryCompacted event");
         assert!(log.contains("strategy=\"truncate\""), "missing strategy field");
+    }
+
+    /// Drives a real `run_chat` with `TracingMiddleware` registered and a
+    /// `ScriptedModel` that completes in a single turn. Asserts the
+    /// engine's `StepFinished` chunk reaches `on_chunk` (no dedicated
+    /// hook covers it) and the middleware logs it.
+    #[tokio::test]
+    async fn run_chat_emits_step_finished_through_subscriber() {
+        use crate::run_chat;
+        use ailoop_core::testing::ScriptedModel;
+        use ailoop_tools::ToolRegistry;
+        use futures::StreamExt;
+
+        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = BufferWriter(buffer.clone());
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .finish();
+
+        let model = ScriptedModel::new([vec![StreamChunk::TurnFinished {
+            reason: FinishReason::EndTurn,
+            usage: Usage::default(),
+        }]]);
+        let registry = ToolRegistry::new();
+        let mw: Arc<dyn ChatMiddleware> = Arc::new(TracingMiddleware::new());
+        let run_id = RunId::new();
+        let config = RunConfig {
+            middlewares: vec![mw],
+            run_id: Some(run_id.clone()),
+            ..RunConfig::default()
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            futures::executor::block_on(async {
+                let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
+                    .await
+                    .expect("run_chat should start");
+                let _: Vec<_> = stream.collect().await;
+            });
+        });
+
+        let log = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains("step finished"),
+            "expected log to contain `step finished`, got:\n{log}"
+        );
+        let run_id_str = run_id.to_string();
+        assert!(
+            log.contains(&run_id_str),
+            "expected step finished log to carry run_id `{run_id_str}`, got:\n{log}"
+        );
     }
 }

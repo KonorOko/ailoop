@@ -39,13 +39,22 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             match mw.on_run_start(&run_id, &messages, &config).await {
                 HookAction::Continue => {},
                 HookAction::Terminate {reason} => {
-                    yield StreamChunk::RunFinished { run_id: run_id.clone(), reason: FinishReason::Aborted(reason), usage: Usage::default(), new_messages: vec![] };
+                    let chunk = StreamChunk::RunFinished {
+                        run_id: run_id.clone(),
+                        reason: FinishReason::Aborted(reason),
+                        usage: Usage::default(),
+                        new_messages: vec![],
+                    };
+                    for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                    yield chunk;
                     return;
                 }
             };
         }
 
-        yield StreamChunk::RunStarted { run_id: run_id.clone() };
+        let chunk = StreamChunk::RunStarted { run_id: run_id.clone() };
+        for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+        yield chunk;
 
         let mut iteration = 0;
         let mut current_messages = messages.to_vec();
@@ -59,7 +68,9 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             }
 
             let step_id = StepId::new();
-            yield StreamChunk::StepStarted { run_id: run_id.clone(), step_id: step_id.clone(), iteration };
+            let chunk = StreamChunk::StepStarted { run_id: run_id.clone(), step_id: step_id.clone(), iteration };
+            for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+            yield chunk;
 
             let mut assistant_blocks = Vec::new();
             let mut text_buf = String::new();
@@ -167,7 +178,14 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                         ToolResultContent::Error(format!("Tool skipped: {reason}"))
                     },
                     ToolDecision::Terminate {reason} => {
-                        yield StreamChunk::RunFinished { run_id: run_id.clone(), reason: FinishReason::Aborted(reason), usage: usage_run, new_messages: current_messages.split_off(messages.len()) };
+                        let chunk = StreamChunk::RunFinished {
+                            run_id: run_id.clone(),
+                            reason: FinishReason::Aborted(reason),
+                            usage: usage_run,
+                            new_messages: current_messages.split_off(messages.len()),
+                        };
+                        for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                        yield chunk;
                         return;
                     }
                 };
@@ -176,12 +194,14 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                     mw.on_after_tool_call(&run_id, &step_id, &name, &args, &content).await;
                 }
 
-                yield StreamChunk::ToolResult {
+                let chunk = StreamChunk::ToolResult {
                     run_id: run_id.clone(),
                     step_id: step_id.clone(),
                     call_id: id.clone(),
-                    content: content.clone()
+                    content: content.clone(),
                 };
+                for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                yield chunk;
 
                 tools_result.push(UserBlock::ToolResult { call_id: id, content });
             }
@@ -190,12 +210,14 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                 current_messages.push(Message::User { blocks: tools_result });
             }
 
-            yield StreamChunk::StepFinished {
+            let chunk = StreamChunk::StepFinished {
                 run_id: run_id.clone(),
                 step_id: step_id.clone(),
                 iteration,
                 new_messages_so_far: Arc::new(current_messages[messages.len()..].to_vec()),
             };
+            for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+            yield chunk;
 
             if !matches!(finish_reason, FinishReason::ToolUse) {
                 break;
@@ -210,12 +232,14 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             mw.on_run_finished(&run_id, &finish_reason, &usage_run, &new_messages).await;
         }
 
-        yield StreamChunk::RunFinished {
+        let chunk = StreamChunk::RunFinished {
             run_id: run_id.clone(),
             reason: finish_reason,
             usage: usage_run,
             new_messages,
         };
+        for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+        yield chunk;
     };
 
     Ok(Box::pin(stream))

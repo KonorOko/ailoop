@@ -62,12 +62,21 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
         .await?;
 
         let prelude: BoxStream<'_, Result<StreamChunk, EngineError<M::Error>>> = match report {
-            Some(r) => Box::pin(futures::stream::iter([Ok(StreamChunk::HistoryCompacted {
-                run_id,
-                before_count: r.before,
-                after_count: r.after,
-                strategy: r.strategy,
-            })])),
+            Some(r) => {
+                let chunk = StreamChunk::HistoryCompacted {
+                    run_id,
+                    before_count: r.before,
+                    after_count: r.after,
+                    strategy: r.strategy,
+                };
+                let middlewares = self.middlewares.clone();
+                Box::pin(futures::stream::once(async move {
+                    for mw in &middlewares {
+                        mw.on_chunk(&chunk).await;
+                    }
+                    Ok(chunk)
+                }))
+            }
             None => Box::pin(futures::stream::empty()),
         };
 
@@ -513,6 +522,82 @@ mod tests {
             counter.load(Ordering::SeqCst),
             0,
             "filtered-out tool should not be in approval gate"
+        );
+    }
+
+    /// `Conversation::stream` runs registered middlewares' `on_chunk`
+    /// against the `HistoryCompacted` prelude before yielding it, so a
+    /// subscriber sees the event under a real run (not just when a test
+    /// pokes `on_chunk` directly). Companion to the engine-side test
+    /// that asserts `StepFinished` reaches `on_chunk`.
+    #[cfg(feature = "tracing")]
+    #[tokio::test]
+    async fn stream_logs_history_compacted_through_subscriber() {
+        use crate::TracingMiddleware;
+        use ailoop_core::testing::ScriptedModel;
+        use ailoop_core::{FinishReason, Usage};
+        use std::io;
+        use std::sync::Mutex;
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone)]
+        struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for BufferWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for BufferWriter {
+            type Writer = BufferWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = BufferWriter(buffer.clone());
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .finish();
+
+        let model = ScriptedModel::new([vec![StreamChunk::TurnFinished {
+            reason: FinishReason::EndTurn,
+            usage: Usage::default(),
+        }]]);
+
+        let mut chat = Conversation::builder(model)
+            .middleware(Arc::new(TracingMiddleware::new()))
+            .build()
+            .expect("builder should succeed");
+
+        // Pre-seed enough history to overflow `max_tokens=460` (CharEstimator
+        // = len()/4) so `compact_if_needed` fires on `stream`.
+        let big = "x".repeat(200);
+        for _ in 0..15 {
+            chat.history.add_message(Message::user(big.clone()));
+            chat.history.add_message(Message::assistant_text(big.clone()));
+        }
+
+        tracing::subscriber::with_default(subscriber, || {
+            futures::executor::block_on(async {
+                let mut stream = chat.stream("trigger run").await.expect("stream should start");
+                while (stream.next().await).is_some() {}
+            });
+        });
+
+        let log = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains("history compacted"),
+            "expected log to contain `history compacted`, got:\n{log}"
         );
     }
 
