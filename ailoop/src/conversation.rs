@@ -1,11 +1,12 @@
 use ailoop_context::ContextManager;
 use ailoop_core::{
-    AssistantBlock, ChatMiddleware, CompletionModel, FinishReason, Message, RunConfig, RunId,
-    StreamChunk, ToolTag, Usage,
+    AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, Message, RunConfig,
+    RunId, StreamChunk, ToolChoice, ToolTag, Usage,
 };
 use ailoop_prompts::{Prompt, PromptSection};
 use ailoop_tools::{ToolRegistry, registry::ToolDyn};
 use futures::{Stream, StreamExt, stream::BoxStream};
+use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -15,7 +16,10 @@ use std::{
 
 use crate::{
     errors::{BuildError, EngineError},
-    middleware::{ApprovalCallback, ApprovalMiddleware, SystemPromptMiddleware, wrap_callback},
+    middleware::{
+        ApprovalCallback, ApprovalMiddleware, RequestDefaults, RequestDefaultsMiddleware,
+        SystemPromptMiddleware, wrap_callback,
+    },
     run_chat,
 };
 
@@ -200,6 +204,7 @@ pub struct ConversationBuilder<M: CompletionModel> {
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
     capabilities: Option<Vec<ToolTag>>,
     approval: Option<ApprovalSpec>,
+    request_defaults: RequestDefaults,
     errors: Vec<BuildError>,
 }
 
@@ -219,6 +224,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             middlewares: vec![],
             capabilities: None,
             approval: None,
+            request_defaults: RequestDefaults::default(),
             errors: vec![],
         }
     }
@@ -335,12 +341,106 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
+    /// Default `temperature` applied to every [`ChatRequest`] in this
+    /// conversation. Set as a floor: a user-supplied [`ChatMiddleware`]
+    /// can still override it from `on_chat_request`. Successive calls
+    /// overwrite the previous value.
+    pub fn temperature(mut self, t: f32) -> Self {
+        self.request_defaults.temperature = Some(t);
+        self
+    }
+
+    /// Default `top_p` applied to every [`ChatRequest`]. See
+    /// [`Self::temperature`] for precedence rules.
+    pub fn top_p(mut self, p: f32) -> Self {
+        self.request_defaults.top_p = Some(p);
+        self
+    }
+
+    /// Default `top_k` applied to every [`ChatRequest`]. See
+    /// [`Self::temperature`] for precedence rules.
+    pub fn top_k(mut self, k: u32) -> Self {
+        self.request_defaults.top_k = Some(k);
+        self
+    }
+
+    /// Default `stop_sequences` applied to every [`ChatRequest`]. The
+    /// default is only honoured when the request still has an empty
+    /// `stop_sequences` (the engine's initial value); a user middleware
+    /// that populates it earlier wins. Successive calls replace the
+    /// list.
+    pub fn stop_sequences<I, S>(mut self, seqs: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.request_defaults.stop_sequences = seqs.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Default `tool_choice` applied to every [`ChatRequest`]. See
+    /// [`Self::temperature`] for precedence rules.
+    pub fn tool_choice(mut self, choice: ToolChoice) -> Self {
+        self.request_defaults.tool_choice = Some(choice);
+        self
+    }
+
+    /// Default `disable_parallel_tool_use` applied to every
+    /// [`ChatRequest`]. See [`Self::temperature`] for precedence rules.
+    pub fn disable_parallel_tool_use(mut self, v: bool) -> Self {
+        self.request_defaults.disable_parallel_tool_use = Some(v);
+        self
+    }
+
+    /// Default `max_tokens` applied to every [`ChatRequest`]. Unlike
+    /// the `Option`-typed controls, this clobbers the engine's
+    /// `RunConfig::max_tokens` because `ChatRequest::max_tokens` is a
+    /// non-optional `u32`. User middlewares running after this still
+    /// win.
+    pub fn max_tokens(mut self, n: u32) -> Self {
+        self.request_defaults.max_tokens = Some(n);
+        self
+    }
+
+    /// Default `additional_params` applied to every [`ChatRequest`].
+    /// Useful for provider-specific knobs that don't yet have a typed
+    /// surface (e.g. Anthropic `thinking`). See [`Self::temperature`]
+    /// for precedence rules.
+    pub fn additional_params(mut self, v: Value) -> Self {
+        self.request_defaults.additional_params = Some(v);
+        self
+    }
+
+    /// Escape hatch for fields not covered by the dedicated builder
+    /// methods. The closure runs *after* the per-field defaults (so it
+    /// can layer on top of them) and *before* any user-supplied
+    /// middleware (so user middlewares still win unconditionally).
+    /// Successive calls overwrite the previous closure.
+    pub fn request_defaults<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&mut ChatRequest) + Send + Sync + 'static,
+    {
+        self.request_defaults.overlay = Some(Arc::new(f));
+        self
+    }
+
     pub fn build(self) -> Result<Conversation<M>, BuildError> {
         if let Some(first) = self.errors.into_iter().next() {
             return Err(first);
         }
 
-        let mut middlewares = self.middlewares;
+        let mut middlewares: Vec<Arc<dyn ChatMiddleware>> = Vec::new();
+
+        // Internal: applies builder-supplied per-request defaults at
+        // the head of the chain, so user middlewares run after and can
+        // override unconditionally. Skipped when no defaults are set.
+        if self.request_defaults.has_overrides() {
+            middlewares.push(Arc::new(RequestDefaultsMiddleware {
+                defaults: self.request_defaults,
+            }));
+        }
+
+        middlewares.extend(self.middlewares);
 
         let sp_mw = SystemPromptMiddleware {
             base: self.prompt,
@@ -756,5 +856,188 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    // ---- request_defaults / per-request controls ----
+    //
+    // These exercise the builder shortcuts (`temperature`, `top_p`,
+    // `top_k`, `stop_sequences`, `tool_choice`,
+    // `disable_parallel_tool_use`, `max_tokens`, `additional_params`)
+    // and the `request_defaults` closure escape hatch. The shape is the
+    // same in each test: drive a one-turn `ScriptedModel` through
+    // `Conversation::run`, with a `RecordingMiddleware` registered last
+    // so it captures the final `ChatRequest` after every other
+    // middleware has run.
+
+    use ailoop_core::testing::ScriptedModel;
+    use ailoop_core::{FinishReason, RunId, StepId, ToolChoice, Usage};
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Recorded {
+        temperature: Option<f32>,
+        top_p: Option<f32>,
+        top_k: Option<u32>,
+        stop_sequences: Vec<String>,
+        tool_choice: Option<ToolChoice>,
+        disable_parallel_tool_use: Option<bool>,
+        max_tokens: u32,
+        additional_params: Option<serde_json::Value>,
+    }
+
+    struct RecordingMiddleware {
+        out: Arc<Mutex<Option<Recorded>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChatMiddleware for RecordingMiddleware {
+        async fn on_chat_request(
+            &self,
+            _run_id: &RunId,
+            _step_id: &StepId,
+            req: &mut ChatRequest,
+        ) {
+            *self.out.lock().unwrap() = Some(Recorded {
+                temperature: req.temperature,
+                top_p: req.top_p,
+                top_k: req.top_k,
+                stop_sequences: req.stop_sequences.clone(),
+                tool_choice: req.tool_choice.clone(),
+                disable_parallel_tool_use: req.disable_parallel_tool_use,
+                max_tokens: req.max_tokens,
+                additional_params: req.additional_params.clone(),
+            });
+        }
+    }
+
+    fn one_turn_model() -> ScriptedModel {
+        ScriptedModel::new([vec![StreamChunk::TurnFinished {
+            reason: FinishReason::EndTurn,
+            usage: Usage::default(),
+            service_tier: None,
+        }]])
+    }
+
+    /// Per-field builder methods land on the outgoing `ChatRequest`.
+    #[tokio::test]
+    async fn builder_per_field_defaults_reach_chat_request() {
+        let captured = Arc::new(Mutex::new(None));
+        let mut chat = Conversation::builder(one_turn_model())
+            .temperature(0.7)
+            .top_p(0.9)
+            .top_k(40)
+            .stop_sequences(["STOP", "END"])
+            .tool_choice(ToolChoice::Any)
+            .disable_parallel_tool_use(true)
+            .max_tokens(1234)
+            .additional_params(json!({"thinking": {"type": "enabled"}}))
+            .middleware(Arc::new(RecordingMiddleware {
+                out: captured.clone(),
+            }))
+            .build()
+            .expect("builder should succeed");
+
+        chat.run("hi").await.expect("run should succeed");
+
+        let rec = captured.lock().unwrap().clone().expect("recorded");
+        assert_eq!(rec.temperature, Some(0.7));
+        assert_eq!(rec.top_p, Some(0.9));
+        assert_eq!(rec.top_k, Some(40));
+        assert_eq!(rec.stop_sequences, vec!["STOP".to_string(), "END".into()]);
+        assert_eq!(rec.tool_choice, Some(ToolChoice::Any));
+        assert_eq!(rec.disable_parallel_tool_use, Some(true));
+        assert_eq!(rec.max_tokens, 1234);
+        assert_eq!(
+            rec.additional_params,
+            Some(json!({"thinking": {"type": "enabled"}}))
+        );
+    }
+
+    /// Without any builder defaults the request reflects the engine's
+    /// raw initial state — `Option`s are `None` and `stop_sequences`
+    /// is an empty `Vec` (not unset). The internal middleware is also
+    /// not inserted in this case.
+    #[tokio::test]
+    async fn builder_with_no_defaults_leaves_request_pristine() {
+        let captured = Arc::new(Mutex::new(None));
+        let mut chat = Conversation::builder(one_turn_model())
+            .middleware(Arc::new(RecordingMiddleware {
+                out: captured.clone(),
+            }))
+            .build()
+            .expect("builder should succeed");
+
+        chat.run("hi").await.expect("run should succeed");
+
+        let rec = captured.lock().unwrap().clone().expect("recorded");
+        assert_eq!(rec.temperature, None);
+        assert_eq!(rec.top_p, None);
+        assert_eq!(rec.top_k, None);
+        assert!(rec.stop_sequences.is_empty());
+        assert_eq!(rec.tool_choice, None);
+        assert_eq!(rec.disable_parallel_tool_use, None);
+        assert_eq!(rec.max_tokens, 4096); // RunConfig::default().max_tokens
+        assert_eq!(rec.additional_params, None);
+    }
+
+    /// User middlewares run *after* the internal `RequestDefaults`
+    /// middleware, so a user override unconditionally wins over a
+    /// builder default.
+    #[tokio::test]
+    async fn user_middleware_override_wins_over_builder_default() {
+        struct Override;
+        #[async_trait::async_trait]
+        impl ChatMiddleware for Override {
+            async fn on_chat_request(
+                &self,
+                _: &RunId,
+                _: &StepId,
+                req: &mut ChatRequest,
+            ) {
+                req.temperature = Some(1.0);
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(None));
+        let mut chat = Conversation::builder(one_turn_model())
+            .temperature(0.7)
+            .middleware(Arc::new(Override))
+            .middleware(Arc::new(RecordingMiddleware {
+                out: captured.clone(),
+            }))
+            .build()
+            .expect("builder should succeed");
+
+        chat.run("hi").await.expect("run should succeed");
+
+        let rec = captured.lock().unwrap().clone().expect("recorded");
+        assert_eq!(
+            rec.temperature,
+            Some(1.0),
+            "user middleware must override the builder default"
+        );
+    }
+
+    /// The `request_defaults(closure)` overlay runs *after* the
+    /// per-field defaults inside the same internal middleware, so it
+    /// can override them. (It still loses to user middlewares.)
+    #[tokio::test]
+    async fn request_defaults_closure_overrides_per_field_defaults() {
+        let captured = Arc::new(Mutex::new(None));
+        let mut chat = Conversation::builder(one_turn_model())
+            .temperature(0.7)
+            .request_defaults(|req| {
+                req.temperature = Some(0.3);
+            })
+            .middleware(Arc::new(RecordingMiddleware {
+                out: captured.clone(),
+            }))
+            .build()
+            .expect("builder should succeed");
+
+        chat.run("hi").await.expect("run should succeed");
+
+        let rec = captured.lock().unwrap().clone().expect("recorded");
+        assert_eq!(rec.temperature, Some(0.3));
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use ailoop_core::{ChatMiddleware, ChatRequest, RunId, StepId, ToolDecision};
+use ailoop_core::{ChatMiddleware, ChatRequest, RunId, StepId, ToolChoice, ToolDecision};
 use futures::future::BoxFuture;
 use serde_json::Value;
 
@@ -26,6 +26,79 @@ impl ChatMiddleware for SystemPromptMiddleware {
         }
 
         req.system_prompt = Some(prompt.render().into());
+    }
+}
+
+pub(crate) type RequestOverlay = Arc<dyn Fn(&mut ChatRequest) + Send + Sync>;
+
+/// Builder-supplied defaults for per-request controls, applied via
+/// [`RequestDefaultsMiddleware`] at the head of the middleware chain.
+#[derive(Default, Clone)]
+pub(crate) struct RequestDefaults {
+    pub(crate) temperature: Option<f32>,
+    pub(crate) top_p: Option<f32>,
+    pub(crate) top_k: Option<u32>,
+    pub(crate) stop_sequences: Vec<String>,
+    pub(crate) tool_choice: Option<ToolChoice>,
+    pub(crate) disable_parallel_tool_use: Option<bool>,
+    pub(crate) max_tokens: Option<u32>,
+    pub(crate) additional_params: Option<Value>,
+    pub(crate) overlay: Option<RequestOverlay>,
+}
+
+impl RequestDefaults {
+    pub(crate) fn has_overrides(&self) -> bool {
+        self.temperature.is_some()
+            || self.top_p.is_some()
+            || self.top_k.is_some()
+            || !self.stop_sequences.is_empty()
+            || self.tool_choice.is_some()
+            || self.disable_parallel_tool_use.is_some()
+            || self.max_tokens.is_some()
+            || self.additional_params.is_some()
+            || self.overlay.is_some()
+    }
+}
+
+/// Internal middleware that applies the [`RequestDefaults`] captured by
+/// `ConversationBuilder` to every outgoing [`ChatRequest`]. Inserted at
+/// the head of the chain so user-supplied middlewares run *after* it
+/// and can override unconditionally — the builder defaults are a floor,
+/// not a ceiling.
+pub(crate) struct RequestDefaultsMiddleware {
+    pub(crate) defaults: RequestDefaults,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for RequestDefaultsMiddleware {
+    async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+        if req.temperature.is_none() {
+            req.temperature = self.defaults.temperature;
+        }
+        if req.top_p.is_none() {
+            req.top_p = self.defaults.top_p;
+        }
+        if req.top_k.is_none() {
+            req.top_k = self.defaults.top_k;
+        }
+        if req.stop_sequences.is_empty() && !self.defaults.stop_sequences.is_empty() {
+            req.stop_sequences = self.defaults.stop_sequences.clone();
+        }
+        if req.tool_choice.is_none() {
+            req.tool_choice = self.defaults.tool_choice.clone();
+        }
+        if req.disable_parallel_tool_use.is_none() {
+            req.disable_parallel_tool_use = self.defaults.disable_parallel_tool_use;
+        }
+        if let Some(mt) = self.defaults.max_tokens {
+            req.max_tokens = mt;
+        }
+        if req.additional_params.is_none() {
+            req.additional_params = self.defaults.additional_params.clone();
+        }
+        if let Some(overlay) = &self.defaults.overlay {
+            overlay(req);
+        }
     }
 }
 
