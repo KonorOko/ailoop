@@ -1,5 +1,8 @@
 use ailoop_context::ContextManager;
-use ailoop_core::{ChatMiddleware, CompletionModel, Message, RunConfig, RunId, StreamChunk, ToolTag};
+use ailoop_core::{
+    AssistantBlock, ChatMiddleware, CompletionModel, FinishReason, Message, RunConfig, RunId,
+    StreamChunk, ToolTag, Usage,
+};
 use ailoop_prompts::{Prompt, PromptSection};
 use ailoop_tools::{ToolRegistry, registry::ToolDyn};
 use futures::{Stream, StreamExt, stream::BoxStream};
@@ -23,9 +26,34 @@ pub struct Conversation<M: CompletionModel> {
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
 }
 
+/// Summary of a completed (or aborted) run, returned by
+/// [`Conversation::run`].
+///
+/// `final_text` concatenates every [`AssistantBlock::Text`] of the last
+/// assistant message in `new_messages` — what most callers think of as
+/// "the answer". It is `None` when the run aborted before the assistant
+/// produced any text, or when the last assistant message contains only
+/// non-text blocks (`ToolCall`, `Reasoning`, `RedactedReasoning`).
+#[derive(Debug)]
+pub struct RunOutcome {
+    pub run_id: RunId,
+    pub finish_reason: FinishReason,
+    pub usage: Usage,
+    pub new_messages: Vec<Message>,
+    pub final_text: Option<String>,
+}
+
 impl<M: CompletionModel + Send + Sync> Conversation<M> {
     pub fn builder(model: M) -> ConversationBuilder<M> {
         ConversationBuilder::new(model)
+    }
+
+    /// Read-only view of the conversation history. Useful for asserting
+    /// in tests and for callers who want to inspect or persist the
+    /// conversation state outside of [`Conversation::run`] /
+    /// [`Conversation::stream`].
+    pub fn history(&self) -> &[Message] {
+        self.history.messages()
     }
 
     /// Names of every tool currently active for this conversation.
@@ -37,6 +65,68 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
             .active_tools()
             .map(|t| t.tool_definition().name)
             .collect()
+    }
+
+    /// Non-streaming convenience for one-question / one-answer flows
+    /// (CLI tools, notebooks, batch evaluation). Drains the underlying
+    /// [`Conversation::stream`] and materialises a [`RunOutcome`]
+    /// summarising the run.
+    ///
+    /// Errors from the model, tools, or context management surface as
+    /// `Err(EngineError)`, exactly as they would on the streaming path.
+    /// Aborted runs (timeout, cancellation, hook/tool `Terminate`) are
+    /// **not** errors — they return `Ok(RunOutcome)` with
+    /// `finish_reason = FinishReason::Aborted(_)`. The caller decides
+    /// whether to treat that as success or failure.
+    ///
+    /// History is extended with the run's `new_messages` exactly once,
+    /// the same way it is on the streaming path.
+    pub async fn run(
+        &mut self,
+        user_input: impl Into<String>,
+    ) -> Result<RunOutcome, EngineError<M::Error>> {
+        let mut stream = self.stream(user_input).await?;
+
+        let mut finished: Option<(RunId, FinishReason, Usage, Vec<Message>)> = None;
+        while let Some(chunk) = stream.next().await {
+            if let StreamChunk::RunFinished {
+                run_id,
+                reason,
+                usage,
+                new_messages,
+            } = chunk?
+            {
+                finished = Some((run_id, reason, usage, new_messages));
+            }
+        }
+
+        let (run_id, finish_reason, usage, new_messages) = finished
+            .expect("engine guarantees a RunFinished chunk before the stream terminates");
+
+        let final_text = new_messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::Assistant { blocks } => Some(blocks),
+                _ => None,
+            })
+            .and_then(|blocks| {
+                let mut buf = String::new();
+                for b in blocks {
+                    if let AssistantBlock::Text(t) = b {
+                        buf.push_str(t);
+                    }
+                }
+                if buf.is_empty() { None } else { Some(buf) }
+            });
+
+        Ok(RunOutcome {
+            run_id,
+            finish_reason,
+            usage,
+            new_messages,
+            final_text,
+        })
     }
 
     pub async fn stream(
