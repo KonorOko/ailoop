@@ -1,5 +1,5 @@
 use ailoop_core::{
-    AssistantBlock, ChatRequest, Message, ToolDefinition, ToolResultContent, UserBlock,
+    AssistantBlock, ChatRequest, Message, ToolChoice, ToolDefinition, ToolResultContent, UserBlock,
 };
 use serde_json::json;
 
@@ -34,6 +34,16 @@ pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
     }
     if !req.stop_sequences.is_empty() {
         body.insert("stop_sequences".into(), json!(req.stop_sequences));
+    }
+
+    // Anthropic carries `disable_parallel_tool_use` *inside* the
+    // tool_choice object, so emitting one without the other still has
+    // to materialise a tool_choice (defaulting to `auto`).
+    if req.tool_choice.is_some() || req.disable_parallel_tool_use.is_some() {
+        body.insert(
+            "tool_choice".into(),
+            to_anthropic_tool_choice(req.tool_choice.as_ref(), req.disable_parallel_tool_use),
+        );
     }
 
     if let Some(extra) = &req.additional_params {
@@ -110,6 +120,32 @@ fn to_anthropic_assistant_block(block: &AssistantBlock) -> serde_json::Value {
     }
 }
 
+fn to_anthropic_tool_choice(
+    choice: Option<&ToolChoice>,
+    disable_parallel: Option<bool>,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    match choice.unwrap_or(&ToolChoice::Auto) {
+        ToolChoice::Auto => {
+            obj.insert("type".into(), json!("auto"));
+        }
+        ToolChoice::Any => {
+            obj.insert("type".into(), json!("any"));
+        }
+        ToolChoice::Tool { name } => {
+            obj.insert("type".into(), json!("tool"));
+            obj.insert("name".into(), json!(name));
+        }
+        ToolChoice::None_ => {
+            obj.insert("type".into(), json!("none"));
+        }
+    }
+    if let Some(flag) = disable_parallel {
+        obj.insert("disable_parallel_tool_use".into(), json!(flag));
+    }
+    serde_json::Value::Object(obj)
+}
+
 fn to_anthropic_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
     tools
         .iter()
@@ -126,6 +162,104 @@ fn to_anthropic_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ailoop_core::ChatRequest;
+
+    fn base_req() -> ChatRequest {
+        ChatRequest {
+            messages: vec![],
+            system_prompt: None,
+            tools: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: vec![],
+            max_tokens: 1024,
+            additional_params: None,
+            tool_choice: None,
+            disable_parallel_tool_use: None,
+        }
+    }
+
+    #[test]
+    fn omits_tool_choice_when_unset() {
+        let body = build_body("claude", &base_req());
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn maps_tool_choice_auto() {
+        let req = ChatRequest {
+            tool_choice: Some(ToolChoice::Auto),
+            ..base_req()
+        };
+        let body = build_body("claude", &req);
+        assert_eq!(body["tool_choice"], json!({ "type": "auto" }));
+    }
+
+    #[test]
+    fn maps_tool_choice_any() {
+        let req = ChatRequest {
+            tool_choice: Some(ToolChoice::Any),
+            ..base_req()
+        };
+        let body = build_body("claude", &req);
+        assert_eq!(body["tool_choice"], json!({ "type": "any" }));
+    }
+
+    #[test]
+    fn maps_tool_choice_specific_tool() {
+        let req = ChatRequest {
+            tool_choice: Some(ToolChoice::Tool {
+                name: "get_weather".into(),
+            }),
+            ..base_req()
+        };
+        let body = build_body("claude", &req);
+        assert_eq!(
+            body["tool_choice"],
+            json!({ "type": "tool", "name": "get_weather" })
+        );
+    }
+
+    #[test]
+    fn maps_tool_choice_none() {
+        let req = ChatRequest {
+            tool_choice: Some(ToolChoice::None_),
+            ..base_req()
+        };
+        let body = build_body("claude", &req);
+        assert_eq!(body["tool_choice"], json!({ "type": "none" }));
+    }
+
+    /// `disable_parallel_tool_use` lives inside `tool_choice` on
+    /// Anthropic, so setting it without an explicit choice must still
+    /// emit a tool_choice object — defaulting to `auto`.
+    #[test]
+    fn disable_parallel_alone_emits_auto_tool_choice_with_flag() {
+        let req = ChatRequest {
+            disable_parallel_tool_use: Some(true),
+            ..base_req()
+        };
+        let body = build_body("claude", &req);
+        assert_eq!(
+            body["tool_choice"],
+            json!({ "type": "auto", "disable_parallel_tool_use": true })
+        );
+    }
+
+    #[test]
+    fn disable_parallel_combines_with_explicit_tool_choice() {
+        let req = ChatRequest {
+            tool_choice: Some(ToolChoice::Any),
+            disable_parallel_tool_use: Some(true),
+            ..base_req()
+        };
+        let body = build_body("claude", &req);
+        assert_eq!(
+            body["tool_choice"],
+            json!({ "type": "any", "disable_parallel_tool_use": true })
+        );
+    }
 
     #[test]
     fn reasoning_block_serializes_with_signature() {
