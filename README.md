@@ -20,15 +20,16 @@ decoupled from any single vendor.
 
 ## Workspace layout
 
-| Crate              | Purpose                                         |
-| ------------------ | ----------------------------------------------- |
-| `ailoop`           | High-level API (`Conversation`, `run_chat`)     |
-| `ailoop-core`      | Message, stream, and provider trait definitions |
-| `ailoop-anthropic` | Anthropic Messages API adapter                  |
-| `ailoop-context`   | Conversation history and context management     |
-| `ailoop-prompts`   | Composable system prompt utilities              |
-| `ailoop-tools`     | Tool registry and tool calling primitives       |
-| `ailoop-derive`    | Derive macros (proc-macro)                      |
+| Crate                 | Purpose                                            |
+| --------------------- | -------------------------------------------------- |
+| `ailoop`              | High-level API (`Conversation`, `run_chat`)        |
+| `ailoop-core`         | Message, stream, and provider trait definitions    |
+| `ailoop-anthropic`    | Anthropic Messages API adapter                     |
+| `ailoop-azure-openai` | Azure OpenAI v1 API adapter (Chat Completions)     |
+| `ailoop-context`      | Conversation history and context management        |
+| `ailoop-prompts`      | Composable system prompt utilities                 |
+| `ailoop-tools`        | Tool registry and tool calling primitives          |
+| `ailoop-derive`       | Derive macros (proc-macro)                         |
 
 ## Quick start
 
@@ -59,8 +60,11 @@ A provider is anything that implements `CompletionClient` and `CompletionModel`
 from `ailoop-core`. Currently shipped:
 
 - **Anthropic** — `ailoop-anthropic`
+- **Azure OpenAI** — `ailoop-azure-openai` (Chat Completions v1; Responses API
+  pending)
 
-Other providers (OpenAI, local models, etc.) are not yet implemented.
+Other providers (OpenAI public, Bedrock, local models, etc.) are not yet
+implemented.
 
 ## License
 
