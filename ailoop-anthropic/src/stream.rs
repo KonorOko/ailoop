@@ -1,4 +1,4 @@
-use crate::errors::AnthropicError;
+use crate::errors::{AnthropicError, ApiErrorKind};
 use crate::events::{AnthropicBlock, AnthropicDelta, AnthropicEvent};
 
 use ailoop_core::{FinishReason, StreamChunk, Usage};
@@ -124,7 +124,10 @@ where
                 AnthropicEvent::MessageStop => {}
                 AnthropicEvent::Ping => { }
                 AnthropicEvent::Error { error } => {
-                    Err(AnthropicError::Provider { error_type: error.error_type, message: error.message })?;
+                    Err(AnthropicError::Provider {
+                        kind: ApiErrorKind::from_error_type(&error.error_type),
+                        message: error.message,
+                    })?;
                 }
             }
         }
@@ -161,7 +164,10 @@ pub enum BlockState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{MessageDeltaPayload, MessageStartPayload, MessageStartUsage, UsageDelta};
+    use crate::events::{
+        AnthropicErrorPayload, MessageDeltaPayload, MessageStartPayload, MessageStartUsage,
+        UsageDelta,
+    };
     use futures::stream;
     use serde_json::json;
 
@@ -313,5 +319,43 @@ mod tests {
             iter.next().is_none(),
             "no chunks should follow TurnFinished"
         );
+    }
+
+    /// Mid-stream `error` events must be classified into `ApiErrorKind`
+    /// so `RetryingModel<M>` can match on `Overloaded` without parsing
+    /// strings — same guarantee the HTTP path provides via `Api { kind }`.
+    #[tokio::test]
+    async fn mid_stream_error_event_is_classified() {
+        let events = vec![
+            ok(AnthropicEvent::MessageStart {
+                message: MessageStartPayload {
+                    usage: MessageStartUsage {
+                        input_tokens: 1,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                    },
+                },
+            }),
+            ok(AnthropicEvent::Error {
+                error: AnthropicErrorPayload {
+                    error_type: "overloaded_error".into(),
+                    message: "busy".into(),
+                },
+            }),
+        ];
+
+        let mut s = process_events(stream::iter(events));
+        let mut last = None;
+        while let Some(chunk) = s.next().await {
+            last = Some(chunk);
+        }
+
+        match last.expect("stream must yield the error") {
+            Err(AnthropicError::Provider { kind, message }) => {
+                assert_eq!(kind, ApiErrorKind::Overloaded);
+                assert_eq!(message, "busy");
+            }
+            other => panic!("expected Provider{{Overloaded, ..}}, got {other:?}"),
+        }
     }
 }

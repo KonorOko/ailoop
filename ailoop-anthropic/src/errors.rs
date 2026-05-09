@@ -69,6 +69,10 @@ pub enum AnthropicError {
     #[error("malformed event payload: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("Anthropic error event: {error_type}: {message}")]
-    Provider { error_type: String, message: String },
+    /// Mid-stream error event delivered over SSE. No HTTP headers are
+    /// available at this layer, so `retry_after` is intentionally absent;
+    /// the typed `kind` lets callers (e.g. `RetryingModel<M>`) match on
+    /// `ApiErrorKind::Overloaded` without parsing strings.
+    #[error("Anthropic error event ({kind:?}): {message}")]
+    Provider { kind: ApiErrorKind, message: String },
 }
