@@ -38,6 +38,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ailoop-azure-openai"
+version = "0.1.0"
+dependencies = [
+ "ailoop-core",
+ "async-stream",
+ "async-trait",
+ "dotenvy",
+ "eventsource-stream",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "ailoop-context"
 version = "0.1.0"
 dependencies = [
