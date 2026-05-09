@@ -92,13 +92,21 @@ impl ChatMiddleware for TracingMiddleware {
                     "tool call end",
                 );
             }
-            StreamChunk::TurnFinished { reason, usage } => {
+            StreamChunk::TurnFinished {
+                reason,
+                usage,
+                service_tier,
+            } => {
                 tracing::debug!(
                     target: "ailoop.chunk",
                     reason = ?reason,
                     input_tokens = usage.input_tokens,
                     output_tokens = usage.output_tokens,
                     cached_input_tokens = usage.cached_input_tokens,
+                    cache_creation_input_tokens = usage.cache_creation_input_tokens,
+                    cache_creation_5m_tokens = usage.cache_creation_5m_tokens,
+                    cache_creation_1h_tokens = usage.cache_creation_1h_tokens,
+                    service_tier = service_tier.as_deref().unwrap_or(""),
                     "turn finished",
                 );
             }
@@ -311,6 +319,7 @@ mod tests {
         let model = ScriptedModel::new([vec![StreamChunk::TurnFinished {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
+            service_tier: None,
         }]]);
         let registry = ToolRegistry::new();
         let mw: Arc<dyn ChatMiddleware> = Arc::new(TracingMiddleware::new());

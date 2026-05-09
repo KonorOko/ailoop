@@ -217,6 +217,7 @@ mod tests {
                 description: "read file from path".into(),
                 input_schema: parameters,
                 tags: vec![],
+                cache_control: None,
             }
         }
     }
@@ -275,6 +276,7 @@ mod tests {
                 description: "tagged".into(),
                 input_schema: serde_json::json!({"type":"object","properties":{},"required":[]}),
                 tags: self.tags.clone(),
+                cache_control: None,
             }
         }
 

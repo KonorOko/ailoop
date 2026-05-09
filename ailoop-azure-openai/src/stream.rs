@@ -136,7 +136,14 @@ where
         }
 
         let reason = map_finish_reason(final_finish.as_deref());
-        yield StreamChunk::TurnFinished { reason, usage };
+        yield StreamChunk::TurnFinished {
+            reason,
+            usage,
+            // Chat Completions does not surface a service tier; leave it
+            // None so middlewares treat the absence the same way they
+            // treat any other Chat Completions deployment.
+            service_tier: None,
+        };
     };
 
     Box::pin(stream)
@@ -195,7 +202,7 @@ mod tests {
             other => panic!("expected TextDelta, got {other:?}"),
         }
         match iter.next().unwrap() {
-            StreamChunk::TurnFinished { reason, usage } => {
+            StreamChunk::TurnFinished { reason, usage, .. } => {
                 assert!(matches!(reason, FinishReason::EndTurn));
                 assert_eq!(usage.input_tokens, 5);
                 assert_eq!(usage.output_tokens, 3);
@@ -252,7 +259,7 @@ mod tests {
             other => panic!("expected ToolCallEnd, got {other:?}"),
         }
         match iter.next().unwrap() {
-            StreamChunk::TurnFinished { reason, usage } => {
+            StreamChunk::TurnFinished { reason, usage, .. } => {
                 assert!(matches!(reason, FinishReason::ToolUse));
                 assert_eq!(usage.input_tokens, 12);
                 assert_eq!(usage.output_tokens, 7);
@@ -422,7 +429,7 @@ mod tests {
 
         let last = chunks.last().expect("non-empty chunks");
         match last {
-            StreamChunk::TurnFinished { reason, usage } => {
+            StreamChunk::TurnFinished { reason, usage, .. } => {
                 assert!(
                     matches!(reason, FinishReason::EndTurn),
                     "expected EndTurn, got {reason:?}"

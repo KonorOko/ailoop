@@ -34,6 +34,7 @@ async fn run_returns_final_text_for_text_only_turn() {
                 output_tokens: 7,
                 ..Default::default()
             },
+            service_tier: None,
         },
     ]]);
 
@@ -52,7 +53,7 @@ async fn run_returns_final_text_for_text_only_turn() {
             Message::Assistant { blocks } => {
                 let mut s = String::new();
                 for b in blocks {
-                    if let AssistantBlock::Text(t) = b {
+                    if let AssistantBlock::Text { text: t, .. } = b {
                         s.push_str(t);
                     }
                 }
@@ -81,6 +82,7 @@ async fn run_final_text_reflects_last_assistant_turn_only() {
         StreamChunk::TurnFinished {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
+            service_tier: None,
         },
     ];
     let turn2 = vec![
@@ -90,6 +92,7 @@ async fn run_final_text_reflects_last_assistant_turn_only() {
         StreamChunk::TurnFinished {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
+            service_tier: None,
         },
     ];
     let model = ScriptedModel::new([turn1, turn2]);
@@ -106,6 +109,7 @@ async fn run_final_text_reflects_last_assistant_turn_only() {
                 description: "stub".into(),
                 input_schema: json!({"type":"object","properties":{},"required":[]}),
                 tags: vec![ToolTag::ReadOnly],
+                cache_control: None,
             }
         }
         async fn call(&self, _: Value) -> ToolResultContent {
@@ -220,6 +224,7 @@ async fn run_drains_history_compacted_prelude_without_clobbering_outcome() {
         StreamChunk::TurnFinished {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
+            service_tier: None,
         },
     ]]);
 
@@ -252,6 +257,7 @@ async fn run_extends_history_exactly_once_per_call() {
             StreamChunk::TurnFinished {
                 reason: FinishReason::EndTurn,
                 usage: Usage::default(),
+                service_tier: None,
             },
         ],
         vec![
@@ -261,6 +267,7 @@ async fn run_extends_history_exactly_once_per_call() {
             StreamChunk::TurnFinished {
                 reason: FinishReason::EndTurn,
                 usage: Usage::default(),
+                service_tier: None,
             },
         ],
     ]);

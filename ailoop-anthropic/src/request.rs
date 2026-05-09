@@ -1,7 +1,8 @@
 use ailoop_core::{
-    AssistantBlock, ChatRequest, Message, ToolChoice, ToolDefinition, ToolResultContent, UserBlock,
+    AssistantBlock, ChatRequest, Message, SystemPrompt, ToolChoice, ToolDefinition,
+    ToolResultContent, UserBlock,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
 pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
     let mut body = serde_json::Map::new();
@@ -14,7 +15,7 @@ pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
     );
 
     if let Some(system) = &req.system_prompt {
-        body.insert("system".into(), json!(system));
+        body.insert("system".into(), to_anthropic_system(system));
     }
 
     if let Some(tools) = &req.tools {
@@ -57,6 +58,14 @@ pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
     serde_json::Value::Object(body)
 }
 
+fn to_anthropic_system(prompt: &SystemPrompt) -> Value {
+    // Wire emission of per-block `cache_control` lands with the
+    // follow-up commit; for now we flatten any structured prompt to a
+    // single string so the request stays wire-compatible with the
+    // pre-caching shape.
+    json!(prompt.as_text())
+}
+
 fn to_anthropic_messages(messages: &[Message]) -> Vec<serde_json::Value> {
     messages.iter().map(to_anthropic_message).collect()
 }
@@ -76,8 +85,10 @@ fn to_anthropic_message(message: &Message) -> serde_json::Value {
 
 fn to_anthropic_user_block(block: &UserBlock) -> serde_json::Value {
     match block {
-        UserBlock::Text(text) => json!({ "type": "text", "text": text }),
-        UserBlock::ToolResult { call_id, content } => {
+        UserBlock::Text { text, .. } => json!({ "type": "text", "text": text }),
+        UserBlock::ToolResult {
+            call_id, content, ..
+        } => {
             let (text, is_error) = match content {
                 ToolResultContent::Text(t) => (t.as_str(), false),
                 ToolResultContent::Error(e) => (e.as_str(), true),
@@ -89,13 +100,16 @@ fn to_anthropic_user_block(block: &UserBlock) -> serde_json::Value {
                 "is_error": is_error,
             })
         }
+        // UserBlock is `#[non_exhaustive]`; future variants are dropped
+        // until the adapter learns to translate them.
+        _ => Value::Null,
     }
 }
 
 fn to_anthropic_assistant_block(block: &AssistantBlock) -> serde_json::Value {
     match block {
-        AssistantBlock::Text(text) => json!({ "type": "text", "text": text }),
-        AssistantBlock::ToolCall { id, name, args } => json!({
+        AssistantBlock::Text { text, .. } => json!({ "type": "text", "text": text }),
+        AssistantBlock::ToolCall { id, name, args, .. } => json!({
             "type": "tool_use",
             "id": id,
             "name": name,
@@ -117,6 +131,9 @@ fn to_anthropic_assistant_block(block: &AssistantBlock) -> serde_json::Value {
             "type": "redacted_thinking",
             "data": data,
         }),
+        // AssistantBlock is `#[non_exhaustive]`; future variants are
+        // dropped until the adapter learns to translate them.
+        _ => Value::Null,
     }
 }
 
@@ -138,6 +155,11 @@ fn to_anthropic_tool_choice(
         }
         ToolChoice::None_ => {
             obj.insert("type".into(), json!("none"));
+        }
+        // ToolChoice is `#[non_exhaustive]`; future variants degrade to
+        // `auto` so the request does not error out at adapter level.
+        _ => {
+            obj.insert("type".into(), json!("auto"));
         }
     }
     if let Some(flag) = disable_parallel {

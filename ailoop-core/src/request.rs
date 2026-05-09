@@ -1,12 +1,12 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::Message;
+use crate::{CacheControl, Message, SystemPrompt};
 
 #[derive(Clone)]
 pub struct ChatRequest {
     pub messages: Vec<Message>,
-    pub system_prompt: Option<String>,
+    pub system_prompt: Option<SystemPrompt>,
     pub tools: Option<Vec<ToolDefinition>>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -32,6 +32,7 @@ pub struct ChatRequest {
 /// Chat Completions adapter translates `Any` → `"required"` and
 /// `None_` → `"none"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ToolChoice {
     /// Model decides whether to call a tool. Provider default.
     Auto,
@@ -51,6 +52,11 @@ pub struct ToolDefinition {
     pub description: String,
     pub input_schema: serde_json::Value,
     pub tags: Vec<ToolTag>,
+    /// Cache breakpoint for this tool entry on providers that support
+    /// per-tool prompt caching (Anthropic). Adapters without per-tool
+    /// caching ignore the field.
+    #[serde(skip)]
+    pub cache_control: Option<CacheControl>,
 }
 
 impl ToolDefinition {
@@ -65,11 +71,18 @@ impl ToolDefinition {
             description: description.into(),
             input_schema,
             tags,
+            cache_control: None,
         }
+    }
+
+    pub fn with_cache_control(mut self, cache_control: CacheControl) -> Self {
+        self.cache_control = Some(cache_control);
+        self
     }
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ToolTag {
     Destructive,
     ReadOnly,

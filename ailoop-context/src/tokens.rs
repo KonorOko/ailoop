@@ -8,8 +8,10 @@ pub trait TokenEstimator {
             Message::User { blocks } => {
                 let mut total = 0;
                 blocks.iter().for_each(|block| match block {
-                    UserBlock::Text(text) => total += self.estimate_text(text),
-                    UserBlock::ToolResult { call_id, content } => match content {
+                    UserBlock::Text { text, .. } => total += self.estimate_text(text),
+                    UserBlock::ToolResult {
+                        call_id, content, ..
+                    } => match content {
                         ToolResultContent::Error(error) => {
                             total += self.estimate_text(call_id) + self.estimate_text(error)
                         }
@@ -17,6 +19,7 @@ pub trait TokenEstimator {
                             total += self.estimate_text(call_id) + self.estimate_text(text)
                         }
                     },
+                    _ => {}
                 });
 
                 total
@@ -25,8 +28,8 @@ pub trait TokenEstimator {
             Message::Assistant { blocks } => {
                 let mut total = 0;
                 blocks.iter().for_each(|block| match block {
-                    AssistantBlock::Text(text) => total += self.estimate_text(text),
-                    AssistantBlock::ToolCall { id, name, args } => {
+                    AssistantBlock::Text { text, .. } => total += self.estimate_text(text),
+                    AssistantBlock::ToolCall { id, name, args, .. } => {
                         total += self.estimate_text(id)
                             + self.estimate_text(name)
                             + self.estimate_text(&args.to_string())
@@ -40,6 +43,7 @@ pub trait TokenEstimator {
                     AssistantBlock::RedactedReasoning { data } => {
                         total += self.estimate_text(data);
                     }
+                    _ => {}
                 });
 
                 total

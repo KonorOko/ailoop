@@ -135,6 +135,7 @@ impl ToolDyn for GetWeather {
             description: "stub".into(),
             input_schema: json!({"type":"object","properties":{},"required":[]}),
             tags: vec![],
+            cache_control: None,
         }
     }
     async fn call(&self, _: Value) -> ToolResultContent {
@@ -164,6 +165,7 @@ async fn engine_invokes_middleware_hooks_in_order() {
         StreamChunk::TurnFinished {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
+            service_tier: None,
         },
     ];
     let turn2 = vec![
@@ -173,6 +175,7 @@ async fn engine_invokes_middleware_hooks_in_order() {
         StreamChunk::TurnFinished {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
+            service_tier: None,
         },
     ];
 

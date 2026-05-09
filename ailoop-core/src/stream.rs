@@ -41,6 +41,11 @@ pub enum StreamChunk {
     TurnFinished {
         reason: FinishReason,
         usage: Usage,
+        /// Provider-reported service tier for the turn (Anthropic:
+        /// `"standard"` / `"priority"` / `"batch"`). `None` when the
+        /// provider does not surface one. Per-turn rather than
+        /// aggregated because it is a categorical label, not a counter.
+        service_tier: Option<String>,
     },
 
     // Extend
@@ -97,7 +102,18 @@ pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cached_input_tokens: u32,
+    /// Total tokens written to a cache during this turn. When the
+    /// provider reports a TTL breakdown (Anthropic), this equals the sum
+    /// of [`Self::cache_creation_5m_tokens`] + [`Self::cache_creation_1h_tokens`].
+    /// When only the legacy flat field is reported, the breakdown stays
+    /// at zero and only this total is populated.
     pub cache_creation_input_tokens: u32,
+    /// Cache writes with a 5-minute TTL (Anthropic ephemeral default).
+    /// Zero when the provider does not surface a TTL breakdown.
+    pub cache_creation_5m_tokens: u32,
+    /// Cache writes with a 1-hour TTL (Anthropic explicit ttl="1h").
+    /// Zero when the provider does not surface a TTL breakdown.
+    pub cache_creation_1h_tokens: u32,
 }
 
 impl Add for Usage {
@@ -110,6 +126,10 @@ impl Add for Usage {
             cached_input_tokens: self.cached_input_tokens + other.cached_input_tokens,
             cache_creation_input_tokens: self.cache_creation_input_tokens
                 + other.cache_creation_input_tokens,
+            cache_creation_5m_tokens: self.cache_creation_5m_tokens
+                + other.cache_creation_5m_tokens,
+            cache_creation_1h_tokens: self.cache_creation_1h_tokens
+                + other.cache_creation_1h_tokens,
         }
     }
 }
@@ -120,5 +140,7 @@ impl std::ops::AddAssign for Usage {
         self.output_tokens += other.output_tokens;
         self.cached_input_tokens += other.cached_input_tokens;
         self.cache_creation_input_tokens += other.cache_creation_input_tokens;
+        self.cache_creation_5m_tokens += other.cache_creation_5m_tokens;
+        self.cache_creation_1h_tokens += other.cache_creation_1h_tokens;
     }
 }

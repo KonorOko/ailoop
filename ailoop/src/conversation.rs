@@ -122,7 +122,7 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
             .and_then(|blocks| {
                 let mut buf = String::new();
                 for b in blocks {
-                    if let AssistantBlock::Text(t) = b {
+                    if let AssistantBlock::Text { text: t, .. } = b {
                         buf.push_str(t);
                     }
                 }
@@ -452,6 +452,7 @@ mod tests {
                 description: "fake".into(),
                 input_schema: json!({"type":"object","properties":{},"required":[]}),
                 tags: self.tags.clone(),
+                cache_control: None,
             }
         }
         async fn call(&self, _args: serde_json::Value) -> ailoop_core::ToolResultContent {
@@ -671,6 +672,7 @@ mod tests {
         let model = ScriptedModel::new([vec![StreamChunk::TurnFinished {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
+            service_tier: None,
         }]]);
 
         let mut chat = Conversation::builder(model)

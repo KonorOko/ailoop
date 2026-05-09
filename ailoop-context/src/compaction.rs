@@ -62,20 +62,16 @@ mod tests {
 
     fn tool_call(id: &str) -> Message {
         Message::Assistant {
-            blocks: vec![AssistantBlock::ToolCall {
-                id: id.into(),
-                name: "t".into(),
-                args: json!({}),
-            }],
+            blocks: vec![AssistantBlock::tool_call(id, "t", json!({}))],
         }
     }
 
     fn tool_result(call_id: &str) -> Message {
         Message::User {
-            blocks: vec![UserBlock::ToolResult {
-                call_id: call_id.into(),
-                content: ToolResultContent::Text("ok".into()),
-            }],
+            blocks: vec![UserBlock::tool_result(
+                call_id,
+                ToolResultContent::Text("ok".into()),
+            )],
         }
     }
 

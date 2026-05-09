@@ -4,10 +4,11 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::ids::RunId;
+use crate::message::SystemPrompt;
 use crate::middleware::ChatMiddleware;
 
 pub struct RunConfig {
-    pub system_prompt: Option<String>,
+    pub system_prompt: Option<SystemPrompt>,
     pub max_iterations: usize,
     pub max_tokens: u32,
     pub middlewares: Vec<Arc<dyn ChatMiddleware>>,

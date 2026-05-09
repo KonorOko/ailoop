@@ -25,7 +25,7 @@ impl ChatMiddleware for SystemPromptMiddleware {
             }
         }
 
-        req.system_prompt = Some(prompt.render());
+        req.system_prompt = Some(prompt.render().into());
     }
 }
 

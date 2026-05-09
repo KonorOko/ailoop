@@ -15,9 +15,10 @@ pub fn build_body(deployment: &str, req: &ChatRequest) -> Value {
         json!({ "include_usage": true }),
     );
     body.insert("max_tokens".into(), json!(req.max_tokens));
+    let system_text = req.system_prompt.as_ref().map(|s| s.as_text());
     body.insert(
         "messages".into(),
-        json!(to_messages(req.system_prompt.as_deref(), &req.messages)),
+        json!(to_messages(system_text.as_deref(), &req.messages)),
     );
 
     if let Some(tools) = &req.tools
@@ -78,8 +79,10 @@ fn append_user_blocks(out: &mut Vec<Value>, blocks: &[UserBlock]) {
 
     for block in blocks {
         match block {
-            UserBlock::Text(t) => text_buf.push(t.as_str()),
-            UserBlock::ToolResult { call_id, content } => {
+            UserBlock::Text { text, .. } => text_buf.push(text.as_str()),
+            UserBlock::ToolResult {
+                call_id, content, ..
+            } => {
                 if !text_buf.is_empty() {
                     out.push(json!({
                         "role": "user",
@@ -99,6 +102,7 @@ fn append_user_blocks(out: &mut Vec<Value>, blocks: &[UserBlock]) {
                     "content": text,
                 }));
             }
+            _ => {}
         }
     }
     if !text_buf.is_empty() {
@@ -115,8 +119,10 @@ fn append_assistant_blocks(out: &mut Vec<Value>, blocks: &[AssistantBlock]) {
 
     for block in blocks {
         match block {
-            AssistantBlock::Text(t) => text_parts.push(t.as_str()),
-            AssistantBlock::ToolCall { id, name, args } => {
+            AssistantBlock::Text { text, .. } => text_parts.push(text.as_str()),
+            AssistantBlock::ToolCall {
+                id, name, args, ..
+            } => {
                 // Chat Completions requires `arguments` as a JSON-encoded
                 // string, not an object.
                 let arguments = serde_json::to_string(args).unwrap_or_else(|_| "{}".into());
@@ -130,6 +136,7 @@ fn append_assistant_blocks(out: &mut Vec<Value>, blocks: &[AssistantBlock]) {
             // signature would be lost across turns. Use
             // AzureOpenAIResponsesModel for reasoning round-trip.
             AssistantBlock::Reasoning { .. } | AssistantBlock::RedactedReasoning { .. } => {}
+            _ => {}
         }
     }
 
@@ -159,6 +166,9 @@ fn to_chat_tool_choice(choice: &ToolChoice) -> Value {
             "function": { "name": name },
         }),
         ToolChoice::None_ => json!("none"),
+        // ToolChoice is `#[non_exhaustive]`; future variants fall back
+        // to the provider default.
+        _ => json!("auto"),
     }
 }
 
@@ -221,11 +231,11 @@ mod tests {
     fn serializes_assistant_tool_call_with_stringified_arguments() {
         let req = ChatRequest {
             messages: vec![Message::Assistant {
-                blocks: vec![AssistantBlock::ToolCall {
-                    id: "call_1".into(),
-                    name: "get_weather".into(),
-                    args: json!({ "location": "SF", "units": "C" }),
-                }],
+                blocks: vec![AssistantBlock::tool_call(
+                    "call_1",
+                    "get_weather",
+                    json!({ "location": "SF", "units": "C" }),
+                )],
             }],
             ..base_req()
         };
@@ -247,10 +257,10 @@ mod tests {
     fn serializes_tool_result_as_role_tool() {
         let req = ChatRequest {
             messages: vec![Message::User {
-                blocks: vec![UserBlock::ToolResult {
-                    call_id: "call_1".into(),
-                    content: ToolResultContent::Text("70F".into()),
-                }],
+                blocks: vec![UserBlock::tool_result(
+                    "call_1",
+                    ToolResultContent::Text("70F".into()),
+                )],
             }],
             ..base_req()
         };
@@ -265,10 +275,10 @@ mod tests {
     fn serializes_tool_result_error_as_role_tool_text() {
         let req = ChatRequest {
             messages: vec![Message::User {
-                blocks: vec![UserBlock::ToolResult {
-                    call_id: "call_1".into(),
-                    content: ToolResultContent::Error("API down".into()),
-                }],
+                blocks: vec![UserBlock::tool_result(
+                    "call_1",
+                    ToolResultContent::Error("API down".into()),
+                )],
             }],
             ..base_req()
         };
@@ -285,12 +295,9 @@ mod tests {
         let req = ChatRequest {
             messages: vec![Message::User {
                 blocks: vec![
-                    UserBlock::Text("before".into()),
-                    UserBlock::ToolResult {
-                        call_id: "c1".into(),
-                        content: ToolResultContent::Text("ok".into()),
-                    },
-                    UserBlock::Text("after".into()),
+                    UserBlock::text("before"),
+                    UserBlock::tool_result("c1", ToolResultContent::Text("ok".into())),
+                    UserBlock::text("after"),
                 ],
             }],
             ..base_req()
@@ -475,7 +482,7 @@ mod tests {
                         text: "thinking...".into(),
                         signature: Some("sig".into()),
                     },
-                    AssistantBlock::Text("answer".into()),
+                    AssistantBlock::text("answer"),
                 ],
             }],
             ..base_req()

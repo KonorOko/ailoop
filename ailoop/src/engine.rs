@@ -231,7 +231,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                         // chunk are in `assistant_blocks`, partial tool
                         // calls (start without end) are not.
                         if !text_buf.is_empty() {
-                            assistant_blocks.push(AssistantBlock::Text(text_buf));
+                            assistant_blocks.push(AssistantBlock::text(text_buf));
                         }
                         if !assistant_blocks.is_empty() {
                             current_messages.push(Message::Assistant { blocks: assistant_blocks });
@@ -263,11 +263,11 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                     },
                     StreamChunk::ToolCallStart { .. } => {
                         if !text_buf.is_empty() {
-                            assistant_blocks.push(AssistantBlock::Text(std::mem::take(&mut text_buf)));
+                            assistant_blocks.push(AssistantBlock::text(std::mem::take(&mut text_buf)));
                         }
                     },
                     StreamChunk::ToolCallEnd { id, name, args } => {
-                        assistant_blocks.push(AssistantBlock::ToolCall { id: id.clone(), name: name.clone(), args: args.clone() });
+                        assistant_blocks.push(AssistantBlock::tool_call(id.clone(), name.clone(), args.clone()));
                         tool_calls.push((id.clone(), name.clone(), args.clone()))
                     },
                     StreamChunk::ReasoningEnd { signature } => {
@@ -275,7 +275,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                         // relative to text and tool_use; flush any pending
                         // text first so order on replay matches the wire.
                         if !text_buf.is_empty() {
-                            assistant_blocks.push(AssistantBlock::Text(std::mem::take(&mut text_buf)));
+                            assistant_blocks.push(AssistantBlock::text(std::mem::take(&mut text_buf)));
                         }
                         assistant_blocks.push(AssistantBlock::Reasoning {
                             text: std::mem::take(&mut reasoning_buf),
@@ -284,13 +284,13 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                     },
                     StreamChunk::RedactedReasoningBlock { data } => {
                         if !text_buf.is_empty() {
-                            assistant_blocks.push(AssistantBlock::Text(std::mem::take(&mut text_buf)));
+                            assistant_blocks.push(AssistantBlock::text(std::mem::take(&mut text_buf)));
                         }
                         assistant_blocks.push(AssistantBlock::RedactedReasoning {
                             data: data.clone(),
                         });
                     },
-                    StreamChunk::TurnFinished { reason, usage } => {
+                    StreamChunk::TurnFinished { reason, usage, .. } => {
                         finish_reason = reason.clone();
                         usage_run += *usage;
                         continue;
@@ -303,7 +303,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             }
 
             if !text_buf.is_empty() {
-                assistant_blocks.push(AssistantBlock::Text(text_buf));
+                assistant_blocks.push(AssistantBlock::text(text_buf));
             }
 
             if !assistant_blocks.is_empty() {
@@ -381,7 +381,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                         // Preserve the just-completed tool's result so
                         // history isn't left with a tool_call missing
                         // its tool_result on the next assistant turn.
-                        tools_result.push(UserBlock::ToolResult { call_id: id.clone(), content: content.clone() });
+                        tools_result.push(UserBlock::tool_result(id.clone(), content.clone()));
                         current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
                         let new_messages = current_messages.split_off(messages.len());
                         let chunk = fire_abort_hooks(
@@ -401,7 +401,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                 for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
                 yield chunk;
 
-                tools_result.push(UserBlock::ToolResult { call_id: id, content });
+                tools_result.push(UserBlock::tool_result(id, content));
             }
 
             if !tools_result.is_empty() {
@@ -480,6 +480,7 @@ mod tests {
                 description: "stub".into(),
                 input_schema: json!({"type":"object","properties":{},"required":[]}),
                 tags: vec![],
+                cache_control: None,
             }
         }
         async fn call(&self, _: serde_json::Value) -> ToolResultContent {
@@ -517,6 +518,7 @@ mod tests {
             StreamChunk::TurnFinished {
                 reason: FinishReason::ToolUse,
                 usage: Usage::default(),
+                service_tier: None,
             },
         ];
         // Turn 2 just ends the run; we only care about the assistant
@@ -524,6 +526,7 @@ mod tests {
         let turn2 = vec![StreamChunk::TurnFinished {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
+            service_tier: None,
         }];
 
         let model = ScriptedModel::new([turn1, turn2]);
@@ -571,7 +574,9 @@ mod tests {
             other => panic!("expected Reasoning first, got {other:?}"),
         }
         match &assistant_blocks[1] {
-            AssistantBlock::ToolCall { id, name, args } => {
+            AssistantBlock::ToolCall {
+                id, name, args, ..
+            } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(name, "get_weather");
                 assert_eq!(args, &json!({"location": "SF"}));
@@ -600,11 +605,13 @@ mod tests {
             StreamChunk::TurnFinished {
                 reason: FinishReason::ToolUse,
                 usage: Usage::default(),
+                service_tier: None,
             },
         ];
         let turn2 = vec![StreamChunk::TurnFinished {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
+            service_tier: None,
         }];
 
         let model = ScriptedModel::new([turn1, turn2]);
@@ -809,6 +816,7 @@ mod tests {
             StreamChunk::TurnFinished {
                 reason: FinishReason::ToolUse,
                 usage: Usage::default(),
+                service_tier: None,
             },
         ];
         let model = ScriptedModel::new([turn]);

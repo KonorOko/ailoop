@@ -131,7 +131,14 @@ where
                 }
             }
         }
-        yield StreamChunk::TurnFinished { reason: final_stop, usage };
+        yield StreamChunk::TurnFinished {
+            reason: final_stop,
+            usage,
+            // service_tier and per-TTL cache breakdown are wired in a
+            // follow-up commit; until then the adapter only surfaces the
+            // legacy flat counters and leaves service_tier unset.
+            service_tier: None,
+        };
     };
 
     Box::pin(stream)
@@ -308,10 +315,15 @@ mod tests {
             other => panic!("expected ToolCallEnd, got {other:?}"),
         }
         match iter.next().expect("turn finished") {
-            StreamChunk::TurnFinished { reason, usage } => {
+            StreamChunk::TurnFinished {
+                reason,
+                usage,
+                service_tier,
+            } => {
                 assert!(matches!(reason, FinishReason::ToolUse));
                 assert_eq!(usage.input_tokens, 12);
                 assert_eq!(usage.output_tokens, 50);
+                assert!(service_tier.is_none());
             }
             other => panic!("expected TurnFinished, got {other:?}"),
         }

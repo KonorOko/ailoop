@@ -254,6 +254,7 @@ mod tests {
         StreamChunk::TurnFinished {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
+            service_tier: None,
         }
     }
 
