@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use ailoop_core::{RetryClassification, Retryable};
 use reqwest::StatusCode;
 
 /// Discriminated category of an HTTP-level Azure OpenAI API error,
@@ -80,4 +81,119 @@ pub enum AzureOpenAIError {
     /// missing endpoint, mutually exclusive secrets both set, etc.
     #[error("missing required configuration: {0}")]
     Config(String),
+}
+
+/// Map an Azure-typed `ApiErrorKind` to a retry decision. Azure's code
+/// taxonomy is less stable than Anthropic's, so `Other(_)` is treated
+/// conservatively as transient — better an extra retry than to strand a
+/// request when the API ships a new code we haven't typed yet.
+fn classify_kind(kind: &ApiErrorKind, retry_after: Option<Duration>) -> RetryClassification {
+    match kind {
+        ApiErrorKind::RateLimit | ApiErrorKind::ServerError | ApiErrorKind::Other(_) => {
+            RetryClassification::Transient { retry_after }
+        }
+        ApiErrorKind::Authentication
+        | ApiErrorKind::Permission
+        | ApiErrorKind::InvalidRequest
+        | ApiErrorKind::NotFound
+        | ApiErrorKind::DeploymentNotFound
+        | ApiErrorKind::ContentFilter => RetryClassification::Permanent,
+    }
+}
+
+impl Retryable for AzureOpenAIError {
+    fn retry_classification(&self) -> RetryClassification {
+        match self {
+            AzureOpenAIError::Api {
+                kind, retry_after, ..
+            } => classify_kind(kind, *retry_after),
+            AzureOpenAIError::Status { status, .. } => {
+                if status.is_server_error() {
+                    RetryClassification::Transient { retry_after: None }
+                } else {
+                    RetryClassification::Permanent
+                }
+            }
+            AzureOpenAIError::Http(_) => RetryClassification::Transient { retry_after: None },
+            // Parsing failures are deterministic. Mid-stream `Provider`
+            // events on Azure are rare and we don't have a typed `kind`
+            // to drive a smart decision — treat as permanent rather than
+            // looping on something that's almost certainly an API bug.
+            AzureOpenAIError::Sse(_)
+            | AzureOpenAIError::Json(_)
+            | AzureOpenAIError::Provider { .. }
+            | AzureOpenAIError::Config(_) => RetryClassification::Permanent,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limit_with_retry_after_is_transient() {
+        let err = AzureOpenAIError::Api {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            kind: ApiErrorKind::RateLimit,
+            message: "throttled".into(),
+            retry_after: Some(Duration::from_millis(750)),
+        };
+        assert_eq!(
+            err.retry_classification(),
+            RetryClassification::Transient {
+                retry_after: Some(Duration::from_millis(750))
+            },
+        );
+    }
+
+    #[test]
+    fn server_error_is_transient() {
+        let err = AzureOpenAIError::Api {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            kind: ApiErrorKind::ServerError,
+            message: "boom".into(),
+            retry_after: None,
+        };
+        assert_eq!(
+            err.retry_classification(),
+            RetryClassification::Transient { retry_after: None },
+        );
+    }
+
+    #[test]
+    fn authentication_is_permanent() {
+        let err = AzureOpenAIError::Api {
+            status: StatusCode::UNAUTHORIZED,
+            kind: ApiErrorKind::Authentication,
+            message: "bad key".into(),
+            retry_after: None,
+        };
+        assert_eq!(err.retry_classification(), RetryClassification::Permanent);
+    }
+
+    #[test]
+    fn deployment_not_found_is_permanent() {
+        let err = AzureOpenAIError::Api {
+            status: StatusCode::NOT_FOUND,
+            kind: ApiErrorKind::DeploymentNotFound,
+            message: "no such deployment".into(),
+            retry_after: None,
+        };
+        assert_eq!(err.retry_classification(), RetryClassification::Permanent);
+    }
+
+    #[test]
+    fn unknown_kind_is_conservatively_transient() {
+        let err = AzureOpenAIError::Api {
+            status: StatusCode::BAD_GATEWAY,
+            kind: ApiErrorKind::Other("WeirdNewCode".into()),
+            message: "?".into(),
+            retry_after: None,
+        };
+        assert_eq!(
+            err.retry_classification(),
+            RetryClassification::Transient { retry_after: None },
+        );
+    }
 }
