@@ -147,7 +147,7 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
         user_msg: impl Into<String>,
     ) -> Result<RunStream<'_, M>, EngineError<M::Error>> {
         self.history.add_message(Message::user(user_msg));
-        let report = self.history.compact_if_needed()?;
+        let report = self.history.compact_if_needed().await?;
 
         let snapshot = self.history.messages().to_vec();
         let run_id = RunId::new();
