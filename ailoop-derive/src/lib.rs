@@ -53,6 +53,36 @@ fn ailoop_tool_tag_path() -> proc_macro2::TokenStream {
     resolve_item_path(&["ailoop", "ailoop-core"], "ToolTag")
 }
 
+fn extract_doc_comment(attrs: &[syn::Attribute]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+
+    for attr in attrs {
+        if !attr.path().is_ident("doc") {
+            continue;
+        }
+        let Meta::NameValue(nv) = &attr.meta else {
+            continue;
+        };
+        let Expr::Lit(ExprLit {
+            lit: Lit::Str(s), ..
+        }) = &nv.value
+        else {
+            continue;
+        };
+        let raw = s.value();
+        // `///` desugars to `#[doc = " text"]`; drop that conventional single
+        // leading space so the rendered description matches the source.
+        let line = raw.strip_prefix(' ').unwrap_or(&raw).to_string();
+        lines.push(line);
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
 fn parse_string_literal(expr: &Expr, field_name: &str) -> syn::Result<String> {
     match expr {
         Expr::Lit(ExprLit {
@@ -335,12 +365,12 @@ fn analyze_return_type(return_type: &ReturnType) -> syn::Result<ReturnInfo> {
 #[proc_macro_attribute]
 pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args as MacroArgs);
-    let input_fn = parse_macro_input!(input as syn::ItemFn);
+    let mut input_fn = parse_macro_input!(input as syn::ItemFn);
 
-    let fn_name = &input_fn.sig.ident;
+    let fn_name = input_fn.sig.ident.clone();
     let fn_name_str = fn_name.to_string();
     let tool_name = args.name.clone().unwrap_or_else(|| fn_name_str.clone());
-    let vis = &input_fn.vis;
+    let vis = input_fn.vis.clone();
     let is_async = input_fn.sig.asyncness.is_some();
 
     let return_type = &input_fn.sig.output;
@@ -348,43 +378,51 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
         Ok(info) => info,
         Err(error) => return error.into_compile_error().into(),
     };
-    let output_type = &return_info.output;
-    let error_type = &return_info.error;
+    let output_type = return_info.output;
+    let error_type = return_info.error;
     let is_fallible = return_info.is_fallible;
 
     let struct_name = format_ident!("{}", { fn_name_str.to_case(Case::Pascal) });
 
-    let tool_description = match args.description {
-        Some(desc) => quote! { #desc.to_string() },
-        None => quote! { format!("Function to {}", Self::NAME) },
-    };
+    let tool_description: String = args
+        .description
+        .or_else(|| extract_doc_comment(&input_fn.attrs))
+        .unwrap_or_default();
 
-    let mut param_names = Vec::new();
-    let mut param_types = Vec::new();
-    let mut param_descriptions = Vec::new();
-    let mut json_types = Vec::new();
+    let mut param_names: Vec<Ident> = Vec::new();
+    let mut param_types: Vec<Type> = Vec::new();
+    let mut param_descriptions: Vec<String> = Vec::new();
+    let mut json_types: Vec<proc_macro2::TokenStream> = Vec::new();
 
     let required_args = args.required;
 
-    for arg in input_fn.sig.inputs.iter() {
-        if let syn::FnArg::Typed(pat_type) = arg
-            && let syn::Pat::Ident(param_ident) = &*pat_type.pat
-        {
-            let param_name = &param_ident.ident;
-            let param_name_str = param_name.to_string();
-            let ty = &pat_type.ty;
-            let default_parameter_description = format!("Parameter {param_name_str}");
-            let description = args
-                .param_descriptions
-                .get(&param_name_str)
-                .map(|s| s.to_owned())
-                .unwrap_or(default_parameter_description);
+    for arg in input_fn.sig.inputs.iter_mut() {
+        let syn::FnArg::Typed(pat_type) = arg else {
+            continue;
+        };
+        let syn::Pat::Ident(param_ident) = &*pat_type.pat else {
+            continue;
+        };
+        let param_name = param_ident.ident.clone();
+        let param_name_str = param_name.to_string();
+        let ty = (*pat_type.ty).clone();
+        let json_type = get_json_type(&ty);
+        let description = args
+            .param_descriptions
+            .get(&param_name_str)
+            .cloned()
+            .or_else(|| extract_doc_comment(&pat_type.attrs))
+            .unwrap_or_default();
 
-            param_names.push(param_name);
-            param_types.push(ty);
-            param_descriptions.push(description);
-            json_types.push(get_json_type(ty));
-        }
+        // Rust forbids `#[doc = ...]` (and `///`) attributes on fn
+        // parameters at compile time, so strip them after harvesting the
+        // description — they only exist for the macro to read.
+        pat_type.attrs.retain(|a| !a.path().is_ident("doc"));
+
+        param_names.push(param_name);
+        param_types.push(ty);
+        param_descriptions.push(description);
+        json_types.push(json_type);
     }
 
     let params_struct_name = format_ident!("{}Parameters", struct_name);
@@ -451,7 +489,7 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
 
                 #tool_definition_path::new(
                     #tool_name,
-                    &#tool_description,
+                    #tool_description,
                     input_schema,
                     #tags_expr,
                 )
