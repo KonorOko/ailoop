@@ -240,37 +240,10 @@ async fn run_tool_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ailoop_core::{ChatRequest, ToolDefinition};
+    use ailoop_core::ToolDefinition;
+    use ailoop_core::testing::ScriptedModel;
     use ailoop_tools::registry::ToolDyn;
     use serde_json::json;
-    use std::collections::VecDeque;
-    use std::convert::Infallible;
-    use std::sync::Mutex;
-
-    /// Replays a queue of pre-canned chunk lists. Each `chat_stream` call
-    /// pops the next list. Empty queue yields an empty stream — that's a
-    /// fine terminator for tests that don't expect another turn.
-    struct ScriptedModel {
-        scripts: Mutex<VecDeque<Vec<StreamChunk>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl CompletionModel for ScriptedModel {
-        type Error = Infallible;
-        fn name(&self) -> &str {
-            "scripted"
-        }
-        fn model(&self) -> &str {
-            "scripted"
-        }
-        async fn chat_stream(
-            &self,
-            _: ChatRequest,
-        ) -> Result<BoxStream<'static, Result<StreamChunk, Infallible>>, Infallible> {
-            let chunks = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
-            Ok(Box::pin(futures::stream::iter(chunks.into_iter().map(Ok))))
-        }
-    }
 
     struct GetWeather;
 
@@ -331,9 +304,7 @@ mod tests {
             usage: Usage::default(),
         }];
 
-        let model = ScriptedModel {
-            scripts: Mutex::new(VecDeque::from([turn1, turn2])),
-        };
+        let model = ScriptedModel::new([turn1, turn2]);
 
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(GetWeather)).unwrap();
@@ -414,9 +385,7 @@ mod tests {
             usage: Usage::default(),
         }];
 
-        let model = ScriptedModel {
-            scripts: Mutex::new(VecDeque::from([turn1, turn2])),
-        };
+        let model = ScriptedModel::new([turn1, turn2]);
 
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(GetWeather)).unwrap();

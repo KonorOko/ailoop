@@ -4,6 +4,7 @@ pub mod message;
 pub mod middleware;
 pub mod request;
 pub mod stream;
+pub mod testing;
 mod traits;
 
 pub use config::RunConfig;
