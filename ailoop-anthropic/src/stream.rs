@@ -41,6 +41,7 @@ where
         let mut blocks: HashMap<u32, BlockState> = HashMap::new();
         let mut final_stop = FinishReason::EndTurn;
         let mut usage = Usage::default();
+        let mut service_tier: Option<String> = None;
 
         while let Some(event) = events.next().await {
             let parsed = event?;
@@ -49,7 +50,14 @@ where
                 AnthropicEvent::MessageStart {message} => {
                     usage.input_tokens = message.usage.input_tokens;
                     usage.cached_input_tokens = message.usage.cache_read_input_tokens;
-                    usage.cache_creation_input_tokens = message.usage.cache_creation_input_tokens;
+                    apply_cache_creation(
+                        &mut usage,
+                        message.usage.cache_creation_input_tokens,
+                        message.usage.cache_creation.as_ref(),
+                    );
+                    if message.usage.service_tier.is_some() {
+                        service_tier = message.usage.service_tier;
+                    }
                 }
                 AnthropicEvent::ContentBlockStart {index, content_block} => {
                     match content_block {
@@ -120,6 +128,16 @@ where
                 AnthropicEvent::MessageDelta { delta, usage: u } => {
                     final_stop = map_stop_reason(&delta.stop_reason);
                     usage.output_tokens = u.output_tokens;
+                    if u.cache_read_input_tokens > 0 {
+                        usage.cached_input_tokens = u.cache_read_input_tokens;
+                    }
+                    if u.cache_creation_input_tokens > 0 || u.cache_creation.is_some() {
+                        apply_cache_creation(
+                            &mut usage,
+                            u.cache_creation_input_tokens,
+                            u.cache_creation.as_ref(),
+                        );
+                    }
                 }
                 AnthropicEvent::MessageStop => {}
                 AnthropicEvent::Ping => { }
@@ -134,14 +152,36 @@ where
         yield StreamChunk::TurnFinished {
             reason: final_stop,
             usage,
-            // service_tier and per-TTL cache breakdown are wired in a
-            // follow-up commit; until then the adapter only surfaces the
-            // legacy flat counters and leaves service_tier unset.
-            service_tier: None,
+            service_tier,
         };
     };
 
     Box::pin(stream)
+}
+
+/// Reconcile Anthropic's two cache-creation reporting shapes into the
+/// fields on [`Usage`]. When the API ships the new TTL breakdown we
+/// trust it for both totals and per-bucket counters; when only the flat
+/// counter is present we still populate the total. The legacy and new
+/// shapes can coexist on the same payload — callers send both in
+/// parallel for compat — so the breakdown wins when present because it
+/// is strictly more informative.
+fn apply_cache_creation(
+    usage: &mut Usage,
+    flat_input_tokens: u32,
+    breakdown: Option<&crate::events::CacheCreationBreakdown>,
+) {
+    match breakdown {
+        Some(b) => {
+            usage.cache_creation_5m_tokens = b.ephemeral_5m_input_tokens;
+            usage.cache_creation_1h_tokens = b.ephemeral_1h_input_tokens;
+            usage.cache_creation_input_tokens =
+                b.ephemeral_5m_input_tokens + b.ephemeral_1h_input_tokens;
+        }
+        None => {
+            usage.cache_creation_input_tokens = flat_input_tokens;
+        }
+    }
 }
 
 pub fn map_stop_reason(reason: &Option<String>) -> FinishReason {
@@ -203,8 +243,7 @@ mod tests {
                 message: MessageStartPayload {
                     usage: MessageStartUsage {
                         input_tokens: 12,
-                        cache_read_input_tokens: 0,
-                        cache_creation_input_tokens: 0,
+                        ..Default::default()
                     },
                 },
             }),
@@ -260,7 +299,10 @@ mod tests {
                     stop_reason: Some("tool_use".into()),
                     stop_sequence: None,
                 },
-                usage: UsageDelta { output_tokens: 50 },
+                usage: UsageDelta {
+                    output_tokens: 50,
+                    ..Default::default()
+                },
             }),
             ok(AnthropicEvent::MessageStop),
         ];
@@ -343,8 +385,7 @@ mod tests {
                 message: MessageStartPayload {
                     usage: MessageStartUsage {
                         input_tokens: 1,
-                        cache_read_input_tokens: 0,
-                        cache_creation_input_tokens: 0,
+                        ..Default::default()
                     },
                 },
             }),
@@ -368,6 +409,109 @@ mod tests {
                 assert_eq!(message, "busy");
             }
             other => panic!("expected Provider{{Overloaded, ..}}, got {other:?}"),
+        }
+    }
+
+    /// `message_start` may carry the new `cache_creation` breakdown and
+    /// `service_tier`. Both must reach the engine via `TurnFinished`:
+    /// the breakdown populates the per-TTL counters on `Usage` and the
+    /// flat `cache_creation_input_tokens` is rederived as their sum;
+    /// `service_tier` rides on `TurnFinished`.
+    #[tokio::test]
+    async fn message_start_breakdown_and_service_tier_reach_turn_finished() {
+        use crate::events::CacheCreationBreakdown;
+
+        let events = vec![
+            ok(AnthropicEvent::MessageStart {
+                message: MessageStartPayload {
+                    usage: MessageStartUsage {
+                        input_tokens: 100,
+                        cache_read_input_tokens: 25,
+                        cache_creation_input_tokens: 150,
+                        cache_creation: Some(CacheCreationBreakdown {
+                            ephemeral_5m_input_tokens: 100,
+                            ephemeral_1h_input_tokens: 50,
+                        }),
+                        service_tier: Some("priority".into()),
+                    },
+                },
+            }),
+            ok(AnthropicEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some("end_turn".into()),
+                    stop_sequence: None,
+                },
+                usage: UsageDelta {
+                    output_tokens: 7,
+                    ..Default::default()
+                },
+            }),
+            ok(AnthropicEvent::MessageStop),
+        ];
+
+        let chunks = run(events).await;
+        let last = chunks.into_iter().last().expect("stream emits at least TurnFinished");
+        match last {
+            StreamChunk::TurnFinished {
+                reason,
+                usage,
+                service_tier,
+            } => {
+                assert!(matches!(reason, FinishReason::EndTurn));
+                assert_eq!(usage.input_tokens, 100);
+                assert_eq!(usage.cached_input_tokens, 25);
+                // Total = sum of breakdown when breakdown is present.
+                assert_eq!(usage.cache_creation_input_tokens, 150);
+                assert_eq!(usage.cache_creation_5m_tokens, 100);
+                assert_eq!(usage.cache_creation_1h_tokens, 50);
+                assert_eq!(service_tier.as_deref(), Some("priority"));
+            }
+            other => panic!("expected TurnFinished, got {other:?}"),
+        }
+    }
+
+    /// When the API provides only the legacy flat `cache_creation_input_tokens`
+    /// (no breakdown object), the flat counter still propagates and the
+    /// per-TTL fields stay at zero.
+    #[tokio::test]
+    async fn message_start_legacy_flat_counter_propagates() {
+        let events = vec![
+            ok(AnthropicEvent::MessageStart {
+                message: MessageStartPayload {
+                    usage: MessageStartUsage {
+                        input_tokens: 10,
+                        cache_creation_input_tokens: 42,
+                        ..Default::default()
+                    },
+                },
+            }),
+            ok(AnthropicEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some("end_turn".into()),
+                    stop_sequence: None,
+                },
+                usage: UsageDelta {
+                    output_tokens: 1,
+                    ..Default::default()
+                },
+            }),
+            ok(AnthropicEvent::MessageStop),
+        ];
+
+        let chunks = run(events).await;
+        let last = chunks.into_iter().last().expect("stream emits at least TurnFinished");
+        match last {
+            StreamChunk::TurnFinished {
+                usage,
+                service_tier,
+                ..
+            } => {
+                assert_eq!(usage.cache_creation_input_tokens, 42);
+                assert_eq!(usage.cache_creation_5m_tokens, 0);
+                assert_eq!(usage.cache_creation_1h_tokens, 0);
+                assert!(service_tier.is_none());
+            }
+            other => panic!("expected TurnFinished, got {other:?}"),
         }
     }
 }

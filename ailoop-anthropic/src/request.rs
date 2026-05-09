@@ -1,6 +1,8 @@
+use std::time::Duration;
+
 use ailoop_core::{
-    AssistantBlock, ChatRequest, Message, SystemPrompt, ToolChoice, ToolDefinition,
-    ToolResultContent, UserBlock,
+    AssistantBlock, CacheControl, ChatRequest, Message, SystemBlock, SystemPrompt, ToolChoice,
+    ToolDefinition, ToolResultContent, UserBlock,
 };
 use serde_json::{json, Value};
 
@@ -58,12 +60,61 @@ pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
     serde_json::Value::Object(body)
 }
 
+/// Encode an [`ailoop_core::CacheControl`] into Anthropic's wire object.
+/// Anthropic accepts only `5m` and `1h` as `ttl`; for any other duration
+/// we round to the closer of the two and omit the field if the caller
+/// asked for the default (`Ephemeral` without a TTL).
+fn cache_control_value(cc: &CacheControl) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("type".into(), json!("ephemeral"));
+    if let CacheControl::EphemeralWithTtl(d) = cc {
+        let ttl = ttl_string_for(*d);
+        obj.insert("ttl".into(), json!(ttl));
+    }
+    Value::Object(obj)
+}
+
+fn ttl_string_for(d: Duration) -> &'static str {
+    // Anthropic supports exactly two TTL strings; round to the closer.
+    let secs = d.as_secs();
+    let five_min = 5 * 60;
+    let one_hour = 60 * 60;
+    if secs.abs_diff(five_min) <= secs.abs_diff(one_hour) {
+        "5m"
+    } else {
+        "1h"
+    }
+}
+
+fn insert_cache_control(obj: &mut serde_json::Map<String, Value>, cc: Option<&CacheControl>) {
+    if let Some(cc) = cc {
+        obj.insert("cache_control".into(), cache_control_value(cc));
+    }
+}
+
 fn to_anthropic_system(prompt: &SystemPrompt) -> Value {
-    // Wire emission of per-block `cache_control` lands with the
-    // follow-up commit; for now we flatten any structured prompt to a
-    // single string so the request stays wire-compatible with the
-    // pre-caching shape.
-    json!(prompt.as_text())
+    match prompt {
+        // Plain string — wire-compatible with the pre-caching shape so
+        // existing fixtures and zero-cache-control callers see no diff.
+        SystemPrompt::Plain(s) => json!(s),
+        SystemPrompt::Blocks(blocks) => {
+            json!(blocks
+                .iter()
+                .map(to_anthropic_system_block)
+                .collect::<Vec<_>>())
+        }
+        // SystemPrompt is `#[non_exhaustive]`; future variants degrade
+        // to an empty system on the wire rather than failing the build.
+        _ => json!(""),
+    }
+}
+
+fn to_anthropic_system_block(block: &SystemBlock) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("type".into(), json!("text"));
+    obj.insert("text".into(), json!(block.text));
+    insert_cache_control(&mut obj, block.cache_control.as_ref());
+    Value::Object(obj)
 }
 
 fn to_anthropic_messages(messages: &[Message]) -> Vec<serde_json::Value> {
@@ -85,20 +136,32 @@ fn to_anthropic_message(message: &Message) -> serde_json::Value {
 
 fn to_anthropic_user_block(block: &UserBlock) -> serde_json::Value {
     match block {
-        UserBlock::Text { text, .. } => json!({ "type": "text", "text": text }),
+        UserBlock::Text {
+            text,
+            cache_control,
+        } => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), json!("text"));
+            obj.insert("text".into(), json!(text));
+            insert_cache_control(&mut obj, cache_control.as_ref());
+            Value::Object(obj)
+        }
         UserBlock::ToolResult {
-            call_id, content, ..
+            call_id,
+            content,
+            cache_control,
         } => {
             let (text, is_error) = match content {
                 ToolResultContent::Text(t) => (t.as_str(), false),
                 ToolResultContent::Error(e) => (e.as_str(), true),
             };
-            json!({
-                "type": "tool_result",
-                "tool_use_id": call_id,
-                "content": text,
-                "is_error": is_error,
-            })
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), json!("tool_result"));
+            obj.insert("tool_use_id".into(), json!(call_id));
+            obj.insert("content".into(), json!(text));
+            obj.insert("is_error".into(), json!(is_error));
+            insert_cache_control(&mut obj, cache_control.as_ref());
+            Value::Object(obj)
         }
         // UserBlock is `#[non_exhaustive]`; future variants are dropped
         // until the adapter learns to translate them.
@@ -108,13 +171,30 @@ fn to_anthropic_user_block(block: &UserBlock) -> serde_json::Value {
 
 fn to_anthropic_assistant_block(block: &AssistantBlock) -> serde_json::Value {
     match block {
-        AssistantBlock::Text { text, .. } => json!({ "type": "text", "text": text }),
-        AssistantBlock::ToolCall { id, name, args, .. } => json!({
-            "type": "tool_use",
-            "id": id,
-            "name": name,
-            "input": args,
-        }),
+        AssistantBlock::Text {
+            text,
+            cache_control,
+        } => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), json!("text"));
+            obj.insert("text".into(), json!(text));
+            insert_cache_control(&mut obj, cache_control.as_ref());
+            Value::Object(obj)
+        }
+        AssistantBlock::ToolCall {
+            id,
+            name,
+            args,
+            cache_control,
+        } => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), json!("tool_use"));
+            obj.insert("id".into(), json!(id));
+            obj.insert("name".into(), json!(name));
+            obj.insert("input".into(), args.clone());
+            insert_cache_control(&mut obj, cache_control.as_ref());
+            Value::Object(obj)
+        }
         AssistantBlock::Reasoning { text, signature } => {
             // Anthropic requires the signature verbatim when this block lives
             // in a turn that the next request continues with tool_result.
@@ -172,11 +252,12 @@ fn to_anthropic_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
     tools
         .iter()
         .map(|t| {
-            json!({
-                "name": t.name,
-                "description": t.description,
-                "input_schema": t.input_schema,
-            })
+            let mut obj = serde_json::Map::new();
+            obj.insert("name".into(), json!(t.name));
+            obj.insert("description".into(), json!(t.description));
+            obj.insert("input_schema".into(), t.input_schema.clone());
+            insert_cache_control(&mut obj, t.cache_control.as_ref());
+            Value::Object(obj)
         })
         .collect()
 }
@@ -323,5 +404,135 @@ mod tests {
                 "data": "opaque-blob",
             })
         );
+    }
+
+    /// Plain system prompts must continue to wire as a string so the
+    /// pre-caching call shape is preserved for callers that did not opt
+    /// in to cache breakpoints.
+    #[test]
+    fn plain_system_prompt_wires_as_string() {
+        let req = ChatRequest {
+            system_prompt: Some(SystemPrompt::from("be helpful")),
+            ..base_req()
+        };
+        let body = build_body("claude", &req);
+        assert_eq!(body["system"], json!("be helpful"));
+    }
+
+    /// A multi-block system prompt must wire as an array of typed blocks
+    /// with `cache_control` only on blocks that asked for one.
+    #[test]
+    fn block_system_prompt_emits_cache_control_per_block() {
+        let req = ChatRequest {
+            system_prompt: Some(SystemPrompt::Blocks(vec![
+                SystemBlock::new("static prelude").with_cache_control(CacheControl::Ephemeral),
+                SystemBlock::new("dynamic suffix"),
+            ])),
+            ..base_req()
+        };
+        let body = build_body("claude", &req);
+        assert_eq!(
+            body["system"],
+            json!([
+                {
+                    "type": "text",
+                    "text": "static prelude",
+                    "cache_control": { "type": "ephemeral" },
+                },
+                {
+                    "type": "text",
+                    "text": "dynamic suffix",
+                },
+            ])
+        );
+    }
+
+    /// `EphemeralWithTtl` must surface `ttl: "1h"` on the wire when the
+    /// caller asked for the long TTL.
+    #[test]
+    fn ephemeral_with_one_hour_ttl_emits_ttl_string() {
+        let block = UserBlock::text("cached").with_cache_control(Some(
+            CacheControl::EphemeralWithTtl(Duration::from_secs(60 * 60)),
+        ));
+        let json = to_anthropic_user_block(&block);
+        assert_eq!(
+            json,
+            json!({
+                "type": "text",
+                "text": "cached",
+                "cache_control": { "type": "ephemeral", "ttl": "1h" },
+            })
+        );
+    }
+
+    #[test]
+    fn user_text_without_cache_control_omits_field() {
+        let block = UserBlock::text("plain");
+        let json = to_anthropic_user_block(&block);
+        assert!(json.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn tool_result_carries_cache_control() {
+        let block = UserBlock::tool_result("call_1", ToolResultContent::Text("ok".into()))
+            .with_cache_control(Some(CacheControl::Ephemeral));
+        let json = to_anthropic_user_block(&block);
+        assert_eq!(
+            json["cache_control"],
+            json!({ "type": "ephemeral" }),
+            "tool_result blocks must support cache_control",
+        );
+    }
+
+    #[test]
+    fn assistant_text_carries_cache_control() {
+        let block =
+            AssistantBlock::text("answer").with_cache_control(Some(CacheControl::Ephemeral));
+        let json = to_anthropic_assistant_block(&block);
+        assert_eq!(json["cache_control"], json!({ "type": "ephemeral" }));
+    }
+
+    #[test]
+    fn assistant_tool_call_carries_cache_control() {
+        let block = AssistantBlock::tool_call("toolu_1", "search", json!({"q": "x"}))
+            .with_cache_control(Some(CacheControl::Ephemeral));
+        let json = to_anthropic_assistant_block(&block);
+        assert_eq!(json["cache_control"], json!({ "type": "ephemeral" }));
+    }
+
+    /// Tool definitions can carry their own cache breakpoint so the
+    /// model sees a cacheable tool prefix when enough tools share an
+    /// identical (or stable-prefix) schema.
+    #[test]
+    fn tool_definition_emits_cache_control_when_set() {
+        let req = ChatRequest {
+            tools: Some(vec![ToolDefinition::new(
+                "get_weather",
+                "Look up the weather",
+                json!({ "type": "object", "properties": {} }),
+                vec![],
+            )
+            .with_cache_control(CacheControl::Ephemeral)]),
+            ..base_req()
+        };
+        let body = build_body("claude", &req);
+        let tool = &body["tools"][0];
+        assert_eq!(tool["cache_control"], json!({ "type": "ephemeral" }));
+    }
+
+    #[test]
+    fn tool_definition_omits_cache_control_when_unset() {
+        let req = ChatRequest {
+            tools: Some(vec![ToolDefinition::new(
+                "get_weather",
+                "Look up the weather",
+                json!({ "type": "object", "properties": {} }),
+                vec![],
+            )]),
+            ..base_req()
+        };
+        let body = build_body("claude", &req);
+        let tool = &body["tools"][0];
+        assert!(tool.get("cache_control").is_none());
     }
 }
