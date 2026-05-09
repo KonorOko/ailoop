@@ -16,3 +16,5 @@ pub use request::{ChatRequest, ToolDefinition, ToolTag};
 pub use retry::{RetryClassification, RetryConfig, RetryingModel, Retryable};
 pub use stream::{FinishReason, StreamChunk, Usage};
 pub use traits::{CompletionClient, CompletionModel};
+
+pub use tokio_util::sync::CancellationToken;

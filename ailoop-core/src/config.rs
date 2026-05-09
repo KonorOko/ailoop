@@ -1,4 +1,7 @@
 use std::sync::Arc;
+use std::time::Duration;
+
+use tokio_util::sync::CancellationToken;
 
 use crate::ids::RunId;
 use crate::middleware::ChatMiddleware;
@@ -12,6 +15,22 @@ pub struct RunConfig {
     /// fresh UUID v4. Set this when an outer system needs to correlate
     /// the run with its own trace id.
     pub run_id: Option<RunId>,
+    /// Wall-clock deadline for the entire run, including tool calls and
+    /// any retry backoff inside `RetryingModel`. `None` disables the
+    /// timeout. The engine checks this at await boundaries (HTTP setup,
+    /// SSE chunks, tool execution, approval middleware) — synchronous
+    /// work is not preempted. Sleeps inside `RetryingModel`'s backoff
+    /// race against this deadline because they run under the engine's
+    /// `select!`, so retry attempts are interruptible without the
+    /// decorator knowing about cancellation.
+    pub timeout: Option<Duration>,
+    /// External cancellation handle. Calling `cancel()` from another
+    /// task aborts the in-flight run at the next await boundary, with
+    /// the same persistence discipline as the timeout (partial
+    /// `tools_result` preserved, `on_run_finished` fired). Pass
+    /// `parent.child_token()` if you want to cancel this run without
+    /// affecting siblings sharing the parent.
+    pub cancellation: Option<CancellationToken>,
 }
 
 impl Default for RunConfig {
@@ -22,6 +41,8 @@ impl Default for RunConfig {
             max_tokens: 4096,
             middlewares: vec![],
             run_id: None,
+            timeout: None,
+            cancellation: None,
         }
     }
 }
