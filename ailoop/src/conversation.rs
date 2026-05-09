@@ -52,8 +52,17 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
     /// in tests and for callers who want to inspect or persist the
     /// conversation state outside of [`Conversation::run`] /
     /// [`Conversation::stream`].
-    pub fn history(&self) -> &[Message] {
+    pub fn history_messages(&self) -> &[Message] {
         self.history.messages()
+    }
+
+    /// Append a message to history without going through a run. Lets
+    /// callers seed history (e.g. for resume scenarios or tests that
+    /// need to overflow the compaction budget before issuing a real
+    /// turn). Compaction is **not** triggered here — that happens on
+    /// the next [`Conversation::run`] / [`Conversation::stream`] call.
+    pub fn history_push(&mut self, message: Message) {
+        self.history.add_message(message);
     }
 
     /// Names of every tool currently active for this conversation.
