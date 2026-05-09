@@ -1,9 +1,12 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::errors::EngineError;
 use ailoop_core::{
-    AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, HookAction,
-    RunConfig, RunId, StepId, StreamChunk, ToolDecision, Usage, UserBlock,
+    AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason,
+    HookAction, RunConfig, RunId, StepId, StreamChunk, ToolDecision, Usage, UserBlock,
 };
 use ailoop_tools::{ToolRegistry, errors::ToolRegistryError};
 pub use async_stream::try_stream;
@@ -11,6 +14,87 @@ pub use async_stream::try_stream;
 pub use ailoop_core::{Message, ToolResultContent};
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
+
+type AbortFuture = Pin<Box<dyn Future<Output = String> + Send>>;
+
+/// Builds the abort future that resolves with a textual reason when the
+/// configured timeout elapses or the [`CancellationToken`] is fired.
+/// Resolves to a never-completing future when neither is configured.
+fn build_abort_future(
+    timeout: Option<Duration>,
+    cancellation: Option<CancellationToken>,
+) -> AbortFuture {
+    Box::pin(async move {
+        let cancel_fut = async move {
+            match cancellation {
+                Some(token) => {
+                    token.cancelled().await;
+                    "cancelled by caller".to_string()
+                }
+                None => std::future::pending::<String>().await,
+            }
+        };
+        let timer_fut = async move {
+            match timeout {
+                Some(d) => {
+                    tokio::time::sleep(d).await;
+                    format!("timeout exceeded after {d:?}")
+                }
+                None => std::future::pending::<String>().await,
+            }
+        };
+        // Cancel takes priority on simultaneous fire so callers can rely
+        // on the "cancelled by caller" reason in a configured race.
+        tokio::select! {
+            biased;
+            reason = cancel_fut => reason,
+            reason = timer_fut => reason,
+        }
+    })
+}
+
+/// Polls `fut` against the abort future. If the abort wins the race the
+/// caller receives `Err(reason)` and `fut` is dropped — which cancels
+/// any in-flight HTTP request, retry-backoff sleep, or tool execution
+/// behind it.
+async fn race_abort<F, T>(fut: F, abort: &mut AbortFuture) -> Result<T, String>
+where
+    F: Future<Output = T>,
+{
+    tokio::select! {
+        biased;
+        reason = &mut *abort => Err(reason),
+        value = fut => Ok(value),
+    }
+}
+
+/// Fires the `on_run_finished` + `on_chunk` hook pair for an aborted
+/// run and returns the `RunFinished` chunk for the caller to yield.
+/// Centralised so every abort site (hook terminate, tool terminate,
+/// timeout, cancellation) follows the same persistence discipline.
+async fn fire_abort_hooks(
+    middlewares: &[Arc<dyn ChatMiddleware>],
+    run_id: &RunId,
+    reason: String,
+    usage: Usage,
+    new_messages: Vec<Message>,
+) -> StreamChunk {
+    let finish_reason = FinishReason::Aborted(reason);
+    for mw in middlewares {
+        mw.on_run_finished(run_id, &finish_reason, &usage, &new_messages)
+            .await;
+    }
+    let chunk = StreamChunk::RunFinished {
+        run_id: run_id.clone(),
+        reason: finish_reason,
+        usage,
+        new_messages,
+    };
+    for mw in middlewares {
+        mw.on_chunk(&chunk).await;
+    }
+    chunk
+}
 
 macro_rules! bail_with_hooks {
     ($result: expr, $chain: expr, $run_id: expr) => {
@@ -35,23 +119,35 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
 ) -> Result<BoxStream<'a, Result<StreamChunk, EngineError<M::Error>>>, EngineError<M::Error>> {
     let run_id = config.run_id.clone().unwrap_or_default();
     let stream = try_stream! {
+        // The abort future resolves with a textual reason when either
+        // the timeout elapses or the cancellation token fires; until
+        // then it is `pending`, so wrapping any await with
+        // `race_abort(_, &mut abort_fut)` is a no-op on the happy path.
+        let mut abort_fut: AbortFuture = build_abort_future(
+            config.timeout,
+            config.cancellation.clone(),
+        );
+
         for mw in &config.middlewares {
-            match mw.on_run_start(&run_id, &messages, &config).await {
+            let action = match race_abort(
+                mw.on_run_start(&run_id, &messages, &config),
+                &mut abort_fut,
+            ).await {
+                Ok(a) => a,
+                Err(reason) => {
+                    let chunk = fire_abort_hooks(
+                        &config.middlewares, &run_id, reason, Usage::default(), vec![],
+                    ).await;
+                    yield chunk;
+                    return;
+                }
+            };
+            match action {
                 HookAction::Continue => {},
                 HookAction::Terminate {reason} => {
-                    let finish_reason = FinishReason::Aborted(reason);
-                    let usage = Usage::default();
-                    let new_messages: Vec<Message> = vec![];
-                    for mw in &config.middlewares {
-                        mw.on_run_finished(&run_id, &finish_reason, &usage, &new_messages).await;
-                    }
-                    let chunk = StreamChunk::RunFinished {
-                        run_id: run_id.clone(),
-                        reason: finish_reason,
-                        usage,
-                        new_messages,
-                    };
-                    for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                    let chunk = fire_abort_hooks(
+                        &config.middlewares, &run_id, reason, Usage::default(), vec![],
+                    ).await;
                     yield chunk;
                     return;
                 }
@@ -97,12 +193,59 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             };
 
             for mw in &config.middlewares {
-                mw.on_chat_request(&run_id, &step_id, &mut req).await;
+                if let Err(reason) = race_abort(
+                    mw.on_chat_request(&run_id, &step_id, &mut req),
+                    &mut abort_fut,
+                ).await {
+                    let new_messages = current_messages.split_off(messages.len());
+                    let chunk = fire_abort_hooks(
+                        &config.middlewares, &run_id, reason, usage_run, new_messages,
+                    ).await;
+                    yield chunk;
+                    return;
+                }
             }
 
-            let mut adapter_stream = bail_with_hooks!(model.chat_stream(req).await.map_err(EngineError::Model), &config.middlewares, &run_id)?;
+            let chat_stream_result = race_abort(model.chat_stream(req), &mut abort_fut).await;
+            let mut adapter_stream = match chat_stream_result {
+                Ok(r) => bail_with_hooks!(r.map_err(EngineError::Model), &config.middlewares, &run_id)?,
+                Err(reason) => {
+                    let new_messages = current_messages.split_off(messages.len());
+                    let chunk = fire_abort_hooks(
+                        &config.middlewares, &run_id, reason, usage_run, new_messages,
+                    ).await;
+                    yield chunk;
+                    return;
+                }
+            };
 
-            while let Some(chunk) = adapter_stream.next().await {
+            loop {
+                let next = match race_abort(adapter_stream.next(), &mut abort_fut).await {
+                    Ok(n) => n,
+                    Err(reason) => {
+                        // Preserve any complete blocks the assistant has
+                        // produced before the abort so history stays
+                        // consistent — only blocks closed by their `*End`
+                        // chunk are in `assistant_blocks`, partial tool
+                        // calls (start without end) are not.
+                        if !text_buf.is_empty() {
+                            assistant_blocks.push(AssistantBlock::Text(text_buf));
+                        }
+                        if !assistant_blocks.is_empty() {
+                            current_messages.push(Message::Assistant { blocks: assistant_blocks });
+                        }
+                        let new_messages = current_messages.split_off(messages.len());
+                        let chunk = fire_abort_hooks(
+                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                        ).await;
+                        yield chunk;
+                        return;
+                    }
+                };
+                let chunk = match next {
+                    Some(c) => c,
+                    None => break,
+                };
                 let chunk = bail_with_hooks!(chunk.map_err(EngineError::Model), &config.middlewares, &run_id)?;
 
                 for mw in &config.middlewares {
@@ -168,16 +311,48 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             let mut tools_result = Vec::new();
             for (id, name, args) in tool_calls {
 
-                let decision = run_tool_chain(&config.middlewares, &run_id, &step_id, &name, &args).await;
+                let decision = match race_abort(
+                    run_tool_chain(&config.middlewares, &run_id, &step_id, &name, &args),
+                    &mut abort_fut,
+                ).await {
+                    Ok(d) => d,
+                    Err(reason) => {
+                        if !tools_result.is_empty() {
+                            current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
+                        }
+                        let new_messages = current_messages.split_off(messages.len());
+                        let chunk = fire_abort_hooks(
+                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                        ).await;
+                        yield chunk;
+                        return;
+                    }
+                };
 
                 let content = match decision {
                     ToolDecision::Continue => {
-                        match tools.tool_call(&name, args.clone()).await {
-                            Ok(content) => content,
-                            Err(ToolRegistryError::NotFound(_)) => {
+                        let call_result = race_abort(
+                            tools.tool_call(&name, args.clone()),
+                            &mut abort_fut,
+                        ).await;
+                        match call_result {
+                            Ok(Ok(content)) => content,
+                            Ok(Err(ToolRegistryError::NotFound(_))) => {
                                 let available_tools: Vec<String> = tools.active_tools().map(|t| t.tool_definition().name).collect();
-                                ToolResultContent::Error(format!("Tool '{name}' not found. Available tools: [{}]", available_tools.join(", ")))},
-                            Err(other) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id)?,
+                                ToolResultContent::Error(format!("Tool '{name}' not found. Available tools: [{}]", available_tools.join(", ")))
+                            },
+                            Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id)?,
+                            Err(reason) => {
+                                if !tools_result.is_empty() {
+                                    current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
+                                }
+                                let new_messages = current_messages.split_off(messages.len());
+                                let chunk = fire_abort_hooks(
+                                    &config.middlewares, &run_id, reason, usage_run, new_messages,
+                                ).await;
+                                yield chunk;
+                                return;
+                            }
                         }
                     },
                     ToolDecision::Skip {reason} => {
@@ -188,24 +363,31 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                             current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
                         }
                         let new_messages = current_messages.split_off(messages.len());
-                        let finish_reason = FinishReason::Aborted(reason);
-                        for mw in &config.middlewares {
-                            mw.on_run_finished(&run_id, &finish_reason, &usage_run, &new_messages).await;
-                        }
-                        let chunk = StreamChunk::RunFinished {
-                            run_id: run_id.clone(),
-                            reason: finish_reason,
-                            usage: usage_run,
-                            new_messages,
-                        };
-                        for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                        let chunk = fire_abort_hooks(
+                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                        ).await;
                         yield chunk;
                         return;
                     }
                 };
 
                 for mw in &config.middlewares {
-                    mw.on_after_tool_call(&run_id, &step_id, &name, &args, &content).await;
+                    if let Err(reason) = race_abort(
+                        mw.on_after_tool_call(&run_id, &step_id, &name, &args, &content),
+                        &mut abort_fut,
+                    ).await {
+                        // Preserve the just-completed tool's result so
+                        // history isn't left with a tool_call missing
+                        // its tool_result on the next assistant turn.
+                        tools_result.push(UserBlock::ToolResult { call_id: id.clone(), content: content.clone() });
+                        current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
+                        let new_messages = current_messages.split_off(messages.len());
+                        let chunk = fire_abort_hooks(
+                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                        ).await;
+                        yield chunk;
+                        return;
+                    }
                 }
 
                 let chunk = StreamChunk::ToolResult {
