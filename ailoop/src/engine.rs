@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::errors::EngineError;
 use ailoop_core::{
     AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, HookAction,
-    RunConfig, StreamChunk, ToolDecision, Usage, UserBlock,
+    RunConfig, RunId, StepId, StreamChunk, ToolDecision, Usage, UserBlock,
 };
 use ailoop_tools::{ToolRegistry, errors::ToolRegistryError};
 pub use async_stream::try_stream;
@@ -13,13 +13,13 @@ use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
 
 macro_rules! bail_with_hooks {
-    ($result: expr, $chain: expr) => {
+    ($result: expr, $chain: expr, $run_id: expr) => {
         match $result {
             Ok(v) => Ok(v),
             Err(e) => {
                 let err: EngineError<_> = e.into();
                 for mw in $chain {
-                    mw.on_run_error(&err).await;
+                    mw.on_run_error($run_id, &err).await;
                 }
                 Err(err)
             }
@@ -33,18 +33,19 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
     tools: &'a ToolRegistry,
     config: RunConfig,
 ) -> Result<BoxStream<'a, Result<StreamChunk, EngineError<M::Error>>>, EngineError<M::Error>> {
+    let run_id = config.run_id.clone().unwrap_or_default();
     let stream = try_stream! {
         for mw in &config.middlewares {
-            match mw.on_run_start(&messages, &config).await {
+            match mw.on_run_start(&run_id, &messages, &config).await {
                 HookAction::Continue => {},
                 HookAction::Terminate {reason} => {
-                    yield StreamChunk::RunFinished { reason: FinishReason::Aborted(reason), usage: Usage::default(), new_messages: vec![] };
+                    yield StreamChunk::RunFinished { run_id: run_id.clone(), reason: FinishReason::Aborted(reason), usage: Usage::default(), new_messages: vec![] };
                     return;
                 }
             };
         }
 
-        yield StreamChunk::RunStarted;
+        yield StreamChunk::RunStarted { run_id: run_id.clone() };
 
         let mut iteration = 0;
         let mut current_messages = messages.to_vec();
@@ -54,10 +55,11 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
 
         loop {
             if iteration >= config.max_iterations {
-                bail_with_hooks!(Err(EngineError::MaxIterationsExceeded(iteration)), &config.middlewares)?;
+                bail_with_hooks!(Err(EngineError::MaxIterationsExceeded(iteration)), &config.middlewares, &run_id)?;
             }
 
-            yield StreamChunk::StepStarted { iteration };
+            let step_id = StepId::new();
+            yield StreamChunk::StepStarted { run_id: run_id.clone(), step_id: step_id.clone(), iteration };
 
             let mut assistant_blocks = Vec::new();
             let mut text_buf = String::new();
@@ -78,13 +80,13 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             };
 
             for mw in &config.middlewares {
-                mw.on_chat_request(&mut req).await;
+                mw.on_chat_request(&run_id, &step_id, &mut req).await;
             }
 
-            let mut adapter_stream = bail_with_hooks!(model.chat_stream(req).await.map_err(EngineError::Model), &config.middlewares)?;
+            let mut adapter_stream = bail_with_hooks!(model.chat_stream(req).await.map_err(EngineError::Model), &config.middlewares, &run_id)?;
 
             while let Some(chunk) = adapter_stream.next().await {
-                let chunk = bail_with_hooks!(chunk.map_err(EngineError::Model), &config.middlewares)?;
+                let chunk = bail_with_hooks!(chunk.map_err(EngineError::Model), &config.middlewares, &run_id)?;
 
                 for mw in &config.middlewares {
                     mw.on_chunk(&chunk).await;
@@ -149,7 +151,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             let mut tools_result = Vec::new();
             for (id, name, args) in tool_calls {
 
-                let decision = run_tool_chain(&config.middlewares, &name, &args).await;
+                let decision = run_tool_chain(&config.middlewares, &run_id, &step_id, &name, &args).await;
 
                 let content = match decision {
                     ToolDecision::Continue => {
@@ -158,23 +160,25 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                             Err(ToolRegistryError::NotFound(_)) => {
                                 let available_tools: Vec<String> = tools.active_tools().map(|t| t.tool_definition().name).collect();
                                 ToolResultContent::Error(format!("Tool '{name}' not found. Available tools: [{}]", available_tools.join(", ")))},
-                            Err(other) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares)?,
+                            Err(other) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id)?,
                         }
                     },
                     ToolDecision::Skip {reason} => {
                         ToolResultContent::Error(format!("Tool skipped: {reason}"))
                     },
                     ToolDecision::Terminate {reason} => {
-                        yield StreamChunk::RunFinished { reason: FinishReason::Aborted(reason), usage: usage_run, new_messages: current_messages.split_off(messages.len()) };
+                        yield StreamChunk::RunFinished { run_id: run_id.clone(), reason: FinishReason::Aborted(reason), usage: usage_run, new_messages: current_messages.split_off(messages.len()) };
                         return;
                     }
                 };
 
                 for mw in &config.middlewares {
-                    mw.on_after_tool_call(&name, &args, &content).await;
+                    mw.on_after_tool_call(&run_id, &step_id, &name, &args, &content).await;
                 }
 
                 yield StreamChunk::ToolResult {
+                    run_id: run_id.clone(),
+                    step_id: step_id.clone(),
                     call_id: id.clone(),
                     content: content.clone()
                 };
@@ -187,6 +191,8 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             }
 
             yield StreamChunk::StepFinished {
+                run_id: run_id.clone(),
+                step_id: step_id.clone(),
                 iteration,
                 new_messages_so_far: Arc::new(current_messages[messages.len()..].to_vec()),
             };
@@ -201,10 +207,11 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
         let new_messages = current_messages.split_off(messages.len());
 
         for mw in &config.middlewares {
-            mw.on_run_finished(&finish_reason, &usage_run, &new_messages).await;
+            mw.on_run_finished(&run_id, &finish_reason, &usage_run, &new_messages).await;
         }
 
         yield StreamChunk::RunFinished {
+            run_id: run_id.clone(),
             reason: finish_reason,
             usage: usage_run,
             new_messages,
@@ -216,11 +223,13 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
 
 async fn run_tool_chain(
     chain: &[Arc<dyn ChatMiddleware>],
+    run_id: &RunId,
+    step_id: &StepId,
     name: &str,
     args: &Value,
 ) -> ToolDecision {
     for mw in chain {
-        match mw.on_before_tool_call(name, args).await {
+        match mw.on_before_tool_call(run_id, step_id, name, args).await {
             ToolDecision::Continue => continue,
             terminate_or_skip => return terminate_or_skip,
         }
@@ -375,6 +384,104 @@ mod tests {
                 assert_eq!(args, &json!({"location": "SF"}));
             }
             other => panic!("expected ToolCall second, got {other:?}"),
+        }
+    }
+
+    /// All engine-emitted chunks of a run share the same `RunId`. Within
+    /// a step, `StepId` matches across `StepStarted`, `ToolResult`, and
+    /// `StepFinished`. Distinct iterations get distinct `StepId`s. This
+    /// is the contract observability middlewares rely on to correlate
+    /// concurrent runs and step-level spans.
+    #[tokio::test]
+    async fn engine_chunks_share_run_id_and_step_ids_match_per_iteration() {
+        let turn1 = vec![
+            StreamChunk::ToolCallStart {
+                id: "toolu_1".into(),
+                name: "get_weather".into(),
+            },
+            StreamChunk::ToolCallEnd {
+                id: "toolu_1".into(),
+                name: "get_weather".into(),
+                args: json!({}),
+            },
+            StreamChunk::TurnFinished {
+                reason: FinishReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ];
+        let turn2 = vec![StreamChunk::TurnFinished {
+            reason: FinishReason::EndTurn,
+            usage: Usage::default(),
+        }];
+
+        let model = ScriptedModel {
+            scripts: Mutex::new(VecDeque::from([turn1, turn2])),
+        };
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(GetWeather)).unwrap();
+
+        let stream = run_chat(
+            &model,
+            vec![Message::user("hi")],
+            &registry,
+            RunConfig::default(),
+        )
+        .await
+        .expect("run_chat should start");
+
+        let chunks: Vec<StreamChunk> = stream.collect::<Vec<_>>().await.into_iter().map(|c| c.unwrap()).collect();
+
+        let run_ids: Vec<&RunId> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::RunStarted { run_id }
+                | StreamChunk::StepStarted { run_id, .. }
+                | StreamChunk::StepFinished { run_id, .. }
+                | StreamChunk::ToolResult { run_id, .. }
+                | StreamChunk::RunFinished { run_id, .. } => Some(run_id),
+                _ => None,
+            })
+            .collect();
+        assert!(!run_ids.is_empty(), "expected engine chunks with RunId");
+        let first = run_ids[0];
+        for id in &run_ids[1..] {
+            assert_eq!(*id, first, "all engine-emitted chunks must share RunId");
+        }
+
+        let mut step_ids_by_iter: std::collections::HashMap<usize, Vec<&StepId>> =
+            std::collections::HashMap::new();
+        for c in &chunks {
+            match c {
+                StreamChunk::StepStarted { step_id, iteration, .. }
+                | StreamChunk::StepFinished { step_id, iteration, .. } => {
+                    step_ids_by_iter.entry(*iteration).or_default().push(step_id);
+                }
+                StreamChunk::ToolResult { step_id, .. } => {
+                    step_ids_by_iter.entry(0).or_default().push(step_id);
+                }
+                _ => {}
+            }
+        }
+        for (iter, ids) in &step_ids_by_iter {
+            let s = ids[0];
+            for id in &ids[1..] {
+                assert_eq!(*id, s, "iteration {iter} step_ids must match");
+            }
+        }
+
+        let iter_step_ids: Vec<&StepId> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::StepStarted { step_id, .. } => Some(step_id),
+                _ => None,
+            })
+            .collect();
+        if iter_step_ids.len() >= 2 {
+            assert_ne!(
+                iter_step_ids[0], iter_step_ids[1],
+                "distinct iterations must mint distinct StepIds"
+            );
         }
     }
 }

@@ -344,8 +344,13 @@ mod tests {
         name: &str,
         args: &serde_json::Value,
     ) -> ToolDecision {
+        let run_id = ailoop_core::RunId::new();
+        let step_id = ailoop_core::StepId::new();
         for mw in &chat.middlewares {
-            match mw.on_before_tool_call(name, args).await {
+            match mw
+                .on_before_tool_call(&run_id, &step_id, name, args)
+                .await
+            {
                 ToolDecision::Continue => continue,
                 other => return other,
             }

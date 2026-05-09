@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use ailoop_core::{ChatMiddleware, ChatRequest, ToolDecision};
+use ailoop_core::{ChatMiddleware, ChatRequest, RunId, StepId, ToolDecision};
 use futures::future::BoxFuture;
 use serde_json::Value;
 
@@ -14,7 +14,7 @@ pub struct SystemPromptMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for SystemPromptMiddleware {
-    async fn on_chat_request(&self, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
         let mut prompt = self.base.clone();
 
         if let Some(tools) = &req.tools {
@@ -110,7 +110,13 @@ where
 
 #[async_trait::async_trait]
 impl ChatMiddleware for ApprovalMiddleware {
-    async fn on_before_tool_call(&self, name: &str, args: &Value) -> ToolDecision {
+    async fn on_before_tool_call(
+        &self,
+        _run_id: &RunId,
+        _step_id: &StepId,
+        name: &str,
+        args: &Value,
+    ) -> ToolDecision {
         if !self.should_gate(name) {
             return ToolDecision::Continue;
         }

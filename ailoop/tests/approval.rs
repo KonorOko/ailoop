@@ -48,8 +48,14 @@ async fn approve_all_fires_for_every_tool() {
         }
     });
 
-    let _ = mw.on_before_tool_call("anything", &json!({})).await;
-    let _ = mw.on_before_tool_call("else", &json!({})).await;
+    let run_id = ailoop_core::RunId::new();
+    let step_id = ailoop_core::StepId::new();
+    let _ = mw
+        .on_before_tool_call(&run_id, &step_id, "anything", &json!({}))
+        .await;
+    let _ = mw
+        .on_before_tool_call(&run_id, &step_id, "else", &json!({}))
+        .await;
 
     assert_eq!(counter.load(Ordering::SeqCst), 2);
 }
@@ -66,9 +72,17 @@ async fn for_named_only_fires_for_listed_tools() {
         }
     });
 
-    let _ = mw.on_before_tool_call("list_dir", &json!({})).await;
-    let _ = mw.on_before_tool_call("delete_file", &json!({})).await;
-    let _ = mw.on_before_tool_call("other", &json!({})).await;
+    let run_id = ailoop_core::RunId::new();
+    let step_id = ailoop_core::StepId::new();
+    let _ = mw
+        .on_before_tool_call(&run_id, &step_id, "list_dir", &json!({}))
+        .await;
+    let _ = mw
+        .on_before_tool_call(&run_id, &step_id, "delete_file", &json!({}))
+        .await;
+    let _ = mw
+        .on_before_tool_call(&run_id, &step_id, "other", &json!({}))
+        .await;
 
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 }
@@ -81,7 +95,11 @@ async fn for_named_returns_continue_for_non_gated() {
         }
     });
 
-    let decision = mw.on_before_tool_call("list_dir", &json!({})).await;
+    let run_id = ailoop_core::RunId::new();
+    let step_id = ailoop_core::StepId::new();
+    let decision = mw
+        .on_before_tool_call(&run_id, &step_id, "list_dir", &json!({}))
+        .await;
     assert!(matches!(decision, ToolDecision::Continue));
 }
 
@@ -93,7 +111,11 @@ async fn approval_callback_decision_is_returned() {
         }
     });
 
-    let decision = mw.on_before_tool_call("anything", &json!({})).await;
+    let run_id = ailoop_core::RunId::new();
+    let step_id = ailoop_core::StepId::new();
+    let decision = mw
+        .on_before_tool_call(&run_id, &step_id, "anything", &json!({}))
+        .await;
     match decision {
         ToolDecision::Skip { reason } => assert_eq!(reason, "denied"),
         _ => panic!("expected Skip"),

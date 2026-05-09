@@ -1,6 +1,6 @@
 use std::{ops::Add, sync::Arc};
 
-use crate::{Message, ToolResultContent};
+use crate::{Message, RunId, StepId, ToolResultContent};
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -44,19 +44,28 @@ pub enum StreamChunk {
     },
 
     // Extend
-    RunStarted,
+    RunStarted {
+        run_id: RunId,
+    },
     StepStarted {
+        run_id: RunId,
+        step_id: StepId,
         iteration: usize,
     },
     StepFinished {
+        run_id: RunId,
+        step_id: StepId,
         iteration: usize,
         new_messages_so_far: Arc<Vec<Message>>,
     },
     ToolResult {
+        run_id: RunId,
+        step_id: StepId,
         call_id: String,
         content: ToolResultContent,
     },
     RunFinished {
+        run_id: RunId,
         reason: FinishReason,
         usage: Usage,
         new_messages: Vec<Message>,
