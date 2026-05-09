@@ -39,11 +39,17 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             match mw.on_run_start(&run_id, &messages, &config).await {
                 HookAction::Continue => {},
                 HookAction::Terminate {reason} => {
+                    let finish_reason = FinishReason::Aborted(reason);
+                    let usage = Usage::default();
+                    let new_messages: Vec<Message> = vec![];
+                    for mw in &config.middlewares {
+                        mw.on_run_finished(&run_id, &finish_reason, &usage, &new_messages).await;
+                    }
                     let chunk = StreamChunk::RunFinished {
                         run_id: run_id.clone(),
-                        reason: FinishReason::Aborted(reason),
-                        usage: Usage::default(),
-                        new_messages: vec![],
+                        reason: finish_reason,
+                        usage,
+                        new_messages,
                     };
                     for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
                     yield chunk;
@@ -178,11 +184,19 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                         ToolResultContent::Error(format!("Tool skipped: {reason}"))
                     },
                     ToolDecision::Terminate {reason} => {
+                        if !tools_result.is_empty() {
+                            current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
+                        }
+                        let new_messages = current_messages.split_off(messages.len());
+                        let finish_reason = FinishReason::Aborted(reason);
+                        for mw in &config.middlewares {
+                            mw.on_run_finished(&run_id, &finish_reason, &usage_run, &new_messages).await;
+                        }
                         let chunk = StreamChunk::RunFinished {
                             run_id: run_id.clone(),
-                            reason: FinishReason::Aborted(reason),
+                            reason: finish_reason,
                             usage: usage_run,
-                            new_messages: current_messages.split_off(messages.len()),
+                            new_messages,
                         };
                         for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
                         yield chunk;
@@ -476,5 +490,206 @@ mod tests {
                 "distinct iterations must mint distinct StepIds"
             );
         }
+    }
+
+    /// `HookAction::Terminate` from `on_run_start` must still drive the planned
+    /// termination contract: every middleware sees `on_run_finished` once with
+    /// `FinishReason::Aborted`. Observers like `TokenBudget` accumulate the
+    /// final turn there; if the engine emits `RunFinished` without firing the
+    /// hook, those middlewares miss aborted runs entirely.
+    #[tokio::test]
+    async fn on_run_finished_fires_on_hook_terminate() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AbortingMw {
+            finished_count: AtomicUsize,
+            last_reason: Mutex<Option<FinishReason>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ChatMiddleware for AbortingMw {
+            async fn on_run_start(
+                &self,
+                _run_id: &RunId,
+                _messages: &[Message],
+                _config: &RunConfig,
+            ) -> HookAction {
+                HookAction::Terminate {
+                    reason: "budget exceeded".into(),
+                }
+            }
+            async fn on_run_finished(
+                &self,
+                _run_id: &RunId,
+                reason: &FinishReason,
+                _usage: &Usage,
+                _new_messages: &[Message],
+            ) {
+                self.finished_count.fetch_add(1, Ordering::SeqCst);
+                *self.last_reason.lock().unwrap() = Some(reason.clone());
+            }
+        }
+
+        let mw = Arc::new(AbortingMw {
+            finished_count: AtomicUsize::new(0),
+            last_reason: Mutex::new(None),
+        });
+        let model = ScriptedModel::new(Vec::<Vec<StreamChunk>>::new());
+        let registry = ToolRegistry::new();
+        let config = RunConfig {
+            middlewares: vec![mw.clone()],
+            ..RunConfig::default()
+        };
+
+        let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
+            .await
+            .expect("run_chat should start");
+        let chunks: Vec<_> = stream.collect().await;
+
+        assert_eq!(
+            mw.finished_count.load(Ordering::SeqCst),
+            1,
+            "on_run_finished must fire exactly once on HookAction::Terminate"
+        );
+        match mw.last_reason.lock().unwrap().as_ref() {
+            Some(FinishReason::Aborted(r)) => assert_eq!(r, "budget exceeded"),
+            other => panic!("expected Aborted reason, got {other:?}"),
+        }
+
+        let finished = chunks
+            .into_iter()
+            .find_map(|c| match c {
+                Ok(StreamChunk::RunFinished { reason, .. }) => Some(reason),
+                _ => None,
+            })
+            .expect("run should emit RunFinished");
+        assert!(
+            matches!(finished, FinishReason::Aborted(ref r) if r == "budget exceeded"),
+            "RunFinished.reason mismatch: {finished:?}"
+        );
+    }
+
+    /// When middleware aborts mid-step on the second of two tool calls, the
+    /// `User { ToolResult }` message for the already-executed first tool must
+    /// land in `RunFinished.new_messages`. Otherwise `Conversation::stream`
+    /// extends history with an assistant message carrying tool_uses but no
+    /// matching tool_results — the next provider call rejects with HTTP 400.
+    #[tokio::test]
+    async fn tool_terminate_preserves_prior_tool_results_in_history() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct TerminateOnSecondToolMw {
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl ChatMiddleware for TerminateOnSecondToolMw {
+            async fn on_before_tool_call(
+                &self,
+                _run_id: &RunId,
+                _step_id: &StepId,
+                _name: &str,
+                _args: &Value,
+            ) -> ToolDecision {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    ToolDecision::Continue
+                } else {
+                    ToolDecision::Terminate {
+                        reason: "policy".into(),
+                    }
+                }
+            }
+        }
+
+        let turn = vec![
+            StreamChunk::ToolCallStart {
+                id: "toolu_a".into(),
+                name: "get_weather".into(),
+            },
+            StreamChunk::ToolCallEnd {
+                id: "toolu_a".into(),
+                name: "get_weather".into(),
+                args: json!({}),
+            },
+            StreamChunk::ToolCallStart {
+                id: "toolu_b".into(),
+                name: "get_weather".into(),
+            },
+            StreamChunk::ToolCallEnd {
+                id: "toolu_b".into(),
+                name: "get_weather".into(),
+                args: json!({}),
+            },
+            StreamChunk::TurnFinished {
+                reason: FinishReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ];
+        let model = ScriptedModel::new([turn]);
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(GetWeather)).unwrap();
+
+        let mw = Arc::new(TerminateOnSecondToolMw {
+            calls: AtomicUsize::new(0),
+        });
+        let config = RunConfig {
+            middlewares: vec![mw.clone()],
+            ..RunConfig::default()
+        };
+
+        let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
+            .await
+            .expect("run_chat should start");
+        let chunks: Vec<_> = stream.collect().await;
+
+        let new_messages = chunks
+            .into_iter()
+            .find_map(|c| match c {
+                Ok(StreamChunk::RunFinished {
+                    reason: FinishReason::Aborted(_),
+                    new_messages,
+                    ..
+                }) => Some(new_messages),
+                _ => None,
+            })
+            .expect("run should emit RunFinished{Aborted}");
+
+        let assistant_tool_call_ids: Vec<&str> = new_messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::Assistant { blocks } => Some(blocks),
+                _ => None,
+            })
+            .flat_map(|blocks| blocks.iter())
+            .filter_map(|b| match b {
+                AssistantBlock::ToolCall { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            assistant_tool_call_ids,
+            vec!["toolu_a", "toolu_b"],
+            "assistant turn must carry both tool_calls"
+        );
+
+        let user_tool_result_ids: Vec<&str> = new_messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::User { blocks } => Some(blocks),
+                _ => None,
+            })
+            .flat_map(|blocks| blocks.iter())
+            .filter_map(|b| match b {
+                UserBlock::ToolResult { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            user_tool_result_ids.contains(&"toolu_a"),
+            "first tool's ToolResult must be preserved in history, got {user_tool_result_ids:?}"
+        );
     }
 }
