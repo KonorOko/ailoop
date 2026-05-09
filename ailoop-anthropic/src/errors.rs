@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use ailoop_core::{RetryClassification, Retryable};
 use reqwest::StatusCode;
 
 /// Discriminated category of an HTTP-level Anthropic API error, derived
@@ -75,4 +76,124 @@ pub enum AnthropicError {
     /// `ApiErrorKind::Overloaded` without parsing strings.
     #[error("Anthropic error event ({kind:?}): {message}")]
     Provider { kind: ApiErrorKind, message: String },
+}
+
+/// Map an Anthropic-typed `ApiErrorKind` to a retry decision. Used both
+/// for HTTP-envelope errors (where `retry_after` may be `Some`) and for
+/// SSE `Provider` errors (where it is always `None`).
+fn classify_kind(kind: &ApiErrorKind, retry_after: Option<Duration>) -> RetryClassification {
+    match kind {
+        // Overloaded / rate limit / generic api_error are the canonical
+        // transient signals on Anthropic. `Other(_)` is conservative —
+        // unknown kinds default to transient so we don't strand a request
+        // on a future error type that's actually retryable.
+        ApiErrorKind::Overloaded
+        | ApiErrorKind::RateLimit
+        | ApiErrorKind::Api
+        | ApiErrorKind::Other(_) => RetryClassification::Transient { retry_after },
+        ApiErrorKind::Authentication
+        | ApiErrorKind::Permission
+        | ApiErrorKind::InvalidRequest
+        | ApiErrorKind::NotFound
+        | ApiErrorKind::RequestTooLarge => RetryClassification::Permanent,
+    }
+}
+
+impl Retryable for AnthropicError {
+    fn retry_classification(&self) -> RetryClassification {
+        match self {
+            AnthropicError::Api {
+                kind, retry_after, ..
+            } => classify_kind(kind, *retry_after),
+            AnthropicError::Provider { kind, .. } => classify_kind(kind, None),
+            AnthropicError::Status { status, .. } => {
+                if status.is_server_error() {
+                    RetryClassification::Transient { retry_after: None }
+                } else {
+                    RetryClassification::Permanent
+                }
+            }
+            AnthropicError::Http(_) => RetryClassification::Transient { retry_after: None },
+            // Parse failures are deterministic — retrying won't change the bytes.
+            AnthropicError::Sse(_) | AnthropicError::Json(_) => RetryClassification::Permanent,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limit_with_retry_after_is_transient() {
+        let err = AnthropicError::Api {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            kind: ApiErrorKind::RateLimit,
+            message: "slow down".into(),
+            retry_after: Some(Duration::from_secs(2)),
+        };
+        assert_eq!(
+            err.retry_classification(),
+            RetryClassification::Transient {
+                retry_after: Some(Duration::from_secs(2))
+            },
+        );
+    }
+
+    #[test]
+    fn overloaded_provider_event_is_transient_without_retry_after() {
+        let err = AnthropicError::Provider {
+            kind: ApiErrorKind::Overloaded,
+            message: "overloaded".into(),
+        };
+        assert_eq!(
+            err.retry_classification(),
+            RetryClassification::Transient { retry_after: None },
+        );
+    }
+
+    #[test]
+    fn authentication_is_permanent() {
+        let err = AnthropicError::Api {
+            status: StatusCode::UNAUTHORIZED,
+            kind: ApiErrorKind::Authentication,
+            message: "bad key".into(),
+            retry_after: None,
+        };
+        assert_eq!(err.retry_classification(), RetryClassification::Permanent);
+    }
+
+    #[test]
+    fn unknown_kind_is_conservatively_transient() {
+        let err = AnthropicError::Api {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            kind: ApiErrorKind::Other("future_kind".into()),
+            message: "?".into(),
+            retry_after: None,
+        };
+        assert_eq!(
+            err.retry_classification(),
+            RetryClassification::Transient { retry_after: None },
+        );
+    }
+
+    #[test]
+    fn status_fallback_splits_on_server_vs_client() {
+        let server = AnthropicError::Status {
+            status: StatusCode::BAD_GATEWAY,
+            body: "<html/>".into(),
+        };
+        assert_eq!(
+            server.retry_classification(),
+            RetryClassification::Transient { retry_after: None },
+        );
+        let client = AnthropicError::Status {
+            status: StatusCode::BAD_REQUEST,
+            body: "<html/>".into(),
+        };
+        assert_eq!(
+            client.retry_classification(),
+            RetryClassification::Permanent
+        );
+    }
 }
