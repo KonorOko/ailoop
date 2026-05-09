@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -8,4 +7,12 @@ pub enum CompactionError {
 
     #[error("Budget exceeded")]
     BudgetExceeded,
+
+    /// A strategy that calls a [`ailoop_core::CompletionModel`]
+    /// (notably [`crate::compaction::SummarizeStrategy`]) failed to
+    /// produce a summary. The original error is rendered as a string
+    /// to keep [`CompactionError`] a non-generic, object-safe enum
+    /// usable behind `Box<dyn CompactionStrategy>`.
+    #[error("Summarization failed: {0}")]
+    SummarizationFailed(String),
 }
