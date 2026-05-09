@@ -12,11 +12,13 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::{BoxStream, self};
 
 use crate::request::ChatRequest;
+use crate::retry::{RetryClassification, Retryable};
 use crate::stream::StreamChunk;
 use crate::traits::CompletionModel;
 
@@ -34,6 +36,30 @@ impl std::fmt::Display for ScriptedError {
 }
 
 impl std::error::Error for ScriptedError {}
+
+/// Test-only classification by message convention so retry-aware
+/// decorators can be exercised without a real provider:
+///
+/// - contains `"permanent"` → [`RetryClassification::Permanent`]
+/// - contains `"transient:<ms>"` → transient with `retry_after = ms`
+/// - contains `"transient"` → transient without a `retry_after`
+/// - anything else → permanent (so unrelated `Err`s in tests don't loop)
+impl Retryable for ScriptedError {
+    fn retry_classification(&self) -> RetryClassification {
+        let s = self.0.as_str();
+        if s.contains("permanent") {
+            return RetryClassification::Permanent;
+        }
+        if let Some((_, after)) = s.split_once("transient") {
+            let retry_after = after.strip_prefix(':').and_then(|tail| {
+                let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse::<u64>().ok().map(Duration::from_millis)
+            });
+            return RetryClassification::Transient { retry_after };
+        }
+        RetryClassification::Permanent
+    }
+}
 
 /// One scripted "turn". The outer `Result` distinguishes a setup-time
 /// failure (the `chat_stream` call itself returns `Err`) from a stream
@@ -211,5 +237,27 @@ mod tests {
             Err(ScriptedError(msg)) => assert_eq!(msg, "rate limited"),
             Ok(_) => panic!("expected error"),
         }
+    }
+
+    #[test]
+    fn scripted_error_is_retryable_by_convention() {
+        assert_eq!(
+            ScriptedError("permanent: bad auth".into()).retry_classification(),
+            RetryClassification::Permanent,
+        );
+        assert_eq!(
+            ScriptedError("transient".into()).retry_classification(),
+            RetryClassification::Transient { retry_after: None },
+        );
+        assert_eq!(
+            ScriptedError("transient:75 ms".into()).retry_classification(),
+            RetryClassification::Transient {
+                retry_after: Some(Duration::from_millis(75))
+            },
+        );
+        assert_eq!(
+            ScriptedError("something else entirely".into()).retry_classification(),
+            RetryClassification::Permanent,
+        );
     }
 }

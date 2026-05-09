@@ -3,6 +3,7 @@ use serde_json::Value;
 
 use crate::Message;
 
+#[derive(Clone)]
 pub struct ChatRequest {
     pub messages: Vec<Message>,
     pub system_prompt: Option<String>,
