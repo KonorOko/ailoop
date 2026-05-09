@@ -190,6 +190,8 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                 top_p: None,
                 top_k: None,
                 stop_sequences: Vec::new(),
+                tool_choice: None,
+                disable_parallel_tool_use: None,
             };
 
             for mw in &config.middlewares {

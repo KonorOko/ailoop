@@ -176,6 +176,8 @@ mod tests {
                 top_p: None,
                 top_k: None,
                 stop_sequences: vec![],
+                tool_choice: None,
+                disable_parallel_tool_use: None,
             })
             .await
             .unwrap();
@@ -203,6 +205,8 @@ mod tests {
                 top_p: None,
                 top_k: None,
                 stop_sequences: vec![],
+                tool_choice: None,
+                disable_parallel_tool_use: None,
             })
             .await
             .expect("chat_stream should open the stream");
@@ -231,6 +235,8 @@ mod tests {
                 top_p: None,
                 top_k: None,
                 stop_sequences: vec![],
+                tool_choice: None,
+                disable_parallel_tool_use: None,
             })
             .await;
         match result {
