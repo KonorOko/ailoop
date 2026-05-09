@@ -1,5 +1,5 @@
 use ailoop_core::{
-    AssistantBlock, ChatRequest, Message, ToolDefinition, ToolResultContent, UserBlock,
+    AssistantBlock, ChatRequest, Message, ToolChoice, ToolDefinition, ToolResultContent, UserBlock,
 };
 use serde_json::{Value, json};
 
@@ -36,6 +36,14 @@ pub fn build_body(deployment: &str, req: &ChatRequest) -> Value {
     // that do can be reached by setting it via `additional_params`.
     if !req.stop_sequences.is_empty() {
         body.insert("stop".into(), json!(req.stop_sequences));
+    }
+
+    if let Some(choice) = &req.tool_choice {
+        body.insert("tool_choice".into(), to_chat_tool_choice(choice));
+    }
+    // Chat Completions exposes the inverse: `parallel_tool_calls` (default true).
+    if let Some(disable) = req.disable_parallel_tool_use {
+        body.insert("parallel_tool_calls".into(), json!(!disable));
     }
 
     if let Some(extra) = &req.additional_params
@@ -141,6 +149,19 @@ fn append_assistant_blocks(out: &mut Vec<Value>, blocks: &[AssistantBlock]) {
     out.push(Value::Object(msg));
 }
 
+fn to_chat_tool_choice(choice: &ToolChoice) -> Value {
+    match choice {
+        ToolChoice::Auto => json!("auto"),
+        // Chat Completions calls this `"required"`, not `"any"`.
+        ToolChoice::Any => json!("required"),
+        ToolChoice::Tool { name } => json!({
+            "type": "function",
+            "function": { "name": name },
+        }),
+        ToolChoice::None_ => json!("none"),
+    }
+}
+
 fn to_tools(tools: &[ToolDefinition]) -> Vec<Value> {
     tools
         .iter()
@@ -173,6 +194,8 @@ mod tests {
             stop_sequences: Vec::new(),
             max_tokens: 1024,
             additional_params: None,
+            tool_choice: None,
+            disable_parallel_tool_use: None,
         }
     }
 
@@ -358,6 +381,89 @@ mod tests {
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
         assert!(body.get("stop").is_none());
+    }
+
+    #[test]
+    fn omits_tool_choice_and_parallel_when_unset() {
+        let body = build_body("dep", &base_req());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+    }
+
+    #[test]
+    fn maps_tool_choice_auto_as_string() {
+        let req = ChatRequest {
+            tool_choice: Some(ToolChoice::Auto),
+            ..base_req()
+        };
+        let body = build_body("dep", &req);
+        assert_eq!(body["tool_choice"], json!("auto"));
+    }
+
+    /// Azure / OpenAI Chat Completions calls Anthropic's `"any"`
+    /// `"required"` — the adapter is the right place for that
+    /// translation.
+    #[test]
+    fn maps_tool_choice_any_as_required() {
+        let req = ChatRequest {
+            tool_choice: Some(ToolChoice::Any),
+            ..base_req()
+        };
+        let body = build_body("dep", &req);
+        assert_eq!(body["tool_choice"], json!("required"));
+    }
+
+    #[test]
+    fn maps_tool_choice_specific_tool_as_function_object() {
+        let req = ChatRequest {
+            tool_choice: Some(ToolChoice::Tool {
+                name: "get_weather".into(),
+            }),
+            ..base_req()
+        };
+        let body = build_body("dep", &req);
+        assert_eq!(
+            body["tool_choice"],
+            json!({
+                "type": "function",
+                "function": { "name": "get_weather" },
+            })
+        );
+    }
+
+    #[test]
+    fn maps_tool_choice_none_as_string() {
+        let req = ChatRequest {
+            tool_choice: Some(ToolChoice::None_),
+            ..base_req()
+        };
+        let body = build_body("dep", &req);
+        assert_eq!(body["tool_choice"], json!("none"));
+    }
+
+    /// Anthropic carries the flag inside `tool_choice`; Chat Completions
+    /// exposes its inverse (`parallel_tool_calls`) as a top-level field.
+    /// Setting `disable_parallel_tool_use = true` must produce
+    /// `parallel_tool_calls = false`, independent of `tool_choice`.
+    #[test]
+    fn disable_parallel_emits_parallel_tool_calls_false() {
+        let req = ChatRequest {
+            disable_parallel_tool_use: Some(true),
+            ..base_req()
+        };
+        let body = build_body("dep", &req);
+        assert_eq!(body["parallel_tool_calls"], json!(false));
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn disable_parallel_false_emits_parallel_tool_calls_true() {
+        let req = ChatRequest {
+            disable_parallel_tool_use: Some(false),
+            ..base_req()
+        };
+        let body = build_body("dep", &req);
+        assert_eq!(body["parallel_tool_calls"], json!(true));
     }
 
     #[test]
