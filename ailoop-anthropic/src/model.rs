@@ -1,4 +1,5 @@
 use crate::client::AnthropicClient;
+use crate::error_body::{classify_http_error, parse_retry_after};
 use crate::errors::AnthropicError;
 use crate::request::build_body;
 use crate::stream::process_response;
@@ -56,8 +57,9 @@ impl CompletionModel for AnthropicModel {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = parse_retry_after(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(AnthropicError::Status { status, body });
+            return Err(classify_http_error(status, body, retry_after));
         }
 
         Ok(process_response(response))
