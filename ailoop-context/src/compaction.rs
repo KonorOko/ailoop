@@ -2,7 +2,7 @@ use ailoop_core::{Message, UserBlock};
 
 use crate::errors::CompactionError;
 
-pub trait CompactionStrategy {
+pub trait CompactionStrategy: Send + Sync {
     /// Stable, machine-readable name of the strategy. Used by
     /// `HistoryCompacted` events so callers can attribute compaction
     /// to a specific algorithm in logs/metrics.

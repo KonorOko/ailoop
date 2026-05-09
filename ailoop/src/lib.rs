@@ -2,6 +2,7 @@ mod conversation;
 mod engine;
 mod errors;
 mod middleware;
+mod sub_agent;
 #[cfg(feature = "tracing")]
 mod tracing_middleware;
 
@@ -16,5 +17,6 @@ pub use ailoop_tools::{Tool, ToolJsonType, ToolRegistry};
 pub use conversation::{Conversation, RunOutcome};
 pub use engine::run_chat;
 pub use middleware::ApprovalMiddleware;
+pub use sub_agent::SubAgentTool;
 #[cfg(feature = "tracing")]
 pub use tracing_middleware::TracingMiddleware;

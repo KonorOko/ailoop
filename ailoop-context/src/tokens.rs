@@ -1,6 +1,6 @@
 use ailoop_core::{AssistantBlock, Message, ToolResultContent, UserBlock};
 
-pub trait TokenEstimator {
+pub trait TokenEstimator: Send + Sync {
     fn estimate_text(&self, text: &str) -> usize;
 
     fn estimate_message(&self, message: &Message) -> usize {
