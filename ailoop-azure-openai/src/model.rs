@@ -2,6 +2,7 @@ use ailoop_core::{ChatRequest, CompletionModel, StreamChunk};
 use futures::stream::BoxStream;
 
 use crate::client::{AzureOpenAIAuth, AzureOpenAIClient};
+use crate::error_body::{classify_http_error, parse_retry_after};
 use crate::errors::AzureOpenAIError;
 use crate::request::build_body;
 use crate::stream::process_response;
@@ -70,8 +71,9 @@ impl CompletionModel for AzureOpenAIChatModel {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = parse_retry_after(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(AzureOpenAIError::Status { status, body });
+            return Err(classify_http_error(status, body, retry_after));
         }
 
         Ok(process_response(response))
