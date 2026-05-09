@@ -70,6 +70,16 @@ pub enum StreamChunk {
         usage: Usage,
         new_messages: Vec<Message>,
     },
+    /// Emitted by `Conversation::stream` (not the engine) when history
+    /// compaction ran before the request was sent. Carries message
+    /// counts from before/after compaction and the strategy's name so
+    /// observability middlewares can report what was dropped.
+    HistoryCompacted {
+        run_id: RunId,
+        before_count: usize,
+        after_count: usize,
+        strategy: &'static str,
+    },
 }
 
 #[derive(Debug, Clone)]

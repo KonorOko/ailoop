@@ -3,6 +3,11 @@ use ailoop_core::{Message, UserBlock};
 use crate::errors::CompactionError;
 
 pub trait CompactionStrategy {
+    /// Stable, machine-readable name of the strategy. Used by
+    /// `HistoryCompacted` events so callers can attribute compaction
+    /// to a specific algorithm in logs/metrics.
+    fn name(&self) -> &'static str;
+
     fn compact(
         &self,
         messages: &[Message],
@@ -13,6 +18,10 @@ pub trait CompactionStrategy {
 pub struct TruncateStrategy;
 
 impl CompactionStrategy for TruncateStrategy {
+    fn name(&self) -> &'static str {
+        "truncate"
+    }
+
     fn compact(
         &self,
         messages: &[Message],

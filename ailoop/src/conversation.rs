@@ -1,5 +1,5 @@
 use ailoop_context::ContextManager;
-use ailoop_core::{ChatMiddleware, CompletionModel, Message, RunConfig, StreamChunk, ToolTag};
+use ailoop_core::{ChatMiddleware, CompletionModel, Message, RunConfig, RunId, StreamChunk, ToolTag};
 use ailoop_prompts::{Prompt, PromptSection};
 use ailoop_tools::{ToolRegistry, registry::ToolDyn};
 use futures::{Stream, StreamExt, stream::BoxStream};
@@ -44,9 +44,10 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
         user_msg: impl Into<String>,
     ) -> Result<RunStream<'_, M>, EngineError<M::Error>> {
         self.history.add_message(Message::user(user_msg));
-        self.history.compact_if_needed()?;
+        let report = self.history.compact_if_needed()?;
 
         let snapshot = self.history.messages().to_vec();
+        let run_id = RunId::new();
 
         let inner = run_chat(
             &self.model,
@@ -54,13 +55,24 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
             &self.tools,
             RunConfig {
                 middlewares: self.middlewares.clone(),
+                run_id: Some(run_id.clone()),
                 ..Default::default()
             },
         )
         .await?;
 
+        let prelude: BoxStream<'_, Result<StreamChunk, EngineError<M::Error>>> = match report {
+            Some(r) => Box::pin(futures::stream::iter([Ok(StreamChunk::HistoryCompacted {
+                run_id,
+                before_count: r.before,
+                after_count: r.after,
+                strategy: r.strategy,
+            })])),
+            None => Box::pin(futures::stream::empty()),
+        };
+
         Ok(RunStream {
-            inner,
+            inner: Box::pin(prelude.chain(inner)),
             history: &mut self.history,
         })
     }
@@ -502,5 +514,61 @@ mod tests {
             0,
             "filtered-out tool should not be in approval gate"
         );
+    }
+
+    /// When `compact_if_needed` runs, `Conversation::stream` must emit
+    /// `HistoryCompacted` as the first chunk, carrying the same `RunId`
+    /// the engine then uses for its own chunks. This is the contract
+    /// observability middlewares rely on to attribute compaction to a
+    /// specific run.
+    #[tokio::test]
+    async fn stream_emits_history_compacted_with_matching_run_id() {
+        let mut chat = Conversation::builder(MockModel)
+            .build()
+            .expect("builder should succeed");
+
+        // Default `max_tokens` for the builder is 460 (CharEstimator =
+        // len()/4). Stuff enough text to overshoot the budget so the
+        // call to `stream` triggers compaction. Pre-seed messages
+        // directly into the private history field; we want compaction
+        // to fire on the call we observe, not on `add_message`.
+        let big = "x".repeat(200);
+        for _ in 0..15 {
+            chat.history.add_message(Message::user(big.clone()));
+            chat.history
+                .add_message(Message::assistant_text(big.clone()));
+        }
+
+        let mut stream = chat.stream("trigger run").await.expect("stream should start");
+
+        let first = stream.next().await.expect("expected at least one chunk").unwrap();
+        let compacted_run_id = match first {
+            StreamChunk::HistoryCompacted {
+                run_id,
+                before_count,
+                after_count,
+                strategy,
+            } => {
+                assert!(after_count < before_count, "compaction must shrink history");
+                assert_eq!(strategy, "truncate");
+                run_id
+            }
+            other => panic!("expected HistoryCompacted first, got {other:?}"),
+        };
+
+        // Every subsequent engine-emitted chunk must carry the same RunId.
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            match &chunk {
+                StreamChunk::RunStarted { run_id }
+                | StreamChunk::StepStarted { run_id, .. }
+                | StreamChunk::StepFinished { run_id, .. }
+                | StreamChunk::ToolResult { run_id, .. }
+                | StreamChunk::RunFinished { run_id, .. } => {
+                    assert_eq!(*run_id, compacted_run_id, "engine RunId must match HistoryCompacted RunId");
+                }
+                _ => {}
+            }
+        }
     }
 }

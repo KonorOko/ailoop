@@ -3,4 +3,4 @@ pub mod context_manager;
 pub mod errors;
 pub mod tokens;
 
-pub use context_manager::ContextManager;
+pub use context_manager::{CompactionReport, ContextManager};
