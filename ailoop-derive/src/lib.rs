@@ -3,15 +3,18 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use std::{collections::HashMap, ops::Deref};
 use syn::{
-    Expr, ExprLit, Ident, Lit, Meta, PathArguments, ReturnType, Token, Type, parse::Parse,
-    parse_macro_input, punctuated::Punctuated,
+    Expr, ExprLit, GenericArgument, Ident, Lit, Meta, PathArguments, ReturnType, Token, Type,
+    parse::Parse, parse_macro_input, punctuated::Punctuated,
 };
 
 struct MacroArgs {
     name: Option<String>,
     description: Option<String>,
     param_descriptions: HashMap<String, String>,
-    required: Vec<String>,
+    /// `None` when the user didn't write `required(...)` — the macro
+    /// infers from parameter types. `Some(_)` (even if empty) means the
+    /// caller is taking explicit control.
+    required: Option<Vec<String>>,
     tags: Vec<Ident>,
 }
 
@@ -51,6 +54,10 @@ fn ailoop_tool_definition_path() -> proc_macro2::TokenStream {
 
 fn ailoop_tool_tag_path() -> proc_macro2::TokenStream {
     resolve_item_path(&["ailoop", "ailoop-core"], "ToolTag")
+}
+
+fn ailoop_tool_json_type_path() -> proc_macro2::TokenStream {
+    resolve_item_path(&["ailoop", "ailoop-tools"], "ToolJsonType")
 }
 
 fn extract_doc_comment(attrs: &[syn::Attribute]) -> Option<String> {
@@ -134,7 +141,7 @@ impl Parse for MacroArgs {
         let mut name = None;
         let mut description = None;
         let mut param_descriptions = HashMap::new();
-        let mut required = Vec::new();
+        let mut required: Option<Vec<String>> = None;
         let mut tags = Vec::new();
 
         // If the input is empty, return default values
@@ -215,9 +222,11 @@ impl Parse for MacroArgs {
                             let required_variables: Punctuated<Ident, Token![,]> =
                                 list.parse_args_with(Punctuated::parse_terminated)?;
 
-                            required_variables.into_iter().for_each(|x| {
-                                required.push(x.to_string());
-                            });
+                            let names: Vec<String> = required_variables
+                                .into_iter()
+                                .map(|x| x.to_string())
+                                .collect();
+                            required = Some(names);
                         }
                         "tags" => {
                             let tag_idents: Punctuated<Ident, Token![,]> =
@@ -260,48 +269,145 @@ impl Parse for MacroArgs {
     }
 }
 
+/// Pull the inner type out of an `Option<T>` shell. Returns `Some(&T)` only
+/// for path types whose final segment is `Option`; nested module paths like
+/// `core::option::Option<T>` also work (we look at the last segment).
+fn unwrap_option(ty: &Type) -> Option<&Type> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let last = type_path.path.segments.last()?;
+    if last.ident != "Option" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })
+}
+
+fn is_option_type(ty: &Type) -> bool {
+    unwrap_option(ty).is_some()
+}
+
+fn first_generic_type(args: &PathArguments) -> Option<&Type> {
+    let PathArguments::AngleBracketed(generics) = args else {
+        return None;
+    };
+    generics.args.iter().find_map(|arg| match arg {
+        GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })
+}
+
+fn first_two_generic_types(args: &PathArguments) -> Option<(&Type, &Type)> {
+    let PathArguments::AngleBracketed(generics) = args else {
+        return None;
+    };
+    let mut types = generics.args.iter().filter_map(|arg| match arg {
+        GenericArgument::Type(t) => Some(t),
+        _ => None,
+    });
+    let first = types.next()?;
+    let second = types.next()?;
+    Some((first, second))
+}
+
+fn is_string_type(ty: &Type) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return false;
+    };
+    segment.ident == "String"
+}
+
+fn fallback_via_trait(ty: &Type) -> proc_macro2::TokenStream {
+    let trait_path = ailoop_tool_json_type_path();
+    quote! { <#ty as #trait_path>::json_type() }
+}
+
+/// Build a `TokenStream` that evaluates to a `serde_json::Value` describing
+/// the JSON Schema fragment for `ty`. Returns either a literal `json!{...}`
+/// expression (for shapes the macro recognises) or a runtime
+/// `<T as ToolJsonType>::json_type()` dispatch (for everything else).
 fn get_json_type(ty: &Type) -> proc_macro2::TokenStream {
     match ty {
+        Type::Tuple(tuple) => {
+            // JSON Schema 2020-12 uses `prefixItems` for positional item
+            // types; the legacy `items: [...]` array form is no longer
+            // valid. Anthropic and OpenAI tool definitions accept arbitrary
+            // JSON Schema and route it to the model rather than a strict
+            // validator, so the modern form is the portable choice.
+            let inner: Vec<proc_macro2::TokenStream> =
+                tuple.elems.iter().map(get_json_type).collect();
+            quote! {
+                ::serde_json::json!({
+                    "type": "array",
+                    "prefixItems": [#(#inner),*]
+                })
+            }
+        }
         Type::Path(type_path) => {
-            let Some(segment) = type_path.path.segments.first() else {
-                return quote! { "type": "object" };
+            let Some(segment) = type_path.path.segments.last() else {
+                return fallback_via_trait(ty);
             };
             let type_name = segment.ident.to_string();
 
-            // Handle Vec types
-            if type_name == "Vec" {
-                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-                    && let Some(syn::GenericArgument::Type(inner_type)) = args.args.first()
-                {
-                    let inner_json_type = get_json_type(inner_type);
-                    return quote! {
-                        "type": "array",
-                        "items": { #inner_json_type }
-                    };
-                }
-                return quote! { "type": "array" };
-            }
-
-            // Handle primitive types
             match type_name.as_str() {
-                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" => {
-                    quote! { "type": "number" }
+                "Vec" => {
+                    if let Some(inner_ty) = first_generic_type(&segment.arguments) {
+                        let inner = get_json_type(inner_ty);
+                        return quote! {
+                            ::serde_json::json!({
+                                "type": "array",
+                                "items": #inner
+                            })
+                        };
+                    }
+                    quote! { ::serde_json::json!({"type": "array"}) }
+                }
+                "Option" => {
+                    // `Option<T>` only affects required-ness; the schema
+                    // describes the inner type. The proc macro keeps
+                    // optional params out of the `required` list separately.
+                    if let Some(inner_ty) = first_generic_type(&segment.arguments) {
+                        return get_json_type(inner_ty);
+                    }
+                    fallback_via_trait(ty)
+                }
+                "HashMap" | "BTreeMap" => {
+                    if let Some((k, v)) = first_two_generic_types(&segment.arguments)
+                        && is_string_type(k)
+                    {
+                        let v_schema = get_json_type(v);
+                        return quote! {
+                            ::serde_json::json!({
+                                "type": "object",
+                                "additionalProperties": #v_schema
+                            })
+                        };
+                    }
+                    fallback_via_trait(ty)
+                }
+                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
+                | "u128" | "usize" | "f32" | "f64" => {
+                    quote! { ::serde_json::json!({"type": "number"}) }
                 }
                 "String" | "str" => {
-                    quote! { "type": "string" }
+                    quote! { ::serde_json::json!({"type": "string"}) }
                 }
                 "bool" => {
-                    quote! { "type": "boolean" }
+                    quote! { ::serde_json::json!({"type": "boolean"}) }
                 }
-                // Handle other types as objects
-                _ => {
-                    quote! { "type": "object" }
-                }
+                _ => fallback_via_trait(ty),
             }
         }
-        _ => {
-            quote! { "type": "object" }
-        }
+        _ => fallback_via_trait(ty),
     }
 }
 
@@ -394,8 +500,6 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut param_descriptions: Vec<String> = Vec::new();
     let mut json_types: Vec<proc_macro2::TokenStream> = Vec::new();
 
-    let required_args = args.required;
-
     for arg in input_fn.sig.inputs.iter_mut() {
         let syn::FnArg::Typed(pat_type) = arg else {
             continue;
@@ -424,6 +528,19 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
         param_descriptions.push(description);
         json_types.push(json_type);
     }
+
+    // Required-ness: explicit `required(...)` from the attribute wins; if
+    // omitted, infer from parameter types — anything not `Option<T>` is
+    // required.
+    let required_args: Vec<String> = match args.required {
+        Some(explicit) => explicit,
+        None => param_names
+            .iter()
+            .zip(param_types.iter())
+            .filter(|(_, ty)| !is_option_type(ty))
+            .map(|(name, _)| name.to_string())
+            .collect(),
+    };
 
     let params_struct_name = format_ident!("{}Parameters", struct_name);
     let static_name = format_ident!("{}", fn_name_str.to_uppercase());
@@ -455,6 +572,27 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! { ::std::vec![#(#tag_paths),*] }
     };
 
+    // Build the per-parameter property objects at runtime. Each `json_type`
+    // expression evaluates to a `serde_json::Value`; we splice the
+    // description in as an extra key. Per-parameter Values are inserted
+    // into a `Map` so the final `serde_json::json!` call sees a complete,
+    // ordered properties object.
+    let property_inserts = param_names.iter().zip(json_types.iter()).zip(param_descriptions.iter()).map(|((name, json_type), desc)| {
+        let name_str = name.to_string();
+        quote! {
+            {
+                let mut __schema: ::serde_json::Value = #json_type;
+                if let ::serde_json::Value::Object(ref mut __obj) = __schema {
+                    __obj.insert(
+                        ::std::string::String::from("description"),
+                        ::serde_json::Value::String(::std::string::String::from(#desc)),
+                    );
+                }
+                __properties.insert(::std::string::String::from(#name_str), __schema);
+            }
+        }
+    });
+
     let expanded = quote! {
         #[derive(serde::Deserialize)]
         #vis struct #params_struct_name {
@@ -474,16 +612,13 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
             type Error = #error_type;
 
             fn definition(&self) -> #tool_definition_path {
-                let input_schema = serde_json::json!({
+                let mut __properties: ::serde_json::Map<::std::string::String, ::serde_json::Value> =
+                    ::serde_json::Map::new();
+                #(#property_inserts)*
+
+                let input_schema = ::serde_json::json!({
                     "type": "object",
-                    "properties": {
-                        #(
-                            stringify!(#param_names): {
-                                #json_types,
-                                "description": #param_descriptions
-                            }
-                        ),*
-                    },
+                    "properties": __properties,
                     "required": [#(#required_args),*]
                 });
 
@@ -504,6 +639,62 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
         }
 
         #vis static #static_name: #struct_name = #struct_name;
+    };
+
+    TokenStream::from(expanded)
+}
+
+#[proc_macro_derive(ToolJsonType)]
+pub fn derive_tool_json_type(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+
+    let trait_path = ailoop_tool_json_type_path();
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let body = match &input.data {
+        syn::Data::Enum(data_enum) => {
+            let mut variant_names: Vec<String> = Vec::new();
+            for variant in &data_enum.variants {
+                match &variant.fields {
+                    syn::Fields::Unit => variant_names.push(variant.ident.to_string()),
+                    syn::Fields::Named(_) | syn::Fields::Unnamed(_) => {
+                        return syn::Error::new_spanned(
+                            variant,
+                            "#[derive(ToolJsonType)] only supports C-style enums (unit variants). \
+                             Variants carrying a payload are out of scope — implement \
+                             `ToolJsonType` manually for this type.",
+                        )
+                        .into_compile_error()
+                        .into();
+                    }
+                }
+            }
+            quote! {
+                ::serde_json::json!({
+                    "type": "string",
+                    "enum": [#(#variant_names),*]
+                })
+            }
+        }
+        syn::Data::Struct(_) | syn::Data::Union(_) => {
+            return syn::Error::new_spanned(
+                &input.ident,
+                "#[derive(ToolJsonType)] is only supported on enums; implement `ToolJsonType` \
+                 manually for structs or unions.",
+            )
+            .into_compile_error()
+            .into();
+        }
+    };
+
+    let expanded = quote! {
+        #[automatically_derived]
+        impl #impl_generics #trait_path for #name #ty_generics #where_clause {
+            fn json_type() -> ::serde_json::Value {
+                #body
+            }
+        }
     };
 
     TokenStream::from(expanded)

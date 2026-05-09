@@ -10,9 +10,9 @@ pub use ailoop_core::{
     AssistantBlock, ChatMiddleware, Message, RunConfig, StreamChunk, ToolChoice, ToolDecision,
     ToolDefinition, ToolResultContent, ToolTag, Usage,
 };
-pub use ailoop_derive::ailoop_tool;
+pub use ailoop_derive::{ToolJsonType, ailoop_tool};
 pub use ailoop_prompts::{Prompt, PromptSection};
-pub use ailoop_tools::{Tool, ToolRegistry};
+pub use ailoop_tools::{Tool, ToolJsonType, ToolRegistry};
 pub use conversation::{Conversation, RunOutcome};
 pub use engine::run_chat;
 pub use middleware::ApprovalMiddleware;
