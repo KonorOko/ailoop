@@ -17,6 +17,10 @@ decoupled from any single vendor.
 - Conversation history with automatic context management
 - Provider-agnostic: implement two traits to support a new provider
 - Middleware hooks for observation, cancellation, and request transformation
+- MCP-compatible: register tools discovered from any [Model Context
+  Protocol][mcp-spec] server via the `ailoop-mcp` adapter
+
+[mcp-spec]: https://modelcontextprotocol.io
 
 ## Workspace layout
 
@@ -27,13 +31,14 @@ decoupled from any single vendor.
 | `ailoop-anthropic`    | Anthropic Messages API adapter                     |
 | `ailoop-azure-openai` | Azure OpenAI v1 API adapter (Chat Completions)     |
 | `ailoop-context`      | Conversation history and context management        |
+| `ailoop-mcp`          | MCP (Model Context Protocol) adapter (stdio MVP)   |
 | `ailoop-prompts`      | Composable system prompt utilities                 |
 | `ailoop-tools`        | Tool registry and tool calling primitives          |
 | `ailoop-derive`       | Derive macros (proc-macro)                         |
 
 ## Quick start
 
-The repository ships with two runnable examples. Both require an
+The repository ships with three runnable examples. All three require an
 `ANTHROPIC_API_KEY` in your environment (a `.env` file at the repo root also
 works).
 
@@ -51,8 +56,18 @@ two numbers:
 cargo run -p tool-use
 ```
 
-See [`examples/basic-chat`](examples/basic-chat/src/main.rs) and
-[`examples/tool-use`](examples/tool-use/src/main.rs) for the full source.
+A chat that discovers its tools from a real MCP server
+([`mcp-server-time`](https://github.com/modelcontextprotocol/servers/tree/main/src/time))
+and lets the model call them by name. Requires `uvx` on `PATH`
+(`pip install uv`):
+
+```sh
+cargo run -p mcp-time
+```
+
+See [`examples/basic-chat`](examples/basic-chat/src/main.rs),
+[`examples/tool-use`](examples/tool-use/src/main.rs), and
+[`examples/mcp-time`](examples/mcp-time/src/main.rs) for the full source.
 
 ## Adding a provider
 
