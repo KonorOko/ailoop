@@ -132,6 +132,24 @@ pub enum AzureOpenAIError {
     /// missing endpoint, mutually exclusive secrets both set, etc.
     #[error("missing required configuration: {0}")]
     Config(String),
+
+    /// A request carried content the Chat Completions wire model cannot
+    /// represent: a [`ailoop_core::UserBlock::Document`], an image
+    /// inside a tool result, or a [`ailoop_core::Source::FileId`] on an
+    /// image block. Surfaced at request-build time before any HTTP call
+    /// is made.
+    ///
+    /// To downgrade unsupported content automatically, install a
+    /// [`ChatMiddleware`](ailoop_core::ChatMiddleware) that rewrites the
+    /// request in `on_chat_request` — the adapter intentionally does
+    /// not invent fallbacks. `kind` is a stable short label naming the
+    /// shape that could not be encoded.
+    #[error("unsupported content for Chat Completions: {kind}")]
+    UnsupportedContent {
+        /// Stable short label for the shape that could not be encoded
+        /// (`"document"`, `"tool_result_image"`, `"image_file_id"`).
+        kind: &'static str,
+    },
 }
 
 /// Map an Azure-typed `AzureOpenAIApiErrorKind` to a retry decision. Azure's code
@@ -176,7 +194,8 @@ impl Retryable for AzureOpenAIError {
             AzureOpenAIError::Sse(_)
             | AzureOpenAIError::Json(_)
             | AzureOpenAIError::Provider { .. }
-            | AzureOpenAIError::Config(_) => RetryClassification::Permanent,
+            | AzureOpenAIError::Config(_)
+            | AzureOpenAIError::UnsupportedContent { .. } => RetryClassification::Permanent,
         }
     }
 }

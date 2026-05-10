@@ -57,7 +57,7 @@ impl CompletionModel for AzureOpenAIChatModel {
             self.client.endpoint.trim_end_matches('/'),
         );
 
-        let body = build_body(&self.deployment, &req);
+        let body = build_body(&self.deployment, &req)?;
 
         let mut req_builder = self
             .client

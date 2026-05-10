@@ -1,12 +1,22 @@
 use ailoop_core::{
-    AssistantBlock, ChatRequest, Message, ToolChoice, ToolDefinition, UserBlock,
+    AssistantBlock, ChatRequest, Message, Source, ToolChoice, ToolDefinition, ToolResultBlock,
+    UserBlock,
 };
 use serde_json::{Value, json};
+
+use crate::errors::AzureOpenAIError;
 
 /// Build the Chat Completions v1 request body. The deployment name is
 /// passed as `model` (Azure v1 takes deployments via the `model` field
 /// rather than the URL path).
-pub fn build_body(deployment: &str, req: &ChatRequest) -> Value {
+///
+/// Returns [`AzureOpenAIError::UnsupportedContent`] when the request
+/// carries content the Chat Completions wire model cannot represent
+/// (documents, image tool results, image `Source::FileId`). The
+/// failure is request-build-time and happens before any HTTP call is
+/// made; callers that want a downgrade install a `ChatMiddleware` and
+/// rewrite the request in `on_chat_request`.
+pub fn build_body(deployment: &str, req: &ChatRequest) -> Result<Value, AzureOpenAIError> {
     let mut body = serde_json::Map::new();
     body.insert("model".into(), json!(deployment));
     body.insert("stream".into(), json!(true));
@@ -15,7 +25,7 @@ pub fn build_body(deployment: &str, req: &ChatRequest) -> Value {
     let system_text = req.system_prompt.as_ref().map(|s| s.as_text());
     body.insert(
         "messages".into(),
-        json!(to_messages(system_text.as_deref(), &req.messages)),
+        json!(to_messages(system_text.as_deref(), &req.messages)?),
     );
 
     if let Some(tools) = &req.tools
@@ -52,10 +62,13 @@ pub fn build_body(deployment: &str, req: &ChatRequest) -> Value {
         }
     }
 
-    Value::Object(body)
+    Ok(Value::Object(body))
 }
 
-fn to_messages(system_prompt: Option<&str>, messages: &[Message]) -> Vec<Value> {
+fn to_messages(
+    system_prompt: Option<&str>,
+    messages: &[Message],
+) -> Result<Vec<Value>, AzureOpenAIError> {
     let mut out = Vec::new();
     // Azure auto-converts `system` to `developer` for o-series; we always
     // emit `system` and let the service do the right thing.
@@ -64,49 +77,110 @@ fn to_messages(system_prompt: Option<&str>, messages: &[Message]) -> Vec<Value> 
     }
     for msg in messages {
         match msg {
-            Message::User { blocks } => append_user_blocks(&mut out, blocks),
+            Message::User { blocks } => append_user_blocks(&mut out, blocks)?,
             Message::Assistant { blocks } => append_assistant_blocks(&mut out, blocks),
             _ => {}
         }
     }
-    out
+    Ok(out)
 }
 
-fn append_user_blocks(out: &mut Vec<Value>, blocks: &[UserBlock]) {
-    let mut text_buf: Vec<&str> = Vec::new();
+/// Pending user content parts queued up between tool messages. Chat
+/// Completions takes either a plain string `content` or an array of
+/// typed parts; we collapse the single-text case to a string so the
+/// pre-multimodal wire shape is preserved for text-only callers.
+fn flush_user_parts(out: &mut Vec<Value>, parts: &mut Vec<Value>) {
+    if parts.is_empty() {
+        return;
+    }
+    if parts.len() == 1
+        && parts[0].get("type").and_then(|v| v.as_str()) == Some("text")
+        && let Some(text) = parts[0].get("text").and_then(|v| v.as_str())
+    {
+        out.push(json!({
+            "role": "user",
+            "content": text,
+        }));
+        parts.clear();
+        return;
+    }
+    let drained: Vec<Value> = parts.drain(..).collect();
+    out.push(json!({
+        "role": "user",
+        "content": drained,
+    }));
+}
+
+fn append_user_blocks(
+    out: &mut Vec<Value>,
+    blocks: &[UserBlock],
+) -> Result<(), AzureOpenAIError> {
+    let mut parts: Vec<Value> = Vec::new();
 
     for block in blocks {
         match block {
-            UserBlock::Text { text, .. } => text_buf.push(text.as_str()),
+            UserBlock::Text { text, .. } => {
+                parts.push(json!({ "type": "text", "text": text }));
+            }
+            UserBlock::Image { source, .. } => {
+                let url = chat_completions_image_url(source)?;
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": { "url": url },
+                }));
+            }
+            UserBlock::Document { .. } => {
+                return Err(AzureOpenAIError::UnsupportedContent { kind: "document" });
+            }
             UserBlock::ToolResult {
                 call_id, content, ..
             } => {
-                if !text_buf.is_empty() {
-                    out.push(json!({
-                        "role": "user",
-                        "content": text_buf.join("\n"),
-                    }));
-                    text_buf.clear();
+                flush_user_parts(out, &mut parts);
+                // Chat Completions has no `is_error` flag on tool
+                // results, and no array form for tool content — only a
+                // plain text body. Collect every text block in order;
+                // refuse image blocks with a typed error so callers can
+                // see exactly what they tried to send.
+                let mut text_parts: Vec<&str> = Vec::new();
+                for tr_block in &content.blocks {
+                    match tr_block {
+                        ToolResultBlock::Text { text } => text_parts.push(text.as_str()),
+                        ToolResultBlock::Image { .. } => {
+                            return Err(AzureOpenAIError::UnsupportedContent {
+                                kind: "tool_result_image",
+                            });
+                        }
+                        _ => {}
+                    }
                 }
-                // Chat Completions has no `is_error` flag and no array
-                // form for tool content — collapse every text block in
-                // order. Non-text tool result blocks land via a
-                // follow-up change that introduces a typed error path.
-                let body = content.collect_text();
                 out.push(json!({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": body,
+                    "content": text_parts.join("\n"),
                 }));
             }
             _ => {}
         }
     }
-    if !text_buf.is_empty() {
-        out.push(json!({
-            "role": "user",
-            "content": text_buf.join("\n"),
-        }));
+    flush_user_parts(out, &mut parts);
+    Ok(())
+}
+
+/// Encode a [`Source`] as the `image_url.url` string used in Chat
+/// Completions content parts. Base64 sources become `data:` URIs;
+/// `Source::FileId` is rejected with a typed error because Chat
+/// Completions does not accept a file_id on image content parts (the
+/// Files API integration lives elsewhere on Azure).
+fn chat_completions_image_url(source: &Source) -> Result<String, AzureOpenAIError> {
+    match source {
+        Source::Url { url } => Ok(url.clone()),
+        Source::Base64 { media_type, data } => Ok(format!("data:{media_type};base64,{data}")),
+        Source::FileId { .. } => Err(AzureOpenAIError::UnsupportedContent {
+            kind: "image_file_id",
+        }),
+        _ => Err(AzureOpenAIError::UnsupportedContent {
+            kind: "image_source",
+        }),
     }
 }
 
@@ -196,7 +270,7 @@ mod tests {
     fn serializes_simple_text_turn() {
         let mut req = base_req();
         req.messages = vec![Message::user("hi"), Message::assistant_text("hello")];
-        let body = build_body("gpt-4o-mini-deployment", &req);
+        let body = build_body("gpt-4o-mini-deployment", &req).unwrap();
         assert_eq!(body["model"], json!("gpt-4o-mini-deployment"));
         assert_eq!(body["stream"], json!(true));
         assert_eq!(body["stream_options"], json!({ "include_usage": true }));
@@ -218,7 +292,7 @@ mod tests {
                 json!({ "location": "SF", "units": "C" }),
             )],
         }];
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("assistant"));
         assert_eq!(msg["content"], Value::Null);
@@ -242,7 +316,7 @@ mod tests {
                 ToolResultContent::text("70F"),
             )],
         }];
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("tool"));
         assert_eq!(msg["tool_call_id"], json!("call_1"));
@@ -259,7 +333,7 @@ mod tests {
                 ToolResultContent::error("API down"),
             )],
         }];
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("tool"));
         assert_eq!(msg["tool_call_id"], json!("call_1"));
@@ -278,7 +352,7 @@ mod tests {
                 UserBlock::text("after"),
             ],
         }];
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0]["role"], json!("user"));
@@ -298,7 +372,7 @@ mod tests {
             json!({ "type": "object", "properties": {} }),
             vec![ToolTag::ReadOnly, ToolTag::Network],
         )]);
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         let tool = &body["tools"][0];
         assert_eq!(tool["type"], json!("function"));
         assert_eq!(tool["function"]["name"], json!("get_weather"));
@@ -319,7 +393,7 @@ mod tests {
     fn omits_top_k_silently() {
         let mut req = base_req();
         req.top_k = Some(50);
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         assert!(body.get("top_k").is_none());
     }
 
@@ -331,7 +405,7 @@ mod tests {
             "temperature": 0.9,
             "logit_bias": { "100": -100 }
         }));
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         // additional_params overrides the canonical temperature.
         assert_eq!(body["temperature"], json!(0.9));
         assert_eq!(body["logit_bias"], json!({ "100": -100 }));
@@ -342,7 +416,7 @@ mod tests {
         let mut req = base_req();
         req.system_prompt = Some("be helpful".into());
         req.messages = vec![Message::user("hi")];
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], json!("system"));
         assert_eq!(messages[0]["content"], json!("be helpful"));
@@ -353,7 +427,7 @@ mod tests {
     fn omits_optional_sampling_when_none() {
         let mut req = base_req();
         req.messages = vec![Message::user("hi")];
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
         assert!(body.get("stop").is_none());
@@ -361,7 +435,7 @@ mod tests {
 
     #[test]
     fn omits_tool_choice_and_parallel_when_unset() {
-        let body = build_body("dep", &base_req());
+        let body = build_body("dep", &base_req()).unwrap();
         assert!(body.get("tool_choice").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
     }
@@ -370,7 +444,7 @@ mod tests {
     fn maps_tool_choice_auto_as_string() {
         let mut req = base_req();
         req.tool_choice = Some(ToolChoice::Auto);
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         assert_eq!(body["tool_choice"], json!("auto"));
     }
 
@@ -381,7 +455,7 @@ mod tests {
     fn maps_tool_choice_any_as_required() {
         let mut req = base_req();
         req.tool_choice = Some(ToolChoice::Any);
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         assert_eq!(body["tool_choice"], json!("required"));
     }
 
@@ -391,7 +465,7 @@ mod tests {
         req.tool_choice = Some(ToolChoice::Tool {
             name: "get_weather".into(),
         });
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         assert_eq!(
             body["tool_choice"],
             json!({
@@ -405,7 +479,7 @@ mod tests {
     fn maps_tool_choice_none_as_string() {
         let mut req = base_req();
         req.tool_choice = Some(ToolChoice::None_);
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         assert_eq!(body["tool_choice"], json!("none"));
     }
 
@@ -417,7 +491,7 @@ mod tests {
     fn disable_parallel_emits_parallel_tool_calls_false() {
         let mut req = base_req();
         req.disable_parallel_tool_use = Some(true);
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         assert_eq!(body["parallel_tool_calls"], json!(false));
         assert!(body.get("tool_choice").is_none());
     }
@@ -426,7 +500,7 @@ mod tests {
     fn disable_parallel_false_emits_parallel_tool_calls_true() {
         let mut req = base_req();
         req.disable_parallel_tool_use = Some(false);
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         assert_eq!(body["parallel_tool_calls"], json!(true));
     }
 
@@ -442,7 +516,7 @@ mod tests {
                 AssistantBlock::text("answer"),
             ],
         }];
-        let body = build_body("dep", &req);
+        let body = build_body("dep", &req).unwrap();
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("assistant"));
         // Reasoning is dropped; only text survives.
@@ -450,5 +524,134 @@ mod tests {
         assert!(msg.get("tool_calls").is_none());
         assert!(msg.get("thinking").is_none());
         assert!(msg.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn user_image_url_wires_as_image_url_part_in_array_content() {
+        let mut req = base_req();
+        req.messages = vec![Message::User {
+            blocks: vec![
+                UserBlock::text("look at this"),
+                UserBlock::image(Source::Url {
+                    url: "https://example.com/img.png".into(),
+                }),
+            ],
+        }];
+        let body = build_body("dep", &req).unwrap();
+        let msg = &body["messages"][0];
+        assert_eq!(msg["role"], json!("user"));
+        assert_eq!(
+            msg["content"],
+            json!([
+                { "type": "text", "text": "look at this" },
+                {
+                    "type": "image_url",
+                    "image_url": { "url": "https://example.com/img.png" },
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn user_image_base64_wires_as_data_uri() {
+        let mut req = base_req();
+        req.messages = vec![Message::User {
+            blocks: vec![UserBlock::image(Source::Base64 {
+                media_type: "image/png".into(),
+                data: "iVBOR".into(),
+            })],
+        }];
+        let body = build_body("dep", &req).unwrap();
+        let msg = &body["messages"][0];
+        // Single non-text part -> array form, not string.
+        let parts = msg["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], json!("image_url"));
+        assert_eq!(
+            parts[0]["image_url"]["url"],
+            json!("data:image/png;base64,iVBOR")
+        );
+    }
+
+    #[test]
+    fn text_only_user_message_still_emits_string_content() {
+        let mut req = base_req();
+        req.messages = vec![Message::user("hi")];
+        let body = build_body("dep", &req).unwrap();
+        let msg = &body["messages"][0];
+        // No multimodal parts -> preserve the pre-1.0 string shape.
+        assert_eq!(msg["content"], json!("hi"));
+    }
+
+    #[test]
+    fn document_block_returns_unsupported_content_error() {
+        let mut req = base_req();
+        req.messages = vec![Message::User {
+            blocks: vec![UserBlock::document(Source::Base64 {
+                media_type: "application/pdf".into(),
+                data: "JVBERi0".into(),
+            })],
+        }];
+        let err = build_body("dep", &req).expect_err("documents must be rejected");
+        assert!(matches!(
+            err,
+            AzureOpenAIError::UnsupportedContent { kind: "document" }
+        ));
+    }
+
+    #[test]
+    fn image_file_id_returns_unsupported_content_error() {
+        let mut req = base_req();
+        req.messages = vec![Message::User {
+            blocks: vec![UserBlock::image(Source::FileId {
+                id: "file_abc".into(),
+            })],
+        }];
+        let err = build_body("dep", &req).expect_err("image file_id must be rejected");
+        assert!(matches!(
+            err,
+            AzureOpenAIError::UnsupportedContent {
+                kind: "image_file_id"
+            }
+        ));
+    }
+
+    #[test]
+    fn tool_result_image_returns_unsupported_content_error() {
+        use ailoop_core::{ToolResultBlock, ToolResultContent};
+        let mut req = base_req();
+        req.messages = vec![Message::User {
+            blocks: vec![UserBlock::tool_result(
+                "c1",
+                ToolResultContent::from_blocks(vec![ToolResultBlock::image(Source::Url {
+                    url: "https://example.com/c.png".into(),
+                })]),
+            )],
+        }];
+        let err = build_body("dep", &req).expect_err("image tool result must be rejected");
+        assert!(matches!(
+            err,
+            AzureOpenAIError::UnsupportedContent {
+                kind: "tool_result_image"
+            }
+        ));
+    }
+
+    #[test]
+    fn multi_text_tool_result_joins_with_newlines() {
+        use ailoop_core::{ToolResultBlock, ToolResultContent};
+        let mut req = base_req();
+        req.messages = vec![Message::User {
+            blocks: vec![UserBlock::tool_result(
+                "c1",
+                ToolResultContent::from_blocks(vec![
+                    ToolResultBlock::text("line 1"),
+                    ToolResultBlock::text("line 2"),
+                ]),
+            )],
+        }];
+        let body = build_body("dep", &req).unwrap();
+        let msg = &body["messages"][0];
+        assert_eq!(msg["content"], json!("line 1\nline 2"));
     }
 }
