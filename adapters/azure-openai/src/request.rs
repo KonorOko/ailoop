@@ -111,10 +111,7 @@ fn flush_user_parts(out: &mut Vec<Value>, parts: &mut Vec<Value>) {
     }));
 }
 
-fn append_user_blocks(
-    out: &mut Vec<Value>,
-    blocks: &[UserBlock],
-) -> Result<(), AzureOpenAIError> {
+fn append_user_blocks(out: &mut Vec<Value>, blocks: &[UserBlock]) -> Result<(), AzureOpenAIError> {
     let mut parts: Vec<Value> = Vec::new();
 
     for block in blocks {

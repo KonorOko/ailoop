@@ -1,4 +1,4 @@
-use crate::errors::{AnthropicError, AnthropicApiErrorKind};
+use crate::errors::{AnthropicApiErrorKind, AnthropicError};
 use crate::events::{AnthropicBlock, AnthropicDelta, AnthropicEvent};
 
 use ailoop_core::{FinishReason, StreamChunk, Usage};
@@ -623,7 +623,10 @@ mod tests {
             }
             other => panic!("expected TurnFinished, got {other:?}"),
         }
-        assert!(iter.next().is_none(), "no chunks should follow TurnFinished");
+        assert!(
+            iter.next().is_none(),
+            "no chunks should follow TurnFinished"
+        );
     }
 
     /// Streaming default: `tool_use` blocks start with `input: {}` and

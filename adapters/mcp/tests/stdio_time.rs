@@ -93,9 +93,5 @@ async fn invalid_args_surface_as_tool_error_not_engine_error() {
 
     // Missing required `timezone` argument.
     let result = tool.call(json!({})).await;
-    assert!(
-        result.is_error,
-        "expected is_error=true, got {:?}",
-        result
-    );
+    assert!(result.is_error, "expected is_error=true, got {:?}", result);
 }

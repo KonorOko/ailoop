@@ -378,7 +378,9 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
         })
         .expect("ToolResult should be emitted");
     assert!(
-        yielded.as_text().is_some_and(|t| t.starts_with("[redacted]")),
+        yielded
+            .as_text()
+            .is_some_and(|t| t.starts_with("[redacted]")),
         "expected mutated text body, got {yielded:?}"
     );
 }

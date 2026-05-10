@@ -4,7 +4,7 @@ use ailoop_core::{
     AssistantBlock, CacheControl, ChatRequest, Message, Source, SystemBlock, SystemPrompt,
     ToolChoice, ToolDefinition, ToolResultBlock, UserBlock,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
     let mut body = serde_json::Map::new();
@@ -98,10 +98,12 @@ fn to_anthropic_system(prompt: &SystemPrompt) -> Value {
         // existing fixtures and zero-cache-control callers see no diff.
         SystemPrompt::Plain(s) => json!(s),
         SystemPrompt::Blocks(blocks) => {
-            json!(blocks
-                .iter()
-                .map(to_anthropic_system_block)
-                .collect::<Vec<_>>())
+            json!(
+                blocks
+                    .iter()
+                    .map(to_anthropic_system_block)
+                    .collect::<Vec<_>>()
+            )
         }
         // SystemPrompt is `#[non_exhaustive]`; future variants degrade
         // to an empty system on the wire rather than failing the build.
@@ -157,11 +159,13 @@ fn to_anthropic_user_block(block: &UserBlock) -> serde_json::Value {
             obj.insert("tool_use_id".into(), json!(call_id));
             obj.insert(
                 "content".into(),
-                json!(content
-                    .blocks
-                    .iter()
-                    .map(to_anthropic_tool_result_block)
-                    .collect::<Vec<_>>()),
+                json!(
+                    content
+                        .blocks
+                        .iter()
+                        .map(to_anthropic_tool_result_block)
+                        .collect::<Vec<_>>()
+                ),
             );
             if content.is_error {
                 obj.insert("is_error".into(), json!(true));
@@ -693,13 +697,15 @@ mod tests {
     #[test]
     fn tool_definition_emits_cache_control_when_set() {
         let mut req = base_req();
-        req.tools = Some(vec![ToolDefinition::new(
-            "get_weather",
-            "Look up the weather",
-            json!({ "type": "object", "properties": {} }),
-            vec![],
-        )
-        .with_cache_control(CacheControl::Ephemeral)]);
+        req.tools = Some(vec![
+            ToolDefinition::new(
+                "get_weather",
+                "Look up the weather",
+                json!({ "type": "object", "properties": {} }),
+                vec![],
+            )
+            .with_cache_control(CacheControl::Ephemeral),
+        ]);
         let body = build_body("claude", &req);
         let tool = &body["tools"][0];
         assert_eq!(tool["cache_control"], json!({ "type": "ephemeral" }));

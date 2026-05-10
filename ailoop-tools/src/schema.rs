@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Per-type JSON Schema fragment supplier for the
 /// [`#[ailoop_tool]`](https://docs.rs/ailoop) macro.

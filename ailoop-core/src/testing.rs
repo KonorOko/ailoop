@@ -201,9 +201,7 @@ mod tests {
     async fn surfaces_setup_time_error_per_turn() {
         let model = ScriptedModel::with_turns([Err(ScriptedError("rate limited".into()))]);
 
-        let result = model
-            .chat_stream(ChatRequest::new(vec![], 0))
-            .await;
+        let result = model.chat_stream(ChatRequest::new(vec![], 0)).await;
         match result {
             Err(ScriptedError(msg)) => assert_eq!(msg, "rate limited"),
             Ok(_) => panic!("expected error"),

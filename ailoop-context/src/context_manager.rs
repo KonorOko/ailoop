@@ -386,7 +386,10 @@ mod tests {
 
     fn tool_result_msg(call_id: &str) -> Message {
         Message::User {
-            blocks: vec![UserBlock::tool_result(call_id, ToolResultContent::text("ok"))],
+            blocks: vec![UserBlock::tool_result(
+                call_id,
+                ToolResultContent::text("ok"),
+            )],
         }
     }
 

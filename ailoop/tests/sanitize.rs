@@ -6,7 +6,9 @@
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
-use ailoop::{Conversation, Message, Sanitize, ToolDefinition, ToolResultContent, advanced::run_chat};
+use ailoop::{
+    Conversation, Message, Sanitize, ToolDefinition, ToolResultContent, advanced::run_chat,
+};
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{
     AssistantBlock, ChatMiddleware, ChatRequest, FinishReason, RunConfig, RunId, StepId,
@@ -553,7 +555,9 @@ async fn tool_args_callback_can_filter_by_name() {
 
     let mut by_call_id: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     for c in &chunks {
-        if let StreamChunk::ToolResult { call_id, content, .. } = c
+        if let StreamChunk::ToolResult {
+            call_id, content, ..
+        } = c
             && let Some(t) = content.as_text()
         {
             by_call_id.insert(call_id.clone(), serde_json::from_str(t).unwrap());

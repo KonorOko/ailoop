@@ -596,7 +596,9 @@ mod tests {
     #[test]
     fn round_trip_user_text_drops_cache_control() {
         let msg = Message::User {
-            blocks: vec![UserBlock::text("hello").with_cache_control(Some(CacheControl::Ephemeral))],
+            blocks: vec![
+                UserBlock::text("hello").with_cache_control(Some(CacheControl::Ephemeral)),
+            ],
         };
         let restored = round_trip(&msg);
         assert_user_text_eq(&restored, "hello");

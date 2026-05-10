@@ -336,9 +336,7 @@ fn flatten_for_summary(msg: &Message) -> Message {
                             .iter()
                             .map(|b| match b {
                                 ailoop_core::ToolResultBlock::Text { text } => text.clone(),
-                                ailoop_core::ToolResultBlock::Image { .. } => {
-                                    "[image]".to_string()
-                                }
+                                ailoop_core::ToolResultBlock::Image { .. } => "[image]".to_string(),
                                 _ => "[unsupported tool result block]".to_string(),
                             })
                             .collect();
