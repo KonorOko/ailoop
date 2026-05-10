@@ -11,6 +11,8 @@ decoupled from any single vendor.
 
 - Token-level streaming with a unified `StreamChunk` event model
 - Type-safe tool use backed by `serde` (`Tool` trait + `ToolRegistry`)
+- Per-dispatch `ToolContext` so tools can activate other tools mid-run
+  (deferred-tools / `search_tools` patterns) without shared mutable state
 - Conversation history with automatic context management
 - Provider-agnostic: implement two traits to support a new provider
 - Middleware hooks for observation, cancellation, and request transformation
@@ -37,8 +39,8 @@ decoupled from any single vendor.
 
 ```toml
 [dependencies]
-ailoop = "1.0.0-rc.1"
-ailoop-anthropic = "1.0.0-rc.1"
+ailoop = "1.0.0-rc.2"
+ailoop-anthropic = "1.0.0-rc.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -67,7 +69,7 @@ instead.
 
 ## Examples
 
-The repository ships with four runnable examples. All four require an
+The repository ships with five runnable examples. All five require an
 `ANTHROPIC_API_KEY` in your environment (a `.env` file at the repo root also
 works).
 
