@@ -424,11 +424,7 @@ mod tests {
             )
         }
 
-        async fn call(
-            &self,
-            _args: serde_json::Value,
-            _ctx: &ToolContext,
-        ) -> ToolResultContent {
+        async fn call(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResultContent {
             ToolResultContent::text("")
         }
     }

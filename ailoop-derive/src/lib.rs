@@ -536,7 +536,11 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
         Some(syn::FnArg::Typed(pat_type)) => is_tool_context_ref(&pat_type.ty),
         _ => false,
     };
-    let payload_inputs = if takes_ctx { total_inputs - 1 } else { total_inputs };
+    let payload_inputs = if takes_ctx {
+        total_inputs - 1
+    } else {
+        total_inputs
+    };
 
     for (idx, arg) in input_fn.sig.inputs.iter_mut().enumerate() {
         if takes_ctx && idx == payload_inputs {

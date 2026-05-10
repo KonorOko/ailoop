@@ -132,7 +132,11 @@ impl ToolActivation {
         let Some(inner) = &self.inner else {
             return false;
         };
-        inner.active.lock().expect("ToolActivation lock").contains(name)
+        inner
+            .active
+            .lock()
+            .expect("ToolActivation lock")
+            .contains(name)
     }
 
     /// Add `name` to the active set. Returns
