@@ -61,12 +61,35 @@ where
                 }
                 AnthropicEvent::ContentBlockStart {index, content_block} => {
                     match content_block {
-                        AnthropicBlock::Text {..} => {
+                        AnthropicBlock::Text { text } => {
                             blocks.insert(index, BlockState::Text);
+                            // Pre-populated text on cached/replayed turns:
+                            // surface it as a delta, parity with Thinking.
+                            if !text.is_empty() {
+                                yield StreamChunk::TextDelta { delta: text };
+                            }
                         }
-                        AnthropicBlock::ToolUse {id, name, ..} => {
-                            blocks.insert(index, BlockState::ToolUse { id: id.clone(), name: name.clone(), args_buf: String::new() });
-                            yield StreamChunk::ToolCallStarted { id, name };
+                        AnthropicBlock::ToolUse { id, name, input } => {
+                            // Pre-populated args (cached/replayed turn) seed
+                            // the buffer so ContentBlockStop emits
+                            // ToolCallFinished with the parsed args even when
+                            // no input_json_delta events arrive. The empty-
+                            // object case (`{}`) is the streaming default and
+                            // deserves no delta.
+                            let prepopulated_args = match &input {
+                                serde_json::Value::Null => None,
+                                serde_json::Value::Object(map) if map.is_empty() => None,
+                                v => serde_json::to_string(v).ok(),
+                            };
+                            blocks.insert(index, BlockState::ToolUse {
+                                id: id.clone(),
+                                name: name.clone(),
+                                args_buf: prepopulated_args.clone().unwrap_or_default(),
+                            });
+                            yield StreamChunk::ToolCallStarted { id: id.clone(), name };
+                            if let Some(delta) = prepopulated_args {
+                                yield StreamChunk::ToolCallArgsDelta { id, delta };
+                            }
                         }
                         AnthropicBlock::Thinking { thinking, signature } => {
                             // start values are usually empty; deltas fill them in.
@@ -297,7 +320,6 @@ mod tests {
             ok(AnthropicEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("tool_use".into()),
-                    stop_sequence: None,
                 },
                 usage: UsageDelta {
                     output_tokens: 50,
@@ -439,7 +461,6 @@ mod tests {
             ok(AnthropicEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
-                    stop_sequence: None,
                 },
                 usage: UsageDelta {
                     output_tokens: 7,
@@ -491,7 +512,6 @@ mod tests {
             ok(AnthropicEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
-                    stop_sequence: None,
                 },
                 usage: UsageDelta {
                     output_tokens: 1,
@@ -518,6 +538,147 @@ mod tests {
                 assert!(service_tier.is_none());
             }
             other => panic!("expected TurnFinished, got {other:?}"),
+        }
+    }
+
+    /// Pre-populated `text` and `input` on `content_block_start` (cached
+    /// or replayed turns) must reach the consumer. Regression guard for
+    /// the dead-code cleanup that wired these fields into the state
+    /// machine — without this test, the fields silently drift back to
+    /// dropped on the next refactor.
+    #[tokio::test]
+    async fn prepopulated_text_and_tool_use_args_reach_consumer() {
+        let events = vec![
+            ok(AnthropicEvent::MessageStart {
+                message: MessageStartPayload {
+                    usage: MessageStartUsage {
+                        input_tokens: 1,
+                        ..Default::default()
+                    },
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockStart {
+                index: 0,
+                content_block: AnthropicBlock::Text {
+                    text: "cached prefix".into(),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockStop { index: 0 }),
+            ok(AnthropicEvent::ContentBlockStart {
+                index: 1,
+                content_block: AnthropicBlock::ToolUse {
+                    id: "toolu_cached".into(),
+                    name: "get_weather".into(),
+                    input: json!({"location": "SF"}),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockStop { index: 1 }),
+            ok(AnthropicEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some("tool_use".into()),
+                },
+                usage: UsageDelta {
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+            }),
+            ok(AnthropicEvent::MessageStop),
+        ];
+
+        let chunks = run(events).await;
+        let mut iter = chunks.into_iter();
+
+        match iter.next().expect("text delta from prepopulated text") {
+            StreamChunk::TextDelta { delta } => assert_eq!(delta, "cached prefix"),
+            other => panic!("expected TextDelta, got {other:?}"),
+        }
+        match iter.next().expect("tool call started") {
+            StreamChunk::ToolCallStarted { id, name } => {
+                assert_eq!(id, "toolu_cached");
+                assert_eq!(name, "get_weather");
+            }
+            other => panic!("expected ToolCallStarted, got {other:?}"),
+        }
+        match iter.next().expect("args delta from prepopulated input") {
+            StreamChunk::ToolCallArgsDelta { id, delta } => {
+                assert_eq!(id, "toolu_cached");
+                // Serialization is deterministic for a single-key object.
+                assert_eq!(delta, r#"{"location":"SF"}"#);
+            }
+            other => panic!("expected ToolCallArgsDelta, got {other:?}"),
+        }
+        match iter.next().expect("tool call finished") {
+            StreamChunk::ToolCallFinished { id, name, args } => {
+                assert_eq!(id, "toolu_cached");
+                assert_eq!(name, "get_weather");
+                assert_eq!(args, json!({"location": "SF"}));
+            }
+            other => panic!("expected ToolCallFinished, got {other:?}"),
+        }
+        // Empty-text or empty-args content blocks must NOT emit a delta;
+        // verify by checking the next chunk is the turn-finisher.
+        match iter.next().expect("turn finished") {
+            StreamChunk::TurnFinished { reason, .. } => {
+                assert!(matches!(reason, FinishReason::ToolUse));
+            }
+            other => panic!("expected TurnFinished, got {other:?}"),
+        }
+        assert!(iter.next().is_none(), "no chunks should follow TurnFinished");
+    }
+
+    /// Streaming default: `tool_use` blocks start with `input: {}` and
+    /// the actual args arrive via `input_json_delta`. The empty object
+    /// must NOT be forwarded as a delta — only the streaming deltas
+    /// should reach the consumer.
+    #[tokio::test]
+    async fn empty_object_input_emits_no_args_delta() {
+        let events = vec![
+            ok(AnthropicEvent::MessageStart {
+                message: MessageStartPayload {
+                    usage: MessageStartUsage {
+                        input_tokens: 1,
+                        ..Default::default()
+                    },
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockStart {
+                index: 0,
+                content_block: AnthropicBlock::ToolUse {
+                    id: "toolu_x".into(),
+                    name: "echo".into(),
+                    input: json!({}),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockDelta {
+                index: 0,
+                delta: AnthropicDelta::InputJsonDelta {
+                    partial_json: r#"{"k":"v"}"#.into(),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockStop { index: 0 }),
+            ok(AnthropicEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some("tool_use".into()),
+                },
+                usage: UsageDelta::default(),
+            }),
+            ok(AnthropicEvent::MessageStop),
+        ];
+
+        let chunks = run(events).await;
+        // Expected order: ToolCallStarted, ToolCallArgsDelta(streaming),
+        // ToolCallFinished, TurnFinished. No spurious args delta from
+        // the empty `input: {}`.
+        let args_deltas: Vec<&StreamChunk> = chunks
+            .iter()
+            .filter(|c| matches!(c, StreamChunk::ToolCallArgsDelta { .. }))
+            .collect();
+        assert_eq!(args_deltas.len(), 1, "exactly one args delta expected");
+        match args_deltas[0] {
+            StreamChunk::ToolCallArgsDelta { delta, .. } => {
+                assert_eq!(delta, r#"{"k":"v"}"#);
+            }
+            _ => unreachable!(),
         }
     }
 }

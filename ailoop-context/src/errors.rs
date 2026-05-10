@@ -6,9 +6,6 @@ pub enum CompactionError {
     #[error("Not enough history to compact")]
     NotEnoughHistory,
 
-    #[error("Budget exceeded")]
-    BudgetExceeded,
-
     /// A strategy that calls a [`ailoop_core::CompletionModel`]
     /// (notably [`crate::compaction::SummarizeStrategy`]) failed to
     /// produce a summary. The original error is rendered as a string

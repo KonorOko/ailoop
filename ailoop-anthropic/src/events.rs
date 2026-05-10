@@ -117,8 +117,6 @@ pub(crate) struct CacheCreationBreakdown {
 #[derive(Deserialize)]
 pub(crate) struct MessageDeltaPayload {
     pub stop_reason: Option<String>,
-    #[serde(default)]
-    pub stop_sequence: Option<String>,
 }
 
 #[derive(Default, Deserialize)]

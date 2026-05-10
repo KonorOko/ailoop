@@ -10,7 +10,3 @@
 //! equivalent) when budgets matter.
 
 pub use ailoop_core::{CharTokenizer, Tokenizer};
-
-/// Deprecated alias for [`CharTokenizer`].
-#[deprecated(since = "0.1.1", note = "use `CharTokenizer` instead")]
-pub type CharEstimator = CharTokenizer;
