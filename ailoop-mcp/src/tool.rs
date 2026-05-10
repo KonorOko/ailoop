@@ -13,9 +13,12 @@ use rmcp::service::{RoleClient, RunningService};
 /// long as any tool is registered.
 ///
 /// Errors from the wire (transport drops, server-side `isError: true`,
-/// schema mismatches) are mapped to [`ToolResultContent::Error`] so
-/// the model sees them as a tool reply — never as an `Err` to the
-/// engine. This mirrors the [`SubAgentTool`] convention.
+/// schema mismatches) are mapped to a [`ToolResultContent`] with
+/// `is_error: true` so the model sees them as a tool reply — never as
+/// an `Err` to the engine. This mirrors the [`SubAgentTool`]
+/// convention.
+///
+/// [`ToolResultContent`]: ailoop_core::ToolResultContent
 ///
 /// [`McpConnection`]: crate::McpConnection
 /// [`SubAgentTool`]: https://docs.rs/ailoop
@@ -49,13 +52,13 @@ impl ToolDyn for McpTool {
         // matches the MCP semantics for "no args".
 
         match self.client.call_tool(req).await {
-            Err(e) => ToolResultContent::Error(format!("MCP transport error: {e}")),
+            Err(e) => ToolResultContent::error(format!("MCP transport error: {e}")),
             Ok(result) => {
                 let text = stringify_content(&result.content);
                 if result.is_error.unwrap_or(false) {
-                    ToolResultContent::Error(text)
+                    ToolResultContent::error(text)
                 } else {
-                    ToolResultContent::Text(text)
+                    ToolResultContent::text(text)
                 }
             }
         }

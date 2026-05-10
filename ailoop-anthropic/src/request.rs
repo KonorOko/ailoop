@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use ailoop_core::{
     AssistantBlock, CacheControl, ChatRequest, Message, SystemBlock, SystemPrompt, ToolChoice,
-    ToolDefinition, ToolResultContent, UserBlock,
+    ToolDefinition, ToolResultBlock, UserBlock,
 };
 use serde_json::{json, Value};
 
@@ -152,20 +152,40 @@ fn to_anthropic_user_block(block: &UserBlock) -> serde_json::Value {
             content,
             cache_control,
         } => {
-            let (text, is_error) = match content {
-                ToolResultContent::Text(t) => (t.as_str(), false),
-                ToolResultContent::Error(e) => (e.as_str(), true),
-                _ => ("", false),
-            };
             let mut obj = serde_json::Map::new();
             obj.insert("type".into(), json!("tool_result"));
             obj.insert("tool_use_id".into(), json!(call_id));
-            obj.insert("content".into(), json!(text));
-            obj.insert("is_error".into(), json!(is_error));
+            obj.insert(
+                "content".into(),
+                json!(content
+                    .blocks
+                    .iter()
+                    .map(to_anthropic_tool_result_block)
+                    .collect::<Vec<_>>()),
+            );
+            if content.is_error {
+                obj.insert("is_error".into(), json!(true));
+            }
             insert_cache_control(&mut obj, cache_control.as_ref());
             Value::Object(obj)
         }
         // UserBlock is `#[non_exhaustive]`; future variants are dropped
+        // until the adapter learns to translate them.
+        _ => Value::Null,
+    }
+}
+
+/// Encode one [`ToolResultBlock`] into the matching entry inside
+/// `tool_result.content[]`. Anthropic accepts text and image blocks
+/// here; this adapter only emits text in the minimal migration —
+/// image-bearing tool replies land via a follow-up change.
+fn to_anthropic_tool_result_block(block: &ToolResultBlock) -> Value {
+    match block {
+        ToolResultBlock::Text { text } => json!({
+            "type": "text",
+            "text": text,
+        }),
+        // ToolResultBlock is `#[non_exhaustive]`; future variants drop
         // until the adapter learns to translate them.
         _ => Value::Null,
     }
@@ -448,13 +468,42 @@ mod tests {
 
     #[test]
     fn tool_result_carries_cache_control() {
-        let block = UserBlock::tool_result("call_1", ToolResultContent::Text("ok".into()))
+        use ailoop_core::ToolResultContent;
+        let block = UserBlock::tool_result("call_1", ToolResultContent::text("ok"))
             .with_cache_control(Some(CacheControl::Ephemeral));
         let json = to_anthropic_user_block(&block);
         assert_eq!(
             json["cache_control"],
             json!({ "type": "ephemeral" }),
             "tool_result blocks must support cache_control",
+        );
+    }
+
+    #[test]
+    fn tool_result_text_wires_as_array_of_text_blocks() {
+        use ailoop_core::ToolResultContent;
+        let block = UserBlock::tool_result("call_1", ToolResultContent::text("70F"));
+        let json = to_anthropic_user_block(&block);
+        assert_eq!(json["type"], json!("tool_result"));
+        assert_eq!(json["tool_use_id"], json!("call_1"));
+        assert_eq!(
+            json["content"],
+            json!([{ "type": "text", "text": "70F" }]),
+            "tool_result content must always be an array of typed blocks",
+        );
+        // is_error is omitted when false to match Anthropic's default.
+        assert!(json.get("is_error").is_none());
+    }
+
+    #[test]
+    fn tool_result_error_emits_is_error_true() {
+        use ailoop_core::ToolResultContent;
+        let block = UserBlock::tool_result("call_1", ToolResultContent::error("API down"));
+        let json = to_anthropic_user_block(&block);
+        assert_eq!(json["is_error"], json!(true));
+        assert_eq!(
+            json["content"],
+            json!([{ "type": "text", "text": "API down" }]),
         );
     }
 

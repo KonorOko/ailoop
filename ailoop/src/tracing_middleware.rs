@@ -197,11 +197,7 @@ impl ChatMiddleware for TracingMiddleware {
         _args: &Value,
         result: &ToolResultContent,
     ) {
-        let outcome = match result {
-            ToolResultContent::Text(_) => "text",
-            ToolResultContent::Error(_) => "error",
-            _ => "unknown",
-        };
+        let outcome = if result.is_error { "error" } else { "text" };
         tracing::debug!(
             target: "ailoop.tool",
             run_id = %run_id,

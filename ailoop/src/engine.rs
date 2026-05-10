@@ -385,7 +385,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                             Ok(Ok(content)) => content,
                             Ok(Err(ToolRegistryError::NotFound(_))) => {
                                 let available_tools: Vec<String> = tools.active_tools().map(|t| t.tool_definition().name).collect();
-                                ToolResultContent::Error(format!("Tool '{name}' not found. Available tools: [{}]", available_tools.join(", ")))
+                                ToolResultContent::error(format!("Tool '{name}' not found. Available tools: [{}]", available_tools.join(", ")))
                             },
                             Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id)?,
                             Err(reason) => {
@@ -402,7 +402,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                         }
                     },
                     ToolDecision::Skip {reason} => {
-                        ToolResultContent::Error(format!("Tool skipped: {reason}"))
+                        ToolResultContent::error(format!("Tool skipped: {reason}"))
                     },
                     ToolDecision::Terminate {reason} => {
                         if !tools_result.is_empty() {
@@ -415,7 +415,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                         yield chunk;
                         return;
                     }
-                    _ => ToolResultContent::Error("unsupported ToolDecision variant".into()),
+                    _ => ToolResultContent::error("unsupported ToolDecision variant"),
                 };
 
                 // Output-transform phase: every `_mut` runs before any
@@ -555,7 +555,7 @@ mod tests {
             )
         }
         async fn call(&self, _: serde_json::Value) -> ToolResultContent {
-            ToolResultContent::Text("sunny".into())
+            ToolResultContent::text("sunny")
         }
     }
 

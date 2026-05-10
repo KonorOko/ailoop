@@ -168,7 +168,7 @@ impl ToolDyn for EchoArgs {
     async fn call(&self, args: Value) -> ToolResultContent {
         // Echo what the tool actually received so tests can assert
         // that `_mut` mutations propagate through to the tool.
-        ToolResultContent::Text(args.to_string())
+        ToolResultContent::text(args.to_string())
     }
 }
 
@@ -266,10 +266,7 @@ async fn on_before_tool_call_mut_mutation_visible_to_tool_and_observer() {
     let tool_result_text = chunks
         .iter()
         .find_map(|c| match c {
-            StreamChunk::ToolResult {
-                content: ToolResultContent::Text(t),
-                ..
-            } => Some(t.clone()),
+            StreamChunk::ToolResult { content, .. } => content.as_text().map(str::to_owned),
             _ => None,
         })
         .expect("ToolResult should be emitted");
@@ -298,11 +295,7 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
             _: &Value,
             result: &ToolResultContent,
         ) {
-            *self.seen.lock().unwrap() = Some(match result {
-                ToolResultContent::Text(t) => ToolResultContent::Text(t.clone()),
-                ToolResultContent::Error(e) => ToolResultContent::Error(e.clone()),
-                _ => ToolResultContent::Error("unknown variant".into()),
-            });
+            *self.seen.lock().unwrap() = Some(result.clone());
         }
     }
 
@@ -317,8 +310,10 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
             _: &Value,
             result: &mut ToolResultContent,
         ) {
-            if let ToolResultContent::Text(t) = result {
-                *t = format!("[redacted] {t}");
+            for block in result.blocks.iter_mut() {
+                if let ailoop_core::ToolResultBlock::Text { text } = block {
+                    *text = format!("[redacted] {text}");
+                }
             }
         }
     }
@@ -367,13 +362,12 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
         .collect();
 
     // Observer saw the mutated result.
-    match observer.seen.lock().unwrap().clone().expect("observed") {
-        ToolResultContent::Text(t) => assert!(
-            t.starts_with("[redacted]"),
-            "expected mutated result, got {t:?}"
-        ),
-        other => panic!("expected Text, got {other:?}"),
-    }
+    let seen = observer.seen.lock().unwrap().clone().expect("observed");
+    let seen_text = seen.as_text().expect("text body");
+    assert!(
+        seen_text.starts_with("[redacted]"),
+        "expected mutated result, got {seen_text:?}"
+    );
 
     // The emitted `ToolResult` chunk reflects the mutation.
     let yielded = chunks
@@ -383,10 +377,10 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
             _ => None,
         })
         .expect("ToolResult should be emitted");
-    match yielded {
-        ToolResultContent::Text(t) => assert!(t.starts_with("[redacted]")),
-        other => panic!("expected Text, got {other:?}"),
-    }
+    assert!(
+        yielded.as_text().is_some_and(|t| t.starts_with("[redacted]")),
+        "expected mutated text body, got {yielded:?}"
+    );
 }
 
 /// End-to-end check via `Conversation::run`: a `_mut` rewriting every

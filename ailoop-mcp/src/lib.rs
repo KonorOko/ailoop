@@ -31,11 +31,12 @@
 //!   server child process and complete the `initialize` handshake.
 //! - [`McpTool`] — `ToolDyn` wrapper around one discovered tool.
 //! - [`McpError`] — failure surface of connection setup and
-//!   discovery. Per-tool runtime failures map to
-//!   [`ToolResultContent::Error`] inside the wrapper instead.
+//!   discovery. Per-tool runtime failures map to a
+//!   [`ToolResultContent`] with `is_error: true` inside the wrapper
+//!   instead.
 //!
 //! [`rmcp`]: https://docs.rs/rmcp
-//! [`ToolResultContent::Error`]: ailoop_core::ToolResultContent::Error
+//! [`ToolResultContent`]: ailoop_core::ToolResultContent
 
 #![deny(missing_docs)]
 

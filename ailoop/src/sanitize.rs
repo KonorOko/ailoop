@@ -134,10 +134,12 @@ impl Sanitize {
 
     /// Register a rewriter for tool results. The callback runs in
     /// `on_after_tool_call_mut`, before any observer sees the result and
-    /// before the model sees it on the next turn. Both
-    /// `ToolResultContent::Text` and `ToolResultContent::Error` reach
-    /// the callback — match on the variant inside the closure if you
-    /// only want to scrub one.
+    /// before the model sees it on the next turn. Both successful and
+    /// failed replies reach the callback — check
+    /// `ToolResultContent::is_error` inside the closure if you only want
+    /// to scrub one. Image / non-text blocks pass through untouched
+    /// (the callback rewrites in place; the closure decides which
+    /// blocks to touch).
     pub fn on_tool_result<F>(mut self, f: F) -> Self
     where
         F: Fn(&str, &mut ToolResultContent) + Send + Sync + 'static,

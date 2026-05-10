@@ -167,18 +167,11 @@ fn usage_payload(u: &Usage) -> Value {
 }
 
 fn tool_result_outcome(r: &ToolResultContent) -> &'static str {
-    match r {
-        ToolResultContent::Text(_) => "text",
-        ToolResultContent::Error(_) => "error",
-        _ => "unknown",
-    }
+    if r.is_error { "error" } else { "text" }
 }
 
-fn tool_result_body(r: &ToolResultContent) -> &str {
-    match r {
-        ToolResultContent::Text(s) | ToolResultContent::Error(s) => s,
-        _ => "",
-    }
+fn tool_result_body(r: &ToolResultContent) -> String {
+    r.collect_text()
 }
 
 #[async_trait::async_trait]
@@ -442,7 +435,7 @@ mod tests {
                 &step_id,
                 "echo",
                 &Value::Null,
-                &ToolResultContent::Text("ok".into()),
+                &ToolResultContent::text("ok"),
             )
             .await;
         tracer
@@ -542,7 +535,7 @@ mod tests {
                 &step_id,
                 "weather",
                 &args,
-                &ToolResultContent::Text("sunny".into()),
+                &ToolResultContent::text("sunny"),
             )
             .await;
 

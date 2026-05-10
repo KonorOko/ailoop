@@ -21,7 +21,7 @@
 //! It is documented as a fallback rather than a recommended default:
 //! production callers should plug in a provider-specific implementation.
 
-use crate::{AssistantBlock, Message, ToolResultContent, UserBlock};
+use crate::{AssistantBlock, Message, ToolResultBlock, UserBlock};
 
 /// Counts tokens in text and full messages.
 ///
@@ -54,11 +54,23 @@ pub trait Tokenizer: Send + Sync {
                             call_id, content, ..
                         } => {
                             total += self.count_text(call_id);
-                            match content {
-                                ToolResultContent::Text(text) => total += self.count_text(text),
-                                ToolResultContent::Error(text) => total += self.count_text(text),
+                            for tr_block in &content.blocks {
+                                match tr_block {
+                                    ToolResultBlock::Text { text } => {
+                                        total += self.count_text(text);
+                                    }
+                                    // Image blocks contribute 0 in the
+                                    // default impl. CharTokenizer cannot
+                                    // estimate image tokens; calibrated
+                                    // tokenizers drift toward the truth
+                                    // via the Usage feedback loop.
+                                    ToolResultBlock::Image { .. } => {}
+                                }
                             }
                         }
+                        // Image / Document contribute 0 in the default
+                        // impl. See the comment above for the rationale.
+                        UserBlock::Image { .. } | UserBlock::Document { .. } => {}
                     }
                 }
             }
@@ -139,15 +151,33 @@ mod tests {
 
     #[test]
     fn count_message_walks_user_blocks() {
+        use crate::ToolResultContent;
         let t = WordTokenizer;
         let msg = Message::User {
             blocks: vec![
                 UserBlock::text("hello world from user"),
-                UserBlock::tool_result("call_42", ToolResultContent::Text("ok done".into())),
+                UserBlock::tool_result("call_42", ToolResultContent::text("ok done")),
             ],
         };
         // text(4) + call_id(1) + tool_result text(2) = 7
         assert_eq!(t.count_message(&msg), 7);
+    }
+
+    #[test]
+    fn count_message_image_and_document_blocks_contribute_zero() {
+        use crate::Source;
+        let t = WordTokenizer;
+        let msg = Message::User {
+            blocks: vec![
+                UserBlock::image(Source::Url {
+                    url: "https://example.com/x.png".into(),
+                }),
+                UserBlock::document(Source::Url {
+                    url: "https://example.com/x.pdf".into(),
+                }),
+            ],
+        };
+        assert_eq!(t.count_message(&msg), 0);
     }
 
     #[test]

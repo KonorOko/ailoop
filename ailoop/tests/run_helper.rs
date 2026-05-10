@@ -113,7 +113,7 @@ async fn run_final_text_reflects_last_assistant_turn_only() {
             )
         }
         async fn call(&self, _: Value) -> ToolResultContent {
-            ToolResultContent::Text("sunny".into())
+            ToolResultContent::text("sunny")
         }
     }
 

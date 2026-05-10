@@ -20,11 +20,12 @@ use crate::Conversation;
 ///
 /// The child's history persists across calls (each invocation sees
 /// prior turns); rebuild the `SubAgentTool` per call if you need
-/// stateless behavior. Child errors and aborts are surfaced as
-/// [`ToolResultContent::Text`] (with an `"sub-agent error: …"` /
-/// `"sub-agent aborted: …"` prefix) — never as
-/// [`ToolResultContent::Error`] and never as a tool-registry error
-/// — so the parent's loop continues and the model can react.
+/// stateless behavior. Child errors and aborts are surfaced as a
+/// successful text-only [`ToolResultContent`] (with an
+/// `"sub-agent error: …"` / `"sub-agent aborted: …"` prefix and
+/// `is_error: false`) — never as an error reply and never as a
+/// tool-registry error — so the parent's loop continues and the model
+/// can react.
 ///
 /// # Examples
 ///
@@ -118,15 +119,15 @@ where
                 let text = outcome.final_text.unwrap_or_default();
                 match outcome.finish_reason {
                     FinishReason::Aborted(reason) if text.is_empty() => {
-                        ToolResultContent::Text(format!("sub-agent aborted: {reason}"))
+                        ToolResultContent::text(format!("sub-agent aborted: {reason}"))
                     }
                     FinishReason::Aborted(reason) => {
-                        ToolResultContent::Text(format!("sub-agent aborted ({reason}): {text}"))
+                        ToolResultContent::text(format!("sub-agent aborted ({reason}): {text}"))
                     }
-                    _ => ToolResultContent::Text(text),
+                    _ => ToolResultContent::text(text),
                 }
             }
-            Err(e) => ToolResultContent::Text(format!("sub-agent error: {e}")),
+            Err(e) => ToolResultContent::text(format!("sub-agent error: {e}")),
         }
     }
 }
@@ -160,10 +161,8 @@ mod tests {
         let tool = SubAgentTool::new("delegate", "delegate to a sub-agent", conv);
 
         let result = tool.call(json!({"prompt": "do the thing"})).await;
-        match result {
-            ToolResultContent::Text(t) => assert_eq!(t, "delegated answer"),
-            other => panic!("expected Text, got {other:?}"),
-        }
+        assert_eq!(result.as_text(), Some("delegated answer"));
+        assert!(!result.is_error);
     }
 
     /// History persists between calls: the second invocation's
@@ -193,8 +192,8 @@ mod tests {
         let first = tool.call(json!({"prompt": "P1"})).await;
         let second = tool.call(json!({"prompt": "P2"})).await;
 
-        assert!(matches!(first, ToolResultContent::Text(ref t) if t == "first"));
-        assert!(matches!(second, ToolResultContent::Text(ref t) if t == "second"));
+        assert_eq!(first.as_text(), Some("first"));
+        assert_eq!(second.as_text(), Some("second"));
 
         let captures = captures.lock().unwrap();
         assert_eq!(captures.len(), 2, "expected one capture per turn");
@@ -261,14 +260,10 @@ mod tests {
         let tool = SubAgentTool::new("delegate", "delegate", conv);
 
         let result = tool.call(json!({"prompt": "anything"})).await;
-        match result {
-            ToolResultContent::Text(t) => {
-                assert!(
-                    t.contains("aborted") && t.contains("policy"),
-                    "expected abort reason in text, got {t:?}"
-                );
-            }
-            other => panic!("expected Text on abort, got {other:?}"),
-        }
+        let text = result.as_text().expect("expected text body on abort");
+        assert!(
+            text.contains("aborted") && text.contains("policy"),
+            "expected abort reason in text, got {text:?}"
+        );
     }
 }

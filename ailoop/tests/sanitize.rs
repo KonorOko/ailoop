@@ -48,7 +48,7 @@ impl ToolDyn for EchoArgs {
         )
     }
     async fn call(&self, args: Value) -> ToolResultContent {
-        ToolResultContent::Text(args.to_string())
+        ToolResultContent::text(args.to_string())
     }
 }
 
@@ -70,7 +70,7 @@ impl ToolDyn for LeakySecret {
         )
     }
     async fn call(&self, _: Value) -> ToolResultContent {
-        ToolResultContent::Text("alice token: secret-123".into())
+        ToolResultContent::text("alice token: secret-123")
     }
 }
 
@@ -154,10 +154,7 @@ async fn on_tool_args_rewrites_args_before_tool_invocation() {
     let echoed = chunks
         .iter()
         .find_map(|c| match c {
-            StreamChunk::ToolResult {
-                content: ToolResultContent::Text(t),
-                ..
-            } => Some(t.clone()),
+            StreamChunk::ToolResult { content, .. } => content.as_text().map(str::to_owned),
             _ => None,
         })
         .expect("ToolResult should be emitted");
@@ -195,8 +192,10 @@ async fn on_tool_result_rewrites_result_before_next_turn() {
 
     let recorder = Arc::new(RequestRecorder::default());
     let sanitize = Sanitize::new().on_tool_result(|_name, result| {
-        if let ToolResultContent::Text(t) = result {
-            *t = t.replace("secret-123", "<REDACTED>");
+        for block in result.blocks.iter_mut() {
+            if let ailoop_core::ToolResultBlock::Text { text } = block {
+                *text = text.replace("secret-123", "<REDACTED>");
+            }
         }
     });
 
@@ -220,10 +219,7 @@ async fn on_tool_result_rewrites_result_before_next_turn() {
         })
         .flat_map(|blocks| blocks.iter())
         .find_map(|b| match b {
-            UserBlock::ToolResult {
-                content: ToolResultContent::Text(t),
-                ..
-            } => Some(t.clone()),
+            UserBlock::ToolResult { content, .. } => content.as_text().map(str::to_owned),
             _ => None,
         })
         .expect("second turn should carry the tool result");
@@ -473,7 +469,7 @@ async fn tool_args_callback_can_filter_by_name() {
             )
         }
         async fn call(&self, args: Value) -> ToolResultContent {
-            ToolResultContent::Text(args.to_string())
+            ToolResultContent::text(args.to_string())
         }
     }
 
@@ -494,7 +490,7 @@ async fn tool_args_callback_can_filter_by_name() {
             )
         }
         async fn call(&self, args: Value) -> ToolResultContent {
-            ToolResultContent::Text(args.to_string())
+            ToolResultContent::text(args.to_string())
         }
     }
 
@@ -557,11 +553,8 @@ async fn tool_args_callback_can_filter_by_name() {
 
     let mut by_call_id: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     for c in &chunks {
-        if let StreamChunk::ToolResult {
-            call_id,
-            content: ToolResultContent::Text(t),
-            ..
-        } = c
+        if let StreamChunk::ToolResult { call_id, content, .. } = c
+            && let Some(t) = content.as_text()
         {
             by_call_id.insert(call_id.clone(), serde_json::from_str(t).unwrap());
         }

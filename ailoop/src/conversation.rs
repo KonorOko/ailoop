@@ -761,7 +761,7 @@ mod tests {
             )
         }
         async fn call(&self, _args: serde_json::Value) -> ailoop_core::ToolResultContent {
-            ailoop_core::ToolResultContent::Text(String::new())
+            ailoop_core::ToolResultContent::text("")
         }
     }
 

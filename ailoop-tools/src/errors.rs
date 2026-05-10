@@ -6,15 +6,15 @@ use thiserror::Error;
 /// Errors surfaced by [`ToolRegistry`](crate::ToolRegistry) operations.
 ///
 /// The engine treats [`Self::NotFound`] in-band — when the model calls
-/// a tool that is not registered, the engine synthesizes a
-/// [`ToolResultContent::Error`] reply rather than aborting the run, so
-/// the model can recover by trying a different tool. Every other
-/// variant escalates as
+/// a tool that is not registered, the engine synthesizes an
+/// `is_error: true` [`ToolResultContent`] reply rather than aborting
+/// the run, so the model can recover by trying a different tool.
+/// Every other variant escalates as
 /// [`EngineError::Tool`](https://docs.rs/ailoop) (or [`BuildError::ToolRegistry`](https://docs.rs/ailoop)
 /// during builder setup) since they indicate a configuration bug
 /// rather than a model recoverable state.
 ///
-/// [`ToolResultContent::Error`]: ailoop_core::ToolResultContent::Error
+/// [`ToolResultContent`]: ailoop_core::ToolResultContent
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ToolRegistryError {

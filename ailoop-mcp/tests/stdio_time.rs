@@ -9,7 +9,7 @@
 //!
 //! Requires `uvx` on `PATH` (install via `pip install uv`).
 
-use ailoop_core::{ToolResultContent, ToolTag};
+use ailoop_core::ToolTag;
 use ailoop_mcp::McpConnection;
 use serde_json::json;
 
@@ -76,13 +76,9 @@ async fn calls_get_current_time_tool() {
         .expect("mcp-server-time should expose a get_current_time-style tool");
 
     let result = tool.call(json!({"timezone": "UTC"})).await;
-    match result {
-        ToolResultContent::Text(s) => {
-            assert!(!s.is_empty(), "expected a non-empty text payload");
-        }
-        ToolResultContent::Error(e) => panic!("unexpected error reply: {e}"),
-        _ => panic!("unexpected tool result variant"),
-    }
+    assert!(!result.is_error, "unexpected error reply: {result:?}");
+    let text = result.as_text().expect("expected a text payload");
+    assert!(!text.is_empty(), "expected a non-empty text payload");
 }
 
 #[tokio::test]
@@ -97,9 +93,9 @@ async fn invalid_args_surface_as_tool_error_not_engine_error() {
 
     // Missing required `timezone` argument.
     let result = tool.call(json!({})).await;
-    match result {
-        ToolResultContent::Error(_) => {}
-        ToolResultContent::Text(t) => panic!("expected Error reply, got Text: {t}"),
-        _ => panic!("unexpected tool result variant"),
-    }
+    assert!(
+        result.is_error,
+        "expected is_error=true, got {:?}",
+        result
+    );
 }

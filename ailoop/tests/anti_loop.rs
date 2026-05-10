@@ -29,7 +29,7 @@ impl ToolDyn for GetWeather {
         )
     }
     async fn call(&self, _: Value) -> ToolResultContent {
-        ToolResultContent::Text("sunny".into())
+        ToolResultContent::text("sunny")
     }
 }
 

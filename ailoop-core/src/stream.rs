@@ -153,8 +153,8 @@ pub enum StreamChunk {
         step_id: StepId,
         /// Matches [`Self::ToolCallFinished::id`].
         call_id: String,
-        /// Tool reply, with the [`ToolResultContent::Error`] flag
-        /// preserved for the next provider turn.
+        /// Tool reply, with `is_error` preserved for the next provider
+        /// turn.
         content: ToolResultContent,
     },
     /// Engine has finished the run. Emitted exactly once per run,

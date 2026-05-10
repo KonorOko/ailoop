@@ -72,8 +72,9 @@ impl Message {
 
 /// One block inside a [`Message::User`] turn.
 ///
-/// Free user text and tool results both live here because providers
-/// route tool results back through the user role on the wire.
+/// Free user text, tool results, and inline media (images, documents)
+/// all live here because providers route tool results — and the rest
+/// of the multimodal surface — back through the user role on the wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum UserBlock {
@@ -94,9 +95,35 @@ pub enum UserBlock {
     ToolResult {
         /// Matches the `id` on the originating [`AssistantBlock::ToolCall`].
         call_id: String,
-        /// The tool's reply, distinguishing successful output from
-        /// tool-reported errors.
+        /// The tool's reply. `content.is_error` flags tool-reported
+        /// failures separately from the block list, so an error reply
+        /// can still carry images.
         content: ToolResultContent,
+        /// See [`UserBlock::Text::cache_control`].
+        #[serde(skip, default)]
+        cache_control: Option<CacheControl>,
+    },
+    /// Image content rendered inline. Adapters map this to the
+    /// provider's image content type (Anthropic `image`, Chat
+    /// Completions `image_url`). Adapters that cannot represent the
+    /// chosen [`Source`] (e.g. a Chat Completions deployment with no
+    /// vision support) surface a typed error.
+    Image {
+        /// Image source: base64, URL, or provider-side file ID.
+        source: Source,
+        /// See [`UserBlock::Text::cache_control`].
+        #[serde(skip, default)]
+        cache_control: Option<CacheControl>,
+    },
+    /// Document content rendered inline (PDF and similar). Anthropic
+    /// has a dedicated `document` content type; Chat Completions does
+    /// not, so the Azure adapter surfaces a typed
+    /// `UnsupportedContent` error and callers downgrade via
+    /// `ChatMiddleware::on_chat_request` if they want a text
+    /// substitute.
+    Document {
+        /// Document source: base64, URL, or provider-side file ID.
+        source: Source,
         /// See [`UserBlock::Text::cache_control`].
         #[serde(skip, default)]
         cache_control: Option<CacheControl>,
@@ -114,13 +141,30 @@ impl UserBlock {
 
     /// Build a [`UserBlock::ToolResult`] with no cache breakpoint. The
     /// `content` argument is anything that converts into
-    /// [`ToolResultContent`] — `String` and `&str` map to the
-    /// `Text` variant by default; pass [`ToolResultContent::Error`]
-    /// explicitly to flag a tool-reported failure.
+    /// [`ToolResultContent`] — `String` and `&str` produce a single
+    /// text block with `is_error = false`. Use
+    /// [`ToolResultContent::error`] to flag a tool-reported failure or
+    /// [`ToolResultContent::from_blocks`] to build a multi-block reply.
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<ToolResultContent>) -> Self {
         Self::ToolResult {
             call_id: call_id.into(),
             content: content.into(),
+            cache_control: None,
+        }
+    }
+
+    /// Build a [`UserBlock::Image`] with no cache breakpoint.
+    pub fn image(source: Source) -> Self {
+        Self::Image {
+            source,
+            cache_control: None,
+        }
+    }
+
+    /// Build a [`UserBlock::Document`] with no cache breakpoint.
+    pub fn document(source: Source) -> Self {
+        Self::Document {
+            source,
             cache_control: None,
         }
     }
@@ -131,8 +175,14 @@ impl UserBlock {
         match &mut self {
             Self::Text {
                 cache_control: cc, ..
-            } => *cc = cache_control,
-            Self::ToolResult {
+            }
+            | Self::ToolResult {
+                cache_control: cc, ..
+            }
+            | Self::Image {
+                cache_control: cc, ..
+            }
+            | Self::Document {
                 cache_control: cc, ..
             } => *cc = cache_control,
         }
@@ -142,9 +192,10 @@ impl UserBlock {
     /// Read the current cache breakpoint, if any.
     pub fn cache_control(&self) -> Option<&CacheControl> {
         match self {
-            Self::Text { cache_control, .. } | Self::ToolResult { cache_control, .. } => {
-                cache_control.as_ref()
-            }
+            Self::Text { cache_control, .. }
+            | Self::ToolResult { cache_control, .. }
+            | Self::Image { cache_control, .. }
+            | Self::Document { cache_control, .. } => cache_control.as_ref(),
         }
     }
 }
@@ -259,37 +310,188 @@ impl AssistantBlock {
     }
 }
 
-/// Content of a tool reply sent back to the model in a
-/// [`UserBlock::ToolResult`].
+/// Source of an image or document content block.
 ///
-/// `Error` is **not** a Rust [`Result::Err`] — both variants represent
-/// successful tool calls whose outcome the engine relays to the model.
-/// `Text` is a normal reply; `Error` flags the reply as a failure the
-/// model should account for (e.g. "the API returned 404"), and adapters
-/// pass that flag to the provider when supported (Anthropic
-/// `is_error: true`). Engine-level errors (panic in the handler,
-/// arguments that don't deserialize, registry lookup miss) are
-/// converted to a synthesized `Error` reply so the loop can continue;
-/// transport errors propagate through `Result` channels instead.
+/// Three forms cover the providers we ship adapters for today:
+/// - `Base64` carries the binary inline. Always works but inflates the
+///   request body and any persisted snapshot — prefer `Url` or
+///   `FileId` for large media.
+/// - `Url` points the provider at an external resource. Subject to
+///   the provider's own fetch limits and accessibility rules.
+/// - `FileId` references a provider-side file (Anthropic Files Beta,
+///   OpenAI Files). Adapters that do not understand the id surface a
+///   typed error rather than degrading silently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Source {
+    /// Inline base64-encoded bytes.
+    Base64 {
+        /// MIME type of the payload (e.g. `image/png`, `application/pdf`).
+        media_type: String,
+        /// Base64-encoded data.
+        data: String,
+    },
+    /// External URL the provider fetches.
+    Url {
+        /// HTTP(S) URL.
+        url: String,
+    },
+    /// Provider-side file ID (Anthropic Files Beta, OpenAI Files). The
+    /// id is opaque to the adapter — the provider resolves it on its
+    /// side.
+    FileId {
+        /// Provider-issued identifier.
+        id: String,
+    },
+}
+
+/// One block inside a [`ToolResultContent::blocks`] list.
+///
+/// Several blocks can be interleaved inside a single tool reply
+/// (e.g. text + a rendered chart), so a tool that generates an image
+/// alongside an explanation does not have to choose. Error semantics
+/// live on the parent [`ToolResultContent::is_error`], not per-block,
+/// so a failed reply can still carry images.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum ToolResultContent {
-    /// Successful tool reply.
-    Text(String),
-    /// Tool reply flagged as an error to the model. See the type-level
-    /// note for the distinction from [`Result::Err`].
-    Error(String),
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolResultBlock {
+    /// Plain text segment of the tool reply.
+    Text {
+        /// Text content.
+        text: String,
+    },
+    /// Image segment of the tool reply. Adapters that cannot represent
+    /// images inside tool results surface a typed error.
+    Image {
+        /// Image source.
+        source: Source,
+    },
+}
+
+impl ToolResultBlock {
+    /// Build a [`ToolResultBlock::Text`].
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    /// Build a [`ToolResultBlock::Image`] from the given source.
+    pub fn image(source: Source) -> Self {
+        Self::Image { source }
+    }
+}
+
+/// Body of a tool reply sent back to the model in a
+/// [`UserBlock::ToolResult`].
+///
+/// The body is a list of [`ToolResultBlock`]s (text, image, …) plus an
+/// `is_error` flag. The flag is the wire-level error signal — Anthropic
+/// emits it as `tool_result.is_error`; Chat Completions has no field
+/// for it and treats the body as the error message.
+///
+/// `is_error` is **not** a Rust [`Result::Err`] — both forms represent
+/// successful tool calls whose outcome the engine relays to the model.
+/// `is_error = true` flags the reply as a failure the model should
+/// account for (e.g. "the API returned 404"). Engine-level errors
+/// (panic in the handler, arguments that don't deserialize, registry
+/// lookup miss) are converted to a synthesized error reply so the
+/// loop can continue; transport errors propagate through `Result`
+/// channels instead.
+///
+/// Most callers build replies through the [`Self::text`] /
+/// [`Self::error`] constructors; multi-block replies use
+/// [`Self::from_blocks`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ToolResultContent {
+    /// Content blocks in order. A "normal" text reply has a single
+    /// [`ToolResultBlock::Text`] here.
+    pub blocks: Vec<ToolResultBlock>,
+    /// `true` flags the reply as a tool-reported failure (Anthropic
+    /// `is_error: true`). Adapters that don't speak the flag on the
+    /// wire just emit the text body.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_error: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+impl ToolResultContent {
+    /// Build a successful text-only tool reply (`is_error = false`).
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            blocks: vec![ToolResultBlock::text(text)],
+            is_error: false,
+        }
+    }
+
+    /// Build a failing text-only tool reply (`is_error = true`).
+    pub fn error(text: impl Into<String>) -> Self {
+        Self {
+            blocks: vec![ToolResultBlock::text(text)],
+            is_error: true,
+        }
+    }
+
+    /// Build a successful image-only tool reply (`is_error = false`).
+    pub fn image(source: Source) -> Self {
+        Self {
+            blocks: vec![ToolResultBlock::image(source)],
+            is_error: false,
+        }
+    }
+
+    /// Build a reply from arbitrary blocks. Defaults `is_error: false`;
+    /// chain [`Self::with_is_error`] to flag failure.
+    pub fn from_blocks(blocks: Vec<ToolResultBlock>) -> Self {
+        Self {
+            blocks,
+            is_error: false,
+        }
+    }
+
+    /// Builder-style helper: set the `is_error` flag.
+    pub fn with_is_error(mut self, is_error: bool) -> Self {
+        self.is_error = is_error;
+        self
+    }
+
+    /// First [`ToolResultBlock::Text`] body, if any. Useful when the
+    /// caller only cares about the text portion of a reply.
+    pub fn as_text(&self) -> Option<&str> {
+        self.blocks.iter().find_map(|b| match b {
+            ToolResultBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Concatenate every [`ToolResultBlock::Text`] body in order,
+    /// joined by newlines. Returns an empty string when there are no
+    /// text blocks (the reply was image-only).
+    pub fn collect_text(&self) -> String {
+        self.blocks
+            .iter()
+            .filter_map(|b| match b {
+                ToolResultBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 impl From<String> for ToolResultContent {
     fn from(value: String) -> Self {
-        Self::Text(value)
+        Self::text(value)
     }
 }
 
 impl From<&str> for ToolResultContent {
     fn from(value: &str) -> Self {
-        Self::Text(value.to_string())
+        Self::text(value)
     }
 }
 
@@ -405,7 +607,7 @@ mod tests {
         let msg = Message::User {
             blocks: vec![UserBlock::tool_result(
                 "call-1",
-                ToolResultContent::Text("ok".into()),
+                ToolResultContent::text("ok"),
             )],
         };
         let restored = round_trip(&msg);
@@ -417,7 +619,8 @@ mod tests {
                     cache_control,
                 } => {
                     assert_eq!(call_id, "call-1");
-                    assert!(matches!(content, ToolResultContent::Text(t) if t == "ok"));
+                    assert_eq!(content.as_text(), Some("ok"));
+                    assert!(!content.is_error);
                     assert!(cache_control.is_none());
                 }
                 other => panic!("expected ToolResult, got {other:?}"),
@@ -487,9 +690,62 @@ mod tests {
 
     #[test]
     fn round_trip_tool_result_error_variant() {
-        let content = ToolResultContent::Error("boom".into());
+        let content = ToolResultContent::error("boom");
         let json = serde_json::to_string(&content).unwrap();
         let back: ToolResultContent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, ToolResultContent::Error(s) if s == "boom"));
+        assert_eq!(back.as_text(), Some("boom"));
+        assert!(back.is_error);
+    }
+
+    #[test]
+    fn tool_result_content_is_error_omitted_when_false() {
+        let content = ToolResultContent::text("ok");
+        let json = serde_json::to_value(&content).unwrap();
+        assert!(
+            json.get("is_error").is_none(),
+            "is_error must be skipped when false, got {json}"
+        );
+    }
+
+    #[test]
+    fn tool_result_content_multi_block_round_trip() {
+        let content = ToolResultContent::from_blocks(vec![
+            ToolResultBlock::text("see chart"),
+            ToolResultBlock::image(Source::Url {
+                url: "https://example.com/chart.png".into(),
+            }),
+        ]);
+        let json = serde_json::to_string(&content).unwrap();
+        let back: ToolResultContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.blocks.len(), 2);
+        assert!(!back.is_error);
+    }
+
+    #[test]
+    fn round_trip_user_image_block() {
+        let msg = Message::User {
+            blocks: vec![UserBlock::image(Source::Base64 {
+                media_type: "image/png".into(),
+                data: "AAAA".into(),
+            })],
+        };
+        let restored = round_trip(&msg);
+        match &restored {
+            Message::User { blocks } => match &blocks[0] {
+                UserBlock::Image {
+                    source,
+                    cache_control,
+                } => {
+                    assert!(matches!(
+                        source,
+                        Source::Base64 { media_type, data }
+                            if media_type == "image/png" && data == "AAAA"
+                    ));
+                    assert!(cache_control.is_none());
+                }
+                other => panic!("expected Image, got {other:?}"),
+            },
+            other => panic!("expected User, got {other:?}"),
+        }
     }
 }

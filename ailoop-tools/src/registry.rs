@@ -52,12 +52,14 @@ pub trait Tool: Send + Sync + Sized {
     /// Argument struct deserialized from the model's JSON `input`.
     type Args: for<'a> serde::Deserialize<'a> + Send;
     /// Successful return value. Serialized back as the tool result;
-    /// strings round-trip as [`ToolResultContent::Text`], anything
-    /// else is JSON-encoded into the same variant.
+    /// strings round-trip as a single
+    /// [`ToolResultBlock::Text`](ailoop_core::ToolResultBlock::Text)
+    /// inside [`ToolResultContent`], anything else is JSON-encoded
+    /// into the same shape.
     type Output: Serialize + Send;
-    /// Failure type. Surfaced to the model as
-    /// [`ToolResultContent::Error`] (rendered via `Display`); never
-    /// reaches [`EngineError`](https://docs.rs/ailoop).
+    /// Failure type. Surfaced to the model as a [`ToolResultContent`]
+    /// with `is_error: true` (rendered via `Display`); never reaches
+    /// [`EngineError`](https://docs.rs/ailoop).
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// JSON-Schema description of this tool that the model sees in
@@ -93,10 +95,11 @@ pub trait ToolDyn: Send + Sync {
     /// Tool definition the engine forwards to the provider.
     fn tool_definition(&self) -> ToolDefinition;
     /// Dispatch a tool call. Errors that originate inside the tool
-    /// (bad args, exception during execution) come back as
-    /// [`ToolResultContent::Error`] so the model sees them as a tool
-    /// reply — never as `Err`. The `Result`-shaped surface for
-    /// transport-level failures lives on [`ToolRegistry::tool_call`].
+    /// (bad args, exception during execution) come back as a
+    /// [`ToolResultContent`] with `is_error: true` so the model sees
+    /// them as a tool reply — never as `Err`. The `Result`-shaped
+    /// surface for transport-level failures lives on
+    /// [`ToolRegistry::tool_call`].
     async fn call(&self, args: serde_json::Value) -> ToolResultContent;
 }
 
@@ -113,16 +116,16 @@ impl<T: Tool> ToolDyn for T {
     async fn call(&self, args: serde_json::Value) -> ToolResultContent {
         let typed: T::Args = match serde_json::from_value(args) {
             Ok(a) => a,
-            Err(e) => return ToolResultContent::Error(format!("Invalid args: {e}")),
+            Err(e) => return ToolResultContent::error(format!("Invalid args: {e}")),
         };
 
         match T::call(&self, typed).await {
             Ok(out) => match serde_json::to_value(&out) {
-                Ok(serde_json::Value::String(s)) => ToolResultContent::Text(s),
-                Ok(v) => ToolResultContent::Text(v.to_string()),
-                Err(e) => ToolResultContent::Error(format!("Failed to serialize tool output: {e}")),
+                Ok(serde_json::Value::String(s)) => ToolResultContent::text(s),
+                Ok(v) => ToolResultContent::text(v.to_string()),
+                Err(e) => ToolResultContent::error(format!("Failed to serialize tool output: {e}")),
             },
-            Err(e) => ToolResultContent::Error(format!("{e}")),
+            Err(e) => ToolResultContent::error(format!("{e}")),
         }
     }
 }
@@ -346,11 +349,8 @@ mod tests {
             .await
             .expect("Failed in read file");
 
-        match result {
-            ToolResultContent::Text(text) => assert_eq!("content", text),
-            ToolResultContent::Error(_) => panic!("Failed to read"),
-            _ => panic!("unexpected tool result variant"),
-        }
+        assert_eq!(result.as_text(), Some("content"));
+        assert!(!result.is_error);
     }
 
     struct TaggedTool {
@@ -374,7 +374,7 @@ mod tests {
         }
 
         async fn call(&self, _args: serde_json::Value) -> ToolResultContent {
-            ToolResultContent::Text(String::new())
+            ToolResultContent::text("")
         }
     }
 

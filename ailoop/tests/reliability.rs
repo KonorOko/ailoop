@@ -71,7 +71,7 @@ impl ToolDyn for CancelOnSecondCall {
     async fn call(&self, _: Value) -> ToolResultContent {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
-            ToolResultContent::Text("first".into())
+            ToolResultContent::text("first")
         } else {
             self.token.cancel();
             std::future::pending::<()>().await;
@@ -381,7 +381,7 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
             )
         }
         async fn call(&self, _: Value) -> ToolResultContent {
-            ToolResultContent::Text("never".into())
+            ToolResultContent::text("never")
         }
     }
 

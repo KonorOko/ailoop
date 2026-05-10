@@ -164,11 +164,11 @@ pub enum HookAction {
 pub enum ToolDecision {
     /// Default: execute the tool.
     Continue,
-    /// Skip execution. The engine synthesizes a
-    /// [`crate::ToolResultContent::Error`] reply carrying `reason`
-    /// and feeds it back to the model so the loop can continue. Use
-    /// when a single tool call should be denied (rate limit, policy
-    /// violation) but the run as a whole should keep going.
+    /// Skip execution. The engine synthesizes an `is_error: true`
+    /// [`crate::ToolResultContent`] carrying `reason` and feeds it
+    /// back to the model so the loop can continue. Use when a single
+    /// tool call should be denied (rate limit, policy violation) but
+    /// the run as a whole should keep going.
     Skip {
         /// Human-readable reason; surfaces in the synthesized error
         /// `tool_result` the model receives.

@@ -1,5 +1,5 @@
 use ailoop_core::{
-    AssistantBlock, ChatRequest, Message, ToolChoice, ToolDefinition, ToolResultContent, UserBlock,
+    AssistantBlock, ChatRequest, Message, ToolChoice, ToolDefinition, UserBlock,
 };
 use serde_json::{Value, json};
 
@@ -88,17 +88,15 @@ fn append_user_blocks(out: &mut Vec<Value>, blocks: &[UserBlock]) {
                     }));
                     text_buf.clear();
                 }
-                // Chat Completions has no `is_error` flag on tool results;
-                // Error variant ships the error text as the content body.
-                let text = match content {
-                    ToolResultContent::Text(t) => t.as_str(),
-                    ToolResultContent::Error(e) => e.as_str(),
-                    _ => "",
-                };
+                // Chat Completions has no `is_error` flag and no array
+                // form for tool content — collapse every text block in
+                // order. Non-text tool result blocks land via a
+                // follow-up change that introduces a typed error path.
+                let body = content.collect_text();
                 out.push(json!({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": text,
+                    "content": body,
                 }));
             }
             _ => {}
@@ -236,11 +234,12 @@ mod tests {
 
     #[test]
     fn serializes_tool_result_as_role_tool() {
+        use ailoop_core::ToolResultContent;
         let mut req = base_req();
         req.messages = vec![Message::User {
             blocks: vec![UserBlock::tool_result(
                 "call_1",
-                ToolResultContent::Text("70F".into()),
+                ToolResultContent::text("70F"),
             )],
         }];
         let body = build_body("dep", &req);
@@ -252,11 +251,12 @@ mod tests {
 
     #[test]
     fn serializes_tool_result_error_as_role_tool_text() {
+        use ailoop_core::ToolResultContent;
         let mut req = base_req();
         req.messages = vec![Message::User {
             blocks: vec![UserBlock::tool_result(
                 "call_1",
-                ToolResultContent::Error("API down".into()),
+                ToolResultContent::error("API down"),
             )],
         }];
         let body = build_body("dep", &req);
@@ -269,11 +269,12 @@ mod tests {
 
     #[test]
     fn splits_user_blocks_with_mixed_text_and_tool_result() {
+        use ailoop_core::ToolResultContent;
         let mut req = base_req();
         req.messages = vec![Message::User {
             blocks: vec![
                 UserBlock::text("before"),
-                UserBlock::tool_result("c1", ToolResultContent::Text("ok".into())),
+                UserBlock::tool_result("c1", ToolResultContent::text("ok")),
                 UserBlock::text("after"),
             ],
         }];

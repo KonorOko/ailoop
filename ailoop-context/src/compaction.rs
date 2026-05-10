@@ -5,8 +5,7 @@
 use std::sync::Arc;
 
 use ailoop_core::{
-    AssistantBlock, ChatRequest, CompletionModel, Message, StreamChunk, SystemPrompt,
-    ToolResultContent, UserBlock,
+    AssistantBlock, ChatRequest, CompletionModel, Message, StreamChunk, SystemPrompt, UserBlock,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -329,13 +328,30 @@ fn flatten_for_summary(msg: &Message) -> Message {
                     UserBlock::ToolResult {
                         call_id, content, ..
                     } => {
-                        let body = match content {
-                            ToolResultContent::Text(t) => t.clone(),
-                            ToolResultContent::Error(e) => format!("[error] {e}"),
-                            _ => "[unsupported tool result]".to_string(),
+                        // Flatten the block list into a single line. Image
+                        // blocks are summarized as a placeholder — the
+                        // summarizer model only sees text, never base64.
+                        let parts: Vec<String> = content
+                            .blocks
+                            .iter()
+                            .map(|b| match b {
+                                ailoop_core::ToolResultBlock::Text { text } => text.clone(),
+                                ailoop_core::ToolResultBlock::Image { .. } => {
+                                    "[image]".to_string()
+                                }
+                                _ => "[unsupported tool result block]".to_string(),
+                            })
+                            .collect();
+                        let body = parts.join(" ");
+                        let body = if content.is_error {
+                            format!("[error] {body}")
+                        } else {
+                            body
                         };
                         UserBlock::text(format!("[tool_result:{call_id}] {body}"))
                     }
+                    UserBlock::Image { .. } => UserBlock::text("[image]"),
+                    UserBlock::Document { .. } => UserBlock::text("[document]"),
                     // UserBlock is `#[non_exhaustive]`; future variants
                     // get a placeholder so the summarizer call still goes
                     // through. Producers should add an explicit arm here
@@ -381,7 +397,7 @@ mod tests {
         Message::User {
             blocks: vec![UserBlock::tool_result(
                 call_id,
-                ToolResultContent::Text("ok".into()),
+                ToolResultContent::text("ok"),
             )],
         }
     }
@@ -662,7 +678,7 @@ mod tests {
         let result = Message::User {
             blocks: vec![UserBlock::tool_result(
                 "c1",
-                ToolResultContent::Text("done".into()),
+                ToolResultContent::text("done"),
             )],
         };
         match flatten_for_summary(&result) {
