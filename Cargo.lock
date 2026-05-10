@@ -227,7 +227,6 @@ version = "0.1.0"
 dependencies = [
  "ailoop",
  "ailoop-anthropic",
- "futures",
  "tokio",
 ]
 
@@ -1004,7 +1003,6 @@ dependencies = [
  "ailoop",
  "ailoop-anthropic",
  "ailoop-mcp",
- "futures",
  "tokio",
 ]
 
@@ -1869,7 +1867,6 @@ version = "0.1.0"
 dependencies = [
  "ailoop",
  "ailoop-anthropic",
- "futures",
  "serde",
  "serde_json",
  "tokio",

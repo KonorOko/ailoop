@@ -38,36 +38,54 @@ decoupled from any single vendor.
 
 ## Quick start
 
+```toml
+[dependencies]
+ailoop = "0.1"
+ailoop-anthropic = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+```rust
+use ailoop::{Conversation, RetryingModel};
+use ailoop_anthropic::AnthropicClient;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = RetryingModel::new(
+        AnthropicClient::from_env()?.model("claude-sonnet-4-6"),
+    );
+    let mut chat = Conversation::builder(model).build()?;
+
+    let outcome = chat.run("Explain Rust ownership in one short sentence.").await?;
+    println!("{}", outcome.final_text.unwrap_or_default());
+    Ok(())
+}
+```
+
+`Conversation::run` drives the agent loop end-to-end: it sends the request,
+streams the response, runs any tools the model calls, and returns a
+`RunOutcome` carrying the final text, token usage, and the new messages it
+appended to history. For token-level streaming, use `Conversation::stream`
+instead.
+
+## Examples
+
 The repository ships with three runnable examples. All three require an
 `ANTHROPIC_API_KEY` in your environment (a `.env` file at the repo root also
 works).
 
-A minimal streaming chat with no tools:
+| Example                                                | Demonstrates                                              |
+| ------------------------------------------------------ | --------------------------------------------------------- |
+| [`basic-chat`](examples/basic-chat/src/main.rs)        | Minimal one-shot chat with no tools                       |
+| [`tool-use`](examples/tool-use/src/main.rs)            | A typed `#[ailoop_tool]` that the model calls when needed |
+| [`mcp-time`](examples/mcp-time/src/main.rs)            | Tools discovered from a real MCP server (`mcp-server-time`) |
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
 cargo run -p basic-chat
-```
-
-A chat with a single `add(a, b)` tool that the model calls when asked to sum
-two numbers:
-
-```sh
 cargo run -p tool-use
+cargo run -p mcp-time   # also requires `uvx` on PATH (`pip install uv`)
 ```
-
-A chat that discovers its tools from a real MCP server
-([`mcp-server-time`](https://github.com/modelcontextprotocol/servers/tree/main/src/time))
-and lets the model call them by name. Requires `uvx` on `PATH`
-(`pip install uv`):
-
-```sh
-cargo run -p mcp-time
-```
-
-See [`examples/basic-chat`](examples/basic-chat/src/main.rs),
-[`examples/tool-use`](examples/tool-use/src/main.rs), and
-[`examples/mcp-time`](examples/mcp-time/src/main.rs) for the full source.
 
 ## Adding a provider
 

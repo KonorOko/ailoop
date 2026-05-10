@@ -8,5 +8,4 @@ publish = false
 ailoop.workspace = true
 ailoop-anthropic.workspace = true
 
-futures.workspace = true
 tokio.workspace = true
