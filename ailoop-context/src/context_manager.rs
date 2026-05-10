@@ -2,7 +2,7 @@ use ailoop_core::{AssistantBlock, Message, UserBlock};
 
 use crate::{
     compaction::{CompactionStrategy, TruncateStrategy},
-    errors::CompactionError,
+    errors::{CompactionError, FromMessagesError},
     tokens::{CharTokenizer, Tokenizer},
 };
 
@@ -40,6 +40,30 @@ pub struct ContextManager {
 impl ContextManager {
     pub fn builder(max_tokens: usize) -> ContextManagerBuilder {
         ContextManagerBuilder::new(max_tokens)
+    }
+
+    /// Restore a `ContextManager` whose history is `messages` and whose
+    /// pin mask is `pinned`. The two vectors must have the same length;
+    /// otherwise a [`FromMessagesError::LengthMismatch`] is returned.
+    /// All other configuration (budget, strategy, tokenizer, preserved
+    /// tail size) comes from `builder` — pass the same configuration
+    /// the original conversation used so compaction behaves
+    /// consistently across resumes.
+    pub fn from_messages(
+        builder: ContextManagerBuilder,
+        messages: Vec<Message>,
+        pinned: Vec<bool>,
+    ) -> Result<Self, FromMessagesError> {
+        if messages.len() != pinned.len() {
+            return Err(FromMessagesError::LengthMismatch {
+                messages: messages.len(),
+                pinned: pinned.len(),
+            });
+        }
+        let mut cm = builder.build();
+        cm.messages = messages;
+        cm.pinned = pinned;
+        Ok(cm)
     }
 }
 
@@ -454,5 +478,38 @@ mod tests {
         assert!(report.after < report.before);
         // After compaction the tail is still bound by `preserve_n_last`.
         assert_eq!(report.after, 2);
+    }
+
+    #[test]
+    fn from_messages_restores_history_and_pin_mask() {
+        let messages = vec![
+            Message::user("first"),
+            Message::assistant_text("ack"),
+            Message::user("second"),
+        ];
+        let pinned = vec![true, false, true];
+        let mgr = ContextManager::from_messages(ContextManager::builder(10_000), messages, pinned)
+            .expect("equal lengths");
+        assert_eq!(mgr.messages().len(), 3);
+        assert!(mgr.is_pinned(0));
+        assert!(!mgr.is_pinned(1));
+        assert!(mgr.is_pinned(2));
+    }
+
+    #[test]
+    fn from_messages_rejects_length_mismatch() {
+        let result = ContextManager::from_messages(
+            ContextManager::builder(10_000),
+            vec![Message::user("solo")],
+            vec![],
+        );
+        match result {
+            Err(FromMessagesError::LengthMismatch {
+                messages: 1,
+                pinned: 0,
+            }) => {}
+            Ok(_) => panic!("length mismatch must error, not panic"),
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
     }
 }

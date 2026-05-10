@@ -16,3 +16,11 @@ pub enum CompactionError {
     #[error("Summarization failed: {0}")]
     SummarizationFailed(String),
 }
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum FromMessagesError {
+    #[error(
+        "messages and pinned must have the same length (messages: {messages}, pinned: {pinned})"
+    )]
+    LengthMismatch { messages: usize, pinned: usize },
+}
