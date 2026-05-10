@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use ailoop_core::{
-    AssistantBlock, CacheControl, ChatRequest, Message, SystemBlock, SystemPrompt, ToolChoice,
-    ToolDefinition, ToolResultBlock, UserBlock,
+    AssistantBlock, CacheControl, ChatRequest, Message, Source, SystemBlock, SystemPrompt,
+    ToolChoice, ToolDefinition, ToolResultBlock, UserBlock,
 };
 use serde_json::{json, Value};
 
@@ -169,24 +169,71 @@ fn to_anthropic_user_block(block: &UserBlock) -> serde_json::Value {
             insert_cache_control(&mut obj, cache_control.as_ref());
             Value::Object(obj)
         }
+        UserBlock::Image {
+            source,
+            cache_control,
+        } => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), json!("image"));
+            obj.insert("source".into(), to_anthropic_source(source));
+            insert_cache_control(&mut obj, cache_control.as_ref());
+            Value::Object(obj)
+        }
+        UserBlock::Document {
+            source,
+            cache_control,
+        } => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), json!("document"));
+            obj.insert("source".into(), to_anthropic_source(source));
+            insert_cache_control(&mut obj, cache_control.as_ref());
+            Value::Object(obj)
+        }
         // UserBlock is `#[non_exhaustive]`; future variants are dropped
         // until the adapter learns to translate them.
         _ => Value::Null,
     }
 }
 
+/// Encode a [`Source`] into Anthropic's content-block `source` object.
+/// Anthropic uses different wire `type` values per form
+/// (`base64`, `url`, `file`).
+fn to_anthropic_source(source: &Source) -> Value {
+    match source {
+        Source::Base64 { media_type, data } => json!({
+            "type": "base64",
+            "media_type": media_type,
+            "data": data,
+        }),
+        Source::Url { url } => json!({
+            "type": "url",
+            "url": url,
+        }),
+        Source::FileId { id } => json!({
+            "type": "file",
+            "file_id": id,
+        }),
+        // Source is `#[non_exhaustive]`; future variants are dropped
+        // until the adapter learns to translate them.
+        _ => Value::Null,
+    }
+}
+
 /// Encode one [`ToolResultBlock`] into the matching entry inside
-/// `tool_result.content[]`. Anthropic accepts text and image blocks
-/// here; this adapter only emits text in the minimal migration —
-/// image-bearing tool replies land via a follow-up change.
+/// `tool_result.content[]`. Anthropic accepts the same `text` /
+/// `image` shapes here as in a top-level user message.
 fn to_anthropic_tool_result_block(block: &ToolResultBlock) -> Value {
     match block {
         ToolResultBlock::Text { text } => json!({
             "type": "text",
             "text": text,
         }),
-        // ToolResultBlock is `#[non_exhaustive]`; future variants drop
-        // until the adapter learns to translate them.
+        ToolResultBlock::Image { source } => json!({
+            "type": "image",
+            "source": to_anthropic_source(source),
+        }),
+        // ToolResultBlock is `#[non_exhaustive]`; future variants are
+        // dropped until the adapter learns to translate them.
         _ => Value::Null,
     }
 }
@@ -505,6 +552,123 @@ mod tests {
             json["content"],
             json!([{ "type": "text", "text": "API down" }]),
         );
+    }
+
+    #[test]
+    fn tool_result_with_image_wires_mixed_blocks() {
+        use ailoop_core::{Source, ToolResultBlock, ToolResultContent};
+        let content = ToolResultContent::from_blocks(vec![
+            ToolResultBlock::text("see chart"),
+            ToolResultBlock::image(Source::Base64 {
+                media_type: "image/png".into(),
+                data: "AAAA".into(),
+            }),
+        ]);
+        let block = UserBlock::tool_result("call_1", content);
+        let json = to_anthropic_user_block(&block);
+        assert_eq!(
+            json["content"],
+            json!([
+                { "type": "text", "text": "see chart" },
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "AAAA",
+                    },
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn user_image_block_maps_to_image_with_base64_source() {
+        use ailoop_core::Source;
+        let block = UserBlock::image(Source::Base64 {
+            media_type: "image/png".into(),
+            data: "iVBOR".into(),
+        });
+        let json = to_anthropic_user_block(&block);
+        assert_eq!(
+            json,
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "iVBOR",
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn user_image_block_maps_to_image_with_url_source() {
+        use ailoop_core::Source;
+        let block = UserBlock::image(Source::Url {
+            url: "https://example.com/img.png".into(),
+        });
+        let json = to_anthropic_user_block(&block);
+        assert_eq!(
+            json,
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "url",
+                    "url": "https://example.com/img.png",
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn user_image_block_maps_to_image_with_file_id_source() {
+        use ailoop_core::Source;
+        let block = UserBlock::image(Source::FileId {
+            id: "file_abc".into(),
+        });
+        let json = to_anthropic_user_block(&block);
+        assert_eq!(
+            json,
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "file",
+                    "file_id": "file_abc",
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn user_document_block_maps_to_document_with_base64_source() {
+        use ailoop_core::Source;
+        let block = UserBlock::document(Source::Base64 {
+            media_type: "application/pdf".into(),
+            data: "JVBERi0".into(),
+        });
+        let json = to_anthropic_user_block(&block);
+        assert_eq!(json["type"], json!("document"));
+        assert_eq!(
+            json["source"],
+            json!({
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": "JVBERi0",
+            })
+        );
+    }
+
+    #[test]
+    fn image_block_carries_cache_control() {
+        use ailoop_core::Source;
+        let block = UserBlock::image(Source::Url {
+            url: "https://example.com/img.png".into(),
+        })
+        .with_cache_control(Some(CacheControl::Ephemeral));
+        let json = to_anthropic_user_block(&block);
+        assert_eq!(json["cache_control"], json!({ "type": "ephemeral" }));
     }
 
     #[test]
