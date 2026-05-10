@@ -212,13 +212,7 @@ mod tests {
                 "required": []
             });
 
-            ToolDefinition {
-                name: Self::NAME.into(),
-                description: "read file from path".into(),
-                input_schema: parameters,
-                tags: vec![],
-                cache_control: None,
-            }
+            ToolDefinition::new(Self::NAME, "read file from path", parameters, vec![])
         }
     }
 
@@ -271,13 +265,12 @@ mod tests {
         }
 
         fn tool_definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: self.name.into(),
-                description: "tagged".into(),
-                input_schema: serde_json::json!({"type":"object","properties":{},"required":[]}),
-                tags: self.tags.clone(),
-                cache_control: None,
-            }
+            ToolDefinition::new(
+                self.name,
+                "tagged",
+                serde_json::json!({"type":"object","properties":{},"required":[]}),
+                self.tags.clone(),
+            )
         }
 
         async fn call(&self, _args: serde_json::Value) -> ToolResultContent {

@@ -29,10 +29,11 @@ async fn run_returns_final_text_for_text_only_turn() {
         },
         StreamChunk::TurnFinished {
             reason: FinishReason::EndTurn,
-            usage: Usage {
-                input_tokens: 5,
-                output_tokens: 7,
-                ..Default::default()
+            usage: {
+                let mut u = Usage::default();
+                u.input_tokens = 5;
+                u.output_tokens = 7;
+                u
             },
             service_tier: None,
         },
@@ -104,13 +105,12 @@ async fn run_final_text_reflects_last_assistant_turn_only() {
             "get_weather".into()
         }
         fn tool_definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: "get_weather".into(),
-                description: "stub".into(),
-                input_schema: json!({"type":"object","properties":{},"required":[]}),
-                tags: vec![ToolTag::ReadOnly],
-                cache_control: None,
-            }
+            ToolDefinition::new(
+                "get_weather",
+                "stub",
+                json!({"type":"object","properties":{},"required":[]}),
+                vec![ToolTag::ReadOnly],
+            )
         }
         async fn call(&self, _: Value) -> ToolResultContent {
             ToolResultContent::Text("sunny".into())

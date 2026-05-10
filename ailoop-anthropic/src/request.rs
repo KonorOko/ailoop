@@ -4,7 +4,7 @@ use ailoop_core::{
     AssistantBlock, CacheControl, ChatRequest, Message, SystemBlock, SystemPrompt, ToolChoice,
     ToolDefinition, ToolResultContent, UserBlock,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
     let mut body = serde_json::Map::new();
@@ -98,12 +98,10 @@ fn to_anthropic_system(prompt: &SystemPrompt) -> Value {
         // existing fixtures and zero-cache-control callers see no diff.
         SystemPrompt::Plain(s) => json!(s),
         SystemPrompt::Blocks(blocks) => {
-            json!(
-                blocks
-                    .iter()
-                    .map(to_anthropic_system_block)
-                    .collect::<Vec<_>>()
-            )
+            json!(blocks
+                .iter()
+                .map(to_anthropic_system_block)
+                .collect::<Vec<_>>())
         }
         // SystemPrompt is `#[non_exhaustive]`; future variants degrade
         // to an empty system on the wire rather than failing the build.
@@ -270,19 +268,7 @@ mod tests {
     use ailoop_core::ChatRequest;
 
     fn base_req() -> ChatRequest {
-        ChatRequest {
-            messages: vec![],
-            system_prompt: None,
-            tools: None,
-            temperature: None,
-            top_p: None,
-            top_k: None,
-            stop_sequences: vec![],
-            max_tokens: 1024,
-            additional_params: None,
-            tool_choice: None,
-            disable_parallel_tool_use: None,
-        }
+        ChatRequest::new(vec![], 1024)
     }
 
     #[test]
@@ -293,32 +279,26 @@ mod tests {
 
     #[test]
     fn maps_tool_choice_auto() {
-        let req = ChatRequest {
-            tool_choice: Some(ToolChoice::Auto),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.tool_choice = Some(ToolChoice::Auto);
         let body = build_body("claude", &req);
         assert_eq!(body["tool_choice"], json!({ "type": "auto" }));
     }
 
     #[test]
     fn maps_tool_choice_any() {
-        let req = ChatRequest {
-            tool_choice: Some(ToolChoice::Any),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.tool_choice = Some(ToolChoice::Any);
         let body = build_body("claude", &req);
         assert_eq!(body["tool_choice"], json!({ "type": "any" }));
     }
 
     #[test]
     fn maps_tool_choice_specific_tool() {
-        let req = ChatRequest {
-            tool_choice: Some(ToolChoice::Tool {
-                name: "get_weather".into(),
-            }),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.tool_choice = Some(ToolChoice::Tool {
+            name: "get_weather".into(),
+        });
         let body = build_body("claude", &req);
         assert_eq!(
             body["tool_choice"],
@@ -328,10 +308,8 @@ mod tests {
 
     #[test]
     fn maps_tool_choice_none() {
-        let req = ChatRequest {
-            tool_choice: Some(ToolChoice::None_),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.tool_choice = Some(ToolChoice::None_);
         let body = build_body("claude", &req);
         assert_eq!(body["tool_choice"], json!({ "type": "none" }));
     }
@@ -341,10 +319,8 @@ mod tests {
     /// emit a tool_choice object — defaulting to `auto`.
     #[test]
     fn disable_parallel_alone_emits_auto_tool_choice_with_flag() {
-        let req = ChatRequest {
-            disable_parallel_tool_use: Some(true),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.disable_parallel_tool_use = Some(true);
         let body = build_body("claude", &req);
         assert_eq!(
             body["tool_choice"],
@@ -354,11 +330,9 @@ mod tests {
 
     #[test]
     fn disable_parallel_combines_with_explicit_tool_choice() {
-        let req = ChatRequest {
-            tool_choice: Some(ToolChoice::Any),
-            disable_parallel_tool_use: Some(true),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.tool_choice = Some(ToolChoice::Any);
+        req.disable_parallel_tool_use = Some(true);
         let body = build_body("claude", &req);
         assert_eq!(
             body["tool_choice"],
@@ -413,10 +387,8 @@ mod tests {
     /// in to cache breakpoints.
     #[test]
     fn plain_system_prompt_wires_as_string() {
-        let req = ChatRequest {
-            system_prompt: Some(SystemPrompt::from("be helpful")),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.system_prompt = Some(SystemPrompt::from("be helpful"));
         let body = build_body("claude", &req);
         assert_eq!(body["system"], json!("be helpful"));
     }
@@ -425,13 +397,11 @@ mod tests {
     /// with `cache_control` only on blocks that asked for one.
     #[test]
     fn block_system_prompt_emits_cache_control_per_block() {
-        let req = ChatRequest {
-            system_prompt: Some(SystemPrompt::Blocks(vec![
-                SystemBlock::new("static prelude").with_cache_control(CacheControl::Ephemeral),
-                SystemBlock::new("dynamic suffix"),
-            ])),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.system_prompt = Some(SystemPrompt::Blocks(vec![
+            SystemBlock::new("static prelude").with_cache_control(CacheControl::Ephemeral),
+            SystemBlock::new("dynamic suffix"),
+        ]));
         let body = build_body("claude", &req);
         assert_eq!(
             body["system"],
@@ -507,18 +477,14 @@ mod tests {
     /// identical (or stable-prefix) schema.
     #[test]
     fn tool_definition_emits_cache_control_when_set() {
-        let req = ChatRequest {
-            tools: Some(vec![
-                ToolDefinition::new(
-                    "get_weather",
-                    "Look up the weather",
-                    json!({ "type": "object", "properties": {} }),
-                    vec![],
-                )
-                .with_cache_control(CacheControl::Ephemeral),
-            ]),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.tools = Some(vec![ToolDefinition::new(
+            "get_weather",
+            "Look up the weather",
+            json!({ "type": "object", "properties": {} }),
+            vec![],
+        )
+        .with_cache_control(CacheControl::Ephemeral)]);
         let body = build_body("claude", &req);
         let tool = &body["tools"][0];
         assert_eq!(tool["cache_control"], json!({ "type": "ephemeral" }));
@@ -526,15 +492,13 @@ mod tests {
 
     #[test]
     fn tool_definition_omits_cache_control_when_unset() {
-        let req = ChatRequest {
-            tools: Some(vec![ToolDefinition::new(
-                "get_weather",
-                "Look up the weather",
-                json!({ "type": "object", "properties": {} }),
-                vec![],
-            )]),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.tools = Some(vec![ToolDefinition::new(
+            "get_weather",
+            "Look up the weather",
+            json!({ "type": "object", "properties": {} }),
+            vec![],
+        )]);
         let body = build_body("claude", &req);
         let tool = &body["tools"][0];
         assert!(tool.get("cache_control").is_none());

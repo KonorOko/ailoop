@@ -189,27 +189,13 @@ mod tests {
     use ailoop_core::{ChatRequest, ToolTag};
 
     fn base_req() -> ChatRequest {
-        ChatRequest {
-            messages: Vec::new(),
-            system_prompt: None,
-            tools: None,
-            temperature: None,
-            top_p: None,
-            top_k: None,
-            stop_sequences: Vec::new(),
-            max_tokens: 1024,
-            additional_params: None,
-            tool_choice: None,
-            disable_parallel_tool_use: None,
-        }
+        ChatRequest::new(Vec::new(), 1024)
     }
 
     #[test]
     fn serializes_simple_text_turn() {
-        let req = ChatRequest {
-            messages: vec![Message::user("hi"), Message::assistant_text("hello")],
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.messages = vec![Message::user("hi"), Message::assistant_text("hello")];
         let body = build_body("gpt-4o-mini-deployment", &req);
         assert_eq!(body["model"], json!("gpt-4o-mini-deployment"));
         assert_eq!(body["stream"], json!(true));
@@ -224,16 +210,14 @@ mod tests {
 
     #[test]
     fn serializes_assistant_tool_call_with_stringified_arguments() {
-        let req = ChatRequest {
-            messages: vec![Message::Assistant {
-                blocks: vec![AssistantBlock::tool_call(
-                    "call_1",
-                    "get_weather",
-                    json!({ "location": "SF", "units": "C" }),
-                )],
-            }],
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.messages = vec![Message::Assistant {
+            blocks: vec![AssistantBlock::tool_call(
+                "call_1",
+                "get_weather",
+                json!({ "location": "SF", "units": "C" }),
+            )],
+        }];
         let body = build_body("dep", &req);
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("assistant"));
@@ -250,15 +234,13 @@ mod tests {
 
     #[test]
     fn serializes_tool_result_as_role_tool() {
-        let req = ChatRequest {
-            messages: vec![Message::User {
-                blocks: vec![UserBlock::tool_result(
-                    "call_1",
-                    ToolResultContent::Text("70F".into()),
-                )],
-            }],
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.messages = vec![Message::User {
+            blocks: vec![UserBlock::tool_result(
+                "call_1",
+                ToolResultContent::Text("70F".into()),
+            )],
+        }];
         let body = build_body("dep", &req);
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("tool"));
@@ -268,15 +250,13 @@ mod tests {
 
     #[test]
     fn serializes_tool_result_error_as_role_tool_text() {
-        let req = ChatRequest {
-            messages: vec![Message::User {
-                blocks: vec![UserBlock::tool_result(
-                    "call_1",
-                    ToolResultContent::Error("API down".into()),
-                )],
-            }],
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.messages = vec![Message::User {
+            blocks: vec![UserBlock::tool_result(
+                "call_1",
+                ToolResultContent::Error("API down".into()),
+            )],
+        }];
         let body = build_body("dep", &req);
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("tool"));
@@ -287,16 +267,14 @@ mod tests {
 
     #[test]
     fn splits_user_blocks_with_mixed_text_and_tool_result() {
-        let req = ChatRequest {
-            messages: vec![Message::User {
-                blocks: vec![
-                    UserBlock::text("before"),
-                    UserBlock::tool_result("c1", ToolResultContent::Text("ok".into())),
-                    UserBlock::text("after"),
-                ],
-            }],
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.messages = vec![Message::User {
+            blocks: vec![
+                UserBlock::text("before"),
+                UserBlock::tool_result("c1", ToolResultContent::Text("ok".into())),
+                UserBlock::text("after"),
+            ],
+        }];
         let body = build_body("dep", &req);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
@@ -310,15 +288,13 @@ mod tests {
 
     #[test]
     fn serializes_tools_array_without_tags() {
-        let req = ChatRequest {
-            tools: Some(vec![ToolDefinition::new(
-                "get_weather",
-                "Look up the weather",
-                json!({ "type": "object", "properties": {} }),
-                vec![ToolTag::ReadOnly, ToolTag::Network],
-            )]),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.tools = Some(vec![ToolDefinition::new(
+            "get_weather",
+            "Look up the weather",
+            json!({ "type": "object", "properties": {} }),
+            vec![ToolTag::ReadOnly, ToolTag::Network],
+        )]);
         let body = build_body("dep", &req);
         let tool = &body["tools"][0];
         assert_eq!(tool["type"], json!("function"));
@@ -338,24 +314,20 @@ mod tests {
 
     #[test]
     fn omits_top_k_silently() {
-        let req = ChatRequest {
-            top_k: Some(50),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.top_k = Some(50);
         let body = build_body("dep", &req);
         assert!(body.get("top_k").is_none());
     }
 
     #[test]
     fn merges_additional_params_last() {
-        let req = ChatRequest {
-            temperature: Some(0.2),
-            additional_params: Some(json!({
-                "temperature": 0.9,
-                "logit_bias": { "100": -100 }
-            })),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.temperature = Some(0.2);
+        req.additional_params = Some(json!({
+            "temperature": 0.9,
+            "logit_bias": { "100": -100 }
+        }));
         let body = build_body("dep", &req);
         // additional_params overrides the canonical temperature.
         assert_eq!(body["temperature"], json!(0.9));
@@ -364,11 +336,9 @@ mod tests {
 
     #[test]
     fn system_prompt_becomes_first_message() {
-        let req = ChatRequest {
-            system_prompt: Some("be helpful".into()),
-            messages: vec![Message::user("hi")],
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.system_prompt = Some("be helpful".into());
+        req.messages = vec![Message::user("hi")];
         let body = build_body("dep", &req);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], json!("system"));
@@ -378,10 +348,8 @@ mod tests {
 
     #[test]
     fn omits_optional_sampling_when_none() {
-        let req = ChatRequest {
-            messages: vec![Message::user("hi")],
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.messages = vec![Message::user("hi")];
         let body = build_body("dep", &req);
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
@@ -397,10 +365,8 @@ mod tests {
 
     #[test]
     fn maps_tool_choice_auto_as_string() {
-        let req = ChatRequest {
-            tool_choice: Some(ToolChoice::Auto),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.tool_choice = Some(ToolChoice::Auto);
         let body = build_body("dep", &req);
         assert_eq!(body["tool_choice"], json!("auto"));
     }
@@ -410,22 +376,18 @@ mod tests {
     /// translation.
     #[test]
     fn maps_tool_choice_any_as_required() {
-        let req = ChatRequest {
-            tool_choice: Some(ToolChoice::Any),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.tool_choice = Some(ToolChoice::Any);
         let body = build_body("dep", &req);
         assert_eq!(body["tool_choice"], json!("required"));
     }
 
     #[test]
     fn maps_tool_choice_specific_tool_as_function_object() {
-        let req = ChatRequest {
-            tool_choice: Some(ToolChoice::Tool {
-                name: "get_weather".into(),
-            }),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.tool_choice = Some(ToolChoice::Tool {
+            name: "get_weather".into(),
+        });
         let body = build_body("dep", &req);
         assert_eq!(
             body["tool_choice"],
@@ -438,10 +400,8 @@ mod tests {
 
     #[test]
     fn maps_tool_choice_none_as_string() {
-        let req = ChatRequest {
-            tool_choice: Some(ToolChoice::None_),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.tool_choice = Some(ToolChoice::None_);
         let body = build_body("dep", &req);
         assert_eq!(body["tool_choice"], json!("none"));
     }
@@ -452,10 +412,8 @@ mod tests {
     /// `parallel_tool_calls = false`, independent of `tool_choice`.
     #[test]
     fn disable_parallel_emits_parallel_tool_calls_false() {
-        let req = ChatRequest {
-            disable_parallel_tool_use: Some(true),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.disable_parallel_tool_use = Some(true);
         let body = build_body("dep", &req);
         assert_eq!(body["parallel_tool_calls"], json!(false));
         assert!(body.get("tool_choice").is_none());
@@ -463,28 +421,24 @@ mod tests {
 
     #[test]
     fn disable_parallel_false_emits_parallel_tool_calls_true() {
-        let req = ChatRequest {
-            disable_parallel_tool_use: Some(false),
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.disable_parallel_tool_use = Some(false);
         let body = build_body("dep", &req);
         assert_eq!(body["parallel_tool_calls"], json!(true));
     }
 
     #[test]
     fn ignores_assistant_reasoning_block_silently() {
-        let req = ChatRequest {
-            messages: vec![Message::Assistant {
-                blocks: vec![
-                    AssistantBlock::Reasoning {
-                        text: "thinking...".into(),
-                        signature: Some("sig".into()),
-                    },
-                    AssistantBlock::text("answer"),
-                ],
-            }],
-            ..base_req()
-        };
+        let mut req = base_req();
+        req.messages = vec![Message::Assistant {
+            blocks: vec![
+                AssistantBlock::Reasoning {
+                    text: "thinking...".into(),
+                    signature: Some("sig".into()),
+                },
+                AssistantBlock::text("answer"),
+            ],
+        }];
         let body = build_body("dep", &req);
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("assistant"));

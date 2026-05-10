@@ -40,13 +40,12 @@ impl ToolDyn for EchoArgs {
         "echo".into()
     }
     fn tool_definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "echo".into(),
-            description: "stub".into(),
-            input_schema: json!({"type":"object","properties":{},"required":[]}),
-            tags: vec![],
-            cache_control: None,
-        }
+        ToolDefinition::new(
+            "echo",
+            "stub",
+            json!({"type":"object","properties":{},"required":[]}),
+            vec![],
+        )
     }
     async fn call(&self, args: Value) -> ToolResultContent {
         ToolResultContent::Text(args.to_string())
@@ -63,13 +62,12 @@ impl ToolDyn for LeakySecret {
         "leaky".into()
     }
     fn tool_definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "leaky".into(),
-            description: "stub".into(),
-            input_schema: json!({"type":"object","properties":{},"required":[]}),
-            tags: vec![],
-            cache_control: None,
-        }
+        ToolDefinition::new(
+            "leaky",
+            "stub",
+            json!({"type":"object","properties":{},"required":[]}),
+            vec![],
+        )
     }
     async fn call(&self, _: Value) -> ToolResultContent {
         ToolResultContent::Text("alice token: secret-123".into())
@@ -140,10 +138,8 @@ async fn on_tool_args_rewrites_args_before_tool_invocation() {
             obj.insert("secret".into(), Value::String("<REDACTED>".into()));
         }
     });
-    let config = RunConfig {
-        middlewares: vec![Arc::new(sanitize) as Arc<dyn ChatMiddleware>],
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.middlewares = vec![Arc::new(sanitize) as Arc<dyn ChatMiddleware>];
 
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await
@@ -469,13 +465,12 @@ async fn tool_args_callback_can_filter_by_name() {
             "other_tool".into()
         }
         fn tool_definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: "other_tool".into(),
-                description: "stub".into(),
-                input_schema: json!({"type":"object","properties":{},"required":[]}),
-                tags: vec![],
-                cache_control: None,
-            }
+            ToolDefinition::new(
+                "other_tool",
+                "stub",
+                json!({"type":"object","properties":{},"required":[]}),
+                vec![],
+            )
         }
         async fn call(&self, args: Value) -> ToolResultContent {
             ToolResultContent::Text(args.to_string())
@@ -491,13 +486,12 @@ async fn tool_args_callback_can_filter_by_name() {
             "fetch".into()
         }
         fn tool_definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: "fetch".into(),
-                description: "stub".into(),
-                input_schema: json!({"type":"object","properties":{},"required":[]}),
-                tags: vec![],
-                cache_control: None,
-            }
+            ToolDefinition::new(
+                "fetch",
+                "stub",
+                json!({"type":"object","properties":{},"required":[]}),
+                vec![],
+            )
         }
         async fn call(&self, args: Value) -> ToolResultContent {
             ToolResultContent::Text(args.to_string())
@@ -548,10 +542,8 @@ async fn tool_args_callback_can_filter_by_name() {
             obj.insert("scoped".into(), Value::Bool(true));
         }
     });
-    let config = RunConfig {
-        middlewares: vec![Arc::new(sanitize) as Arc<dyn ChatMiddleware>],
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.middlewares = vec![Arc::new(sanitize) as Arc<dyn ChatMiddleware>];
 
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await

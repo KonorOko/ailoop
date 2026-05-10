@@ -560,11 +560,9 @@ mod tests {
         }]]);
         let registry = ToolRegistry::new();
         let run_id = RunId::new();
-        let config = RunConfig {
-            middlewares: vec![Arc::clone(&tracer)],
-            run_id: Some(run_id.clone()),
-            ..RunConfig::default()
-        };
+        let mut config = RunConfig::default();
+        config.middlewares = vec![Arc::clone(&tracer)];
+        config.run_id = Some(run_id.clone());
 
         let stream = crate::run_chat(&model, vec![Message::user("hi")], &registry, config)
             .await

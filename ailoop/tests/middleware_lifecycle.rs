@@ -121,13 +121,12 @@ impl ToolDyn for GetWeather {
         "get_weather".into()
     }
     fn tool_definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "get_weather".into(),
-            description: "stub".into(),
-            input_schema: json!({"type":"object","properties":{},"required":[]}),
-            tags: vec![],
-            cache_control: None,
-        }
+        ToolDefinition::new(
+            "get_weather",
+            "stub",
+            json!({"type":"object","properties":{},"required":[]}),
+            vec![],
+        )
     }
     async fn call(&self, _: Value) -> ToolResultContent {
         ToolResultContent::Text("sunny".into())
@@ -177,10 +176,8 @@ async fn engine_invokes_middleware_hooks_in_order() {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(GetWeather)).unwrap();
 
-    let config = RunConfig {
-        middlewares: vec![mw],
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.middlewares = vec![mw];
 
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await
@@ -228,10 +225,8 @@ async fn mid_stream_error_fires_on_run_error_not_on_run_finished() {
     let mw: Arc<dyn ChatMiddleware> = Arc::new(recorder.clone());
     let registry = ToolRegistry::new();
 
-    let config = RunConfig {
-        middlewares: vec![mw],
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.middlewares = vec![mw];
 
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await

@@ -189,19 +189,7 @@ mod tests {
     use crate::testing::{ScriptedError, ScriptedModel, ScriptedTurn};
 
     fn empty_request() -> ChatRequest {
-        ChatRequest {
-            messages: vec![],
-            tools: None,
-            system_prompt: None,
-            max_tokens: 0,
-            additional_params: None,
-            temperature: None,
-            top_p: None,
-            top_k: None,
-            stop_sequences: vec![],
-            tool_choice: None,
-            disable_parallel_tool_use: None,
-        }
+        ChatRequest::new(vec![], 0)
     }
 
     fn fast_config(max_attempts: u32) -> RetryConfig {

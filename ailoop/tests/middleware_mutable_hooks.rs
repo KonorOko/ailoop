@@ -76,10 +76,8 @@ async fn on_chunk_mut_mutation_visible_to_subsequent_on_chunk() {
     let mutator: Arc<dyn ChatMiddleware> = Arc::new(UppercaseDeltas);
 
     let registry = ToolRegistry::new();
-    let config = RunConfig {
-        middlewares: vec![mutator, observer.clone() as Arc<dyn ChatMiddleware>],
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.middlewares = vec![mutator, observer.clone() as Arc<dyn ChatMiddleware>];
 
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await
@@ -135,14 +133,12 @@ async fn all_chunk_muts_run_before_any_observer() {
 
     let observer = Arc::new(DeltaObserver::default());
     let registry = ToolRegistry::new();
-    let config = RunConfig {
-        middlewares: vec![
-            Arc::new(Prefix("a")) as Arc<dyn ChatMiddleware>,
-            observer.clone() as Arc<dyn ChatMiddleware>,
-            Arc::new(Prefix("b")) as Arc<dyn ChatMiddleware>,
-        ],
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.middlewares = vec![
+        Arc::new(Prefix("a")) as Arc<dyn ChatMiddleware>,
+        observer.clone() as Arc<dyn ChatMiddleware>,
+        Arc::new(Prefix("b")) as Arc<dyn ChatMiddleware>,
+    ];
 
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await
@@ -162,13 +158,12 @@ impl ToolDyn for EchoArgs {
         "echo".into()
     }
     fn tool_definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "echo".into(),
-            description: "stub".into(),
-            input_schema: json!({"type":"object","properties":{},"required":[]}),
-            tags: vec![],
-            cache_control: None,
-        }
+        ToolDefinition::new(
+            "echo",
+            "stub",
+            json!({"type":"object","properties":{},"required":[]}),
+            vec![],
+        )
     }
     async fn call(&self, args: Value) -> ToolResultContent {
         // Echo what the tool actually received so tests can assert
@@ -242,13 +237,11 @@ async fn on_before_tool_call_mut_mutation_visible_to_tool_and_observer() {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(EchoArgs)).unwrap();
 
-    let config = RunConfig {
-        middlewares: vec![
-            Arc::new(RedactArgs) as Arc<dyn ChatMiddleware>,
-            observer.clone() as Arc<dyn ChatMiddleware>,
-        ],
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.middlewares = vec![
+        Arc::new(RedactArgs) as Arc<dyn ChatMiddleware>,
+        observer.clone() as Arc<dyn ChatMiddleware>,
+    ];
 
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await
@@ -356,13 +349,11 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(EchoArgs)).unwrap();
 
-    let config = RunConfig {
-        middlewares: vec![
-            Arc::new(RewriteResult) as Arc<dyn ChatMiddleware>,
-            observer.clone() as Arc<dyn ChatMiddleware>,
-        ],
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.middlewares = vec![
+        Arc::new(RewriteResult) as Arc<dyn ChatMiddleware>,
+        observer.clone() as Arc<dyn ChatMiddleware>,
+    ];
 
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await

@@ -167,19 +167,7 @@ mod tests {
         ]]);
 
         let stream = model
-            .chat_stream(ChatRequest {
-                messages: vec![],
-                tools: None,
-                system_prompt: None,
-                max_tokens: 0,
-                additional_params: None,
-                temperature: None,
-                top_p: None,
-                top_k: None,
-                stop_sequences: vec![],
-                tool_choice: None,
-                disable_parallel_tool_use: None,
-            })
+            .chat_stream(ChatRequest::new(vec![], 0))
             .await
             .unwrap();
         let chunks: Vec<_> = stream.collect().await;
@@ -196,19 +184,7 @@ mod tests {
         ])]);
 
         let stream = model
-            .chat_stream(ChatRequest {
-                messages: vec![],
-                tools: None,
-                system_prompt: None,
-                max_tokens: 0,
-                additional_params: None,
-                temperature: None,
-                top_p: None,
-                top_k: None,
-                stop_sequences: vec![],
-                tool_choice: None,
-                disable_parallel_tool_use: None,
-            })
+            .chat_stream(ChatRequest::new(vec![], 0))
             .await
             .expect("chat_stream should open the stream");
 
@@ -226,19 +202,7 @@ mod tests {
         let model = ScriptedModel::with_turns([Err(ScriptedError("rate limited".into()))]);
 
         let result = model
-            .chat_stream(ChatRequest {
-                messages: vec![],
-                tools: None,
-                system_prompt: None,
-                max_tokens: 0,
-                additional_params: None,
-                temperature: None,
-                top_p: None,
-                top_k: None,
-                stop_sequences: vec![],
-                tool_choice: None,
-                disable_parallel_tool_use: None,
-            })
+            .chat_stream(ChatRequest::new(vec![], 0))
             .await;
         match result {
             Err(ScriptedError(msg)) => assert_eq!(msg, "rate limited"),

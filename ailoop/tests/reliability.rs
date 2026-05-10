@@ -61,13 +61,12 @@ impl ToolDyn for CancelOnSecondCall {
         "cancel_on_second".into()
     }
     fn tool_definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "cancel_on_second".into(),
-            description: "test tool".into(),
-            input_schema: json!({"type":"object","properties":{},"required":[]}),
-            tags: vec![],
-            cache_control: None,
-        }
+        ToolDefinition::new(
+            "cancel_on_second",
+            "test tool",
+            json!({"type":"object","properties":{},"required":[]}),
+            vec![],
+        )
     }
     async fn call(&self, _: Value) -> ToolResultContent {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
@@ -118,10 +117,8 @@ fn run_finished<E>(chunks: &[Result<StreamChunk, E>]) -> &StreamChunk {
 #[tokio::test]
 async fn timeout_aborts_run_during_chat_stream() {
     let registry = ToolRegistry::new();
-    let config = RunConfig {
-        timeout: Some(Duration::from_millis(30)),
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.timeout = Some(Duration::from_millis(30));
 
     let stream = run_chat(&BlockingModel, vec![Message::user("hi")], &registry, config)
         .await
@@ -150,10 +147,8 @@ async fn cancellation_aborts_run_externally() {
     });
 
     let registry = ToolRegistry::new();
-    let config = RunConfig {
-        cancellation: Some(token),
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.cancellation = Some(token);
 
     let stream = run_chat(&BlockingModel, vec![Message::user("hi")], &registry, config)
         .await
@@ -209,11 +204,9 @@ async fn cancellation_wins_over_timeout_when_both_configured() {
     token.cancel();
 
     let registry = ToolRegistry::new();
-    let config = RunConfig {
-        timeout: Some(Duration::from_millis(0)),
-        cancellation: Some(token),
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.timeout = Some(Duration::from_millis(0));
+    config.cancellation = Some(token);
 
     let stream = run_chat(&BlockingModel, vec![Message::user("hi")], &registry, config)
         .await
@@ -275,10 +268,8 @@ async fn abort_during_tool_loop_preserves_prior_tool_results() {
     let mut registry = ToolRegistry::new();
     registry.register(tool).unwrap();
 
-    let config = RunConfig {
-        cancellation: Some(token),
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.cancellation = Some(token);
 
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await
@@ -330,11 +321,9 @@ async fn abort_during_tool_loop_preserves_prior_tool_results() {
 async fn on_run_finished_fires_when_run_aborts_via_timeout() {
     let recorder = Arc::new(RunFinishedRecorder::default());
     let registry = ToolRegistry::new();
-    let config = RunConfig {
-        timeout: Some(Duration::from_millis(20)),
-        middlewares: vec![recorder.clone()],
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.timeout = Some(Duration::from_millis(20));
+    config.middlewares = vec![recorder.clone()];
 
     let stream = run_chat(&BlockingModel, vec![Message::user("hi")], &registry, config)
         .await
@@ -384,13 +373,12 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
             "noop".into()
         }
         fn tool_definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: "noop".into(),
-                description: "stub".into(),
-                input_schema: json!({"type":"object","properties":{},"required":[]}),
-                tags: vec![],
-                cache_control: None,
-            }
+            ToolDefinition::new(
+                "noop",
+                "stub",
+                json!({"type":"object","properties":{},"required":[]}),
+                vec![],
+            )
         }
         async fn call(&self, _: Value) -> ToolResultContent {
             ToolResultContent::Text("never".into())
@@ -419,11 +407,9 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
     registry.register(Arc::new(UnusedTool)).unwrap();
 
     let mw: Arc<dyn ChatMiddleware> = Arc::new(SlowApproval);
-    let config = RunConfig {
-        timeout: Some(Duration::from_millis(30)),
-        middlewares: vec![mw],
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.timeout = Some(Duration::from_millis(30));
+    config.middlewares = vec![mw];
 
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await
@@ -467,10 +453,8 @@ async fn hook_action_terminate_still_fires_on_run_finished() {
     let recorder = Arc::new(RunFinishedRecorder::default());
     let registry = ToolRegistry::new();
     let mws: Vec<Arc<dyn ChatMiddleware>> = vec![Arc::new(AbortingMw), recorder.clone()];
-    let config = RunConfig {
-        middlewares: mws,
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.middlewares = mws;
 
     let model = ScriptedModel::new(Vec::<Vec<StreamChunk>>::new());
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)

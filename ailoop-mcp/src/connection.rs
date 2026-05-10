@@ -77,13 +77,12 @@ impl McpConnection {
             .map(|t| {
                 let name_at_server = t.name.to_string();
                 let name_for_engine = naming::compose(&self.server_label, &name_at_server);
-                let definition = ToolDefinition {
-                    name: name_for_engine.clone(),
-                    description: t.description.map(|d| d.to_string()).unwrap_or_default(),
-                    input_schema: serde_json::Value::Object((*t.input_schema).clone()),
-                    tags: default_tags.clone(),
-                    cache_control: None,
-                };
+                let definition = ToolDefinition::new(
+                    &name_for_engine,
+                    &t.description.map(|d| d.to_string()).unwrap_or_default(),
+                    serde_json::Value::Object((*t.input_schema).clone()),
+                    default_tags.clone(),
+                );
                 Arc::new(McpTool {
                     client: self.inner.clone(),
                     name_for_engine,

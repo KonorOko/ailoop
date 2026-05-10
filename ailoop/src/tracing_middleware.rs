@@ -322,11 +322,9 @@ mod tests {
         let registry = ToolRegistry::new();
         let mw: Arc<dyn ChatMiddleware> = Arc::new(TracingMiddleware::new());
         let run_id = RunId::new();
-        let config = RunConfig {
-            middlewares: vec![mw],
-            run_id: Some(run_id.clone()),
-            ..RunConfig::default()
-        };
+        let mut config = RunConfig::default();
+        config.middlewares = vec![mw];
+        config.run_id = Some(run_id.clone());
 
         tracing::subscriber::with_default(subscriber, || {
             futures::executor::block_on(async {

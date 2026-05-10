@@ -171,22 +171,11 @@ where
     }
 
     async fn summarize(&self, messages: Vec<Message>) -> Result<String, CompactionError> {
-        let req = ChatRequest {
-            messages,
-            system_prompt: Some(SystemPrompt::Plain(self.summarizer_prompt.clone())),
-            tools: None,
-            temperature: None,
-            top_p: None,
-            top_k: None,
-            stop_sequences: vec![],
-            max_tokens: self.max_tokens,
-            // Leave `tool_choice` unset rather than `None_`: some providers
-            // reject `tool_choice: none` when the request also has no
-            // `tools` array, and "no tools" already implies "no tool calls".
-            tool_choice: None,
-            disable_parallel_tool_use: None,
-            additional_params: None,
-        };
+        // Leave `tool_choice` unset rather than `None_`: some providers
+        // reject `tool_choice: none` when the request also has no
+        // `tools` array, and "no tools" already implies "no tool calls".
+        let mut req = ChatRequest::new(messages, self.max_tokens);
+        req.system_prompt = Some(SystemPrompt::Plain(self.summarizer_prompt.clone()));
 
         let mut stream = self
             .model

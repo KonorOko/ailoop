@@ -185,19 +185,9 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
 
             let mut tool_calls = Vec::new();
 
-            let mut req = ChatRequest {
-                messages: current_messages.clone(),
-                tools: Some(tools.active_tools().map(|t| t.tool_definition()).collect()),
-                system_prompt: config.system_prompt.clone(),
-                max_tokens: config.max_tokens,
-                additional_params: None,
-                temperature: None,
-                top_p: None,
-                top_k: None,
-                stop_sequences: Vec::new(),
-                tool_choice: None,
-                disable_parallel_tool_use: None,
-            };
+            let mut req = ChatRequest::new(current_messages.clone(), config.max_tokens);
+            req.tools = Some(tools.active_tools().map(|t| t.tool_definition()).collect());
+            req.system_prompt = config.system_prompt.clone();
 
             for mw in &config.middlewares {
                 if let Err(reason) = race_abort(
@@ -544,13 +534,12 @@ mod tests {
             "get_weather".into()
         }
         fn tool_definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: "get_weather".into(),
-                description: "stub".into(),
-                input_schema: json!({"type":"object","properties":{},"required":[]}),
-                tags: vec![],
-                cache_control: None,
-            }
+            ToolDefinition::new(
+                "get_weather",
+                "stub",
+                json!({"type":"object","properties":{},"required":[]}),
+                vec![],
+            )
         }
         async fn call(&self, _: serde_json::Value) -> ToolResultContent {
             ToolResultContent::Text("sunny".into())
@@ -807,10 +796,8 @@ mod tests {
         });
         let model = ScriptedModel::new(Vec::<Vec<StreamChunk>>::new());
         let registry = ToolRegistry::new();
-        let config = RunConfig {
-            middlewares: vec![mw.clone()],
-            ..RunConfig::default()
-        };
+        let mut config = RunConfig::default();
+        config.middlewares = vec![mw.clone()];
 
         let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
             .await
@@ -906,10 +893,8 @@ mod tests {
         let mw = Arc::new(TerminateOnSecondToolMw {
             calls: AtomicUsize::new(0),
         });
-        let config = RunConfig {
-            middlewares: vec![mw.clone()],
-            ..RunConfig::default()
-        };
+        let mut config = RunConfig::default();
+        config.middlewares = vec![mw.clone()];
 
         let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
             .await

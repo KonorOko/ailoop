@@ -165,17 +165,11 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
         let snapshot = self.history.messages().to_vec();
         let run_id = RunId::new();
 
-        let inner = run_chat(
-            &self.model,
-            snapshot,
-            &self.tools,
-            RunConfig {
-                middlewares: self.middlewares.clone(),
-                run_id: Some(run_id.clone()),
-                ..Default::default()
-            },
-        )
-        .await?;
+        let mut config = RunConfig::default();
+        config.middlewares = self.middlewares.clone();
+        config.run_id = Some(run_id.clone());
+
+        let inner = run_chat(&self.model, snapshot, &self.tools, config).await?;
 
         let prelude: BoxStream<'_, Result<StreamChunk, EngineError<M::Error>>> = match report {
             Some(r) => {
@@ -593,13 +587,12 @@ mod tests {
             self.name.into()
         }
         fn tool_definition(&self) -> ailoop_core::ToolDefinition {
-            ailoop_core::ToolDefinition {
-                name: self.name.into(),
-                description: "fake".into(),
-                input_schema: json!({"type":"object","properties":{},"required":[]}),
-                tags: self.tags.clone(),
-                cache_control: None,
-            }
+            ailoop_core::ToolDefinition::new(
+                self.name,
+                "fake",
+                json!({"type":"object","properties":{},"required":[]}),
+                self.tags.clone(),
+            )
         }
         async fn call(&self, _args: serde_json::Value) -> ailoop_core::ToolResultContent {
             ailoop_core::ToolResultContent::Text(String::new())

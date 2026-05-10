@@ -21,13 +21,12 @@ impl ToolDyn for GetWeather {
         "get_weather".into()
     }
     fn tool_definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "get_weather".into(),
-            description: "stub".into(),
-            input_schema: json!({"type":"object","properties":{},"required":[]}),
-            tags: vec![],
-            cache_control: None,
-        }
+        ToolDefinition::new(
+            "get_weather",
+            "stub",
+            json!({"type":"object","properties":{},"required":[]}),
+            vec![],
+        )
     }
     async fn call(&self, _: Value) -> ToolResultContent {
         ToolResultContent::Text("sunny".into())
@@ -68,10 +67,8 @@ fn registry_with_weather() -> ToolRegistry {
 
 async fn collect_finish_reason(model: ScriptedModel, mw: Arc<AntiLoop>) -> FinishReason {
     let registry = registry_with_weather();
-    let config = RunConfig {
-        middlewares: vec![mw],
-        ..RunConfig::default()
-    };
+    let mut config = RunConfig::default();
+    config.middlewares = vec![mw];
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await
         .expect("run_chat should start");
