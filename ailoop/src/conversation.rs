@@ -1,4 +1,4 @@
-use ailoop_context::ContextManager;
+use ailoop_context::{ContextManager, ConversationSnapshot};
 use ailoop_core::{
     AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, Message, RunConfig,
     RunId, StreamChunk, ToolChoice, ToolTag, Usage,
@@ -67,6 +67,19 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
     /// the next [`Conversation::run`] / [`Conversation::stream`] call.
     pub fn history_push(&mut self, message: Message) {
         self.history.add_message(message);
+    }
+
+    /// Persistable snapshot of this conversation's logical state:
+    /// the message vector and the parallel pin mask. Pair with
+    /// [`ConversationBuilder::from_snapshot`] to rebuild a
+    /// `Conversation` after a restart — the model, tools, and
+    /// middlewares must be re-supplied at resume time.
+    pub fn snapshot(&self) -> ConversationSnapshot {
+        ConversationSnapshot::new(
+            self.history.messages().to_vec(),
+            self.history.pinned().to_vec(),
+        )
+        .expect("history maintains messages.len() == pinned.len() invariant")
     }
 
     /// Names of every tool currently active for this conversation.
@@ -227,6 +240,27 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             request_defaults: RequestDefaults::default(),
             errors: vec![],
         }
+    }
+
+    /// Build a fresh `ConversationBuilder` whose history is seeded
+    /// from a previously captured [`ConversationSnapshot`]. Tools and
+    /// middlewares must be re-registered through the usual builder
+    /// methods before `build()` — the snapshot intentionally carries
+    /// only the message vector and pin mask.
+    ///
+    /// The snapshot's invariants (length match, supported version)
+    /// are enforced when the snapshot is constructed or deserialized,
+    /// so this constructor is infallible.
+    pub fn from_snapshot(model: M, snapshot: ConversationSnapshot) -> Self {
+        let mut builder = Self::new(model);
+        let history = ContextManager::from_messages(
+            ContextManager::builder(460),
+            snapshot.messages,
+            snapshot.pinned,
+        )
+        .expect("snapshot guarantees messages.len() == pinned.len()");
+        builder.history = history;
+        builder
     }
 
     pub fn tool<T>(mut self, tool: T) -> Self
@@ -1095,5 +1129,125 @@ mod tests {
 
         let rec = captured.lock().unwrap().clone().expect("recorded");
         assert_eq!(rec.temperature, Some(0.3));
+    }
+
+    /// `Conversation::snapshot()` captures the live history; rebuilding
+    /// a fresh `Conversation` via `ConversationBuilder::from_snapshot`
+    /// makes a follow-up turn see every pre-snapshot message in its
+    /// outgoing `ChatRequest`. Mirrors the
+    /// `sub_agent_history_persists_between_calls` shape but across a
+    /// snapshot boundary.
+    #[tokio::test]
+    async fn snapshot_resume_round_trip_carries_history() {
+        struct Recorder {
+            captures: Arc<Mutex<Vec<Vec<Message>>>>,
+        }
+        #[async_trait::async_trait]
+        impl ChatMiddleware for Recorder {
+            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+                self.captures.lock().unwrap().push(req.messages.clone());
+            }
+        }
+
+        // First conversation: one turn, then snapshot.
+        let model = ScriptedModel::new([vec![
+            StreamChunk::TextDelta {
+                delta: "first reply".into(),
+            },
+            StreamChunk::TurnFinished {
+                reason: FinishReason::EndTurn,
+                usage: Usage::default(),
+                service_tier: None,
+            },
+        ]]);
+        let mut chat = Conversation::builder(model)
+            .build()
+            .expect("builder should succeed");
+        chat.run("first prompt").await.expect("run");
+
+        let snapshot = chat.snapshot();
+        assert_eq!(
+            snapshot.messages.len(),
+            2,
+            "user + assistant after one turn"
+        );
+        assert_eq!(snapshot.pinned, vec![false, false]);
+
+        // Snapshots round-trip through JSON unchanged.
+        let json = serde_json::to_string(&snapshot).expect("serialize");
+        let restored: ConversationSnapshot = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, snapshot);
+
+        // Resume into a fresh conversation with a brand new model and a
+        // recording middleware. The next turn must replay the pre-snapshot
+        // history.
+        let captures = Arc::new(Mutex::new(Vec::new()));
+        let resumed_model = ScriptedModel::new([vec![
+            StreamChunk::TextDelta {
+                delta: "second reply".into(),
+            },
+            StreamChunk::TurnFinished {
+                reason: FinishReason::EndTurn,
+                usage: Usage::default(),
+                service_tier: None,
+            },
+        ]]);
+        let mut resumed = ConversationBuilder::from_snapshot(resumed_model, restored)
+            .middleware(Arc::new(Recorder {
+                captures: captures.clone(),
+            }))
+            .build()
+            .expect("builder should succeed");
+
+        let outcome = resumed.run("second prompt").await.expect("run");
+        assert_eq!(outcome.final_text.as_deref(), Some("second reply"));
+
+        let captures = captures.lock().unwrap();
+        assert_eq!(
+            captures.len(),
+            1,
+            "one ChatRequest captured for the resumed turn"
+        );
+        let request_messages = &captures[0];
+        assert_eq!(
+            request_messages.len(),
+            3,
+            "first prompt + first reply + second prompt must reach the model"
+        );
+        match &request_messages[0] {
+            Message::User { blocks } => match &blocks[0] {
+                ailoop_core::UserBlock::Text { text, .. } => assert_eq!(text, "first prompt"),
+                other => panic!("expected user text, got {other:?}"),
+            },
+            other => panic!("expected user message, got {other:?}"),
+        }
+        match &request_messages[2] {
+            Message::User { blocks } => match &blocks[0] {
+                ailoop_core::UserBlock::Text { text, .. } => assert_eq!(text, "second prompt"),
+                other => panic!("expected user text, got {other:?}"),
+            },
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    /// Pin state survives the snapshot → resume round-trip.
+    #[tokio::test]
+    async fn snapshot_preserves_pin_mask_across_resume() {
+        let mut chat = Conversation::builder(one_turn_model())
+            .build()
+            .expect("builder should succeed");
+        chat.history_push(Message::user("anchor"));
+        chat.history.pin_last();
+        chat.history_push(Message::assistant_text("ack"));
+
+        let snapshot = chat.snapshot();
+        assert_eq!(snapshot.pinned, vec![true, false]);
+
+        let resumed = ConversationBuilder::from_snapshot(one_turn_model(), snapshot)
+            .build()
+            .expect("builder should succeed");
+        assert_eq!(resumed.history_messages().len(), 2);
+        assert!(resumed.history.is_pinned(0));
+        assert!(!resumed.history.is_pinned(1));
     }
 }
