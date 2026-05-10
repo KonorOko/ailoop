@@ -11,6 +11,7 @@ members = [
     "ailoop-tools",
     "examples/basic-chat",
     "examples/mcp-time",
+    "examples/persistent-chat",
     "examples/tool-use",
 ]
 resolver = "3"
