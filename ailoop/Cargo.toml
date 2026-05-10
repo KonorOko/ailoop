@@ -26,6 +26,7 @@ tracing = { workspace = true, optional = true }
 tracing = ["dep:tracing"]
 
 [dev-dependencies]
+ailoop-core = { workspace = true, features = ["testing"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

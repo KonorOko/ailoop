@@ -5,6 +5,7 @@ pub mod middleware;
 pub mod request;
 pub mod retry;
 pub mod stream;
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 mod tokenizer;
 mod traits;

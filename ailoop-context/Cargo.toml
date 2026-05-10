@@ -18,5 +18,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+ailoop-core = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio.workspace = true
