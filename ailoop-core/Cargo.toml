@@ -1,10 +1,15 @@
 [package]
 name = "ailoop-core"
-description = "Core types and traits for the ailoop AI engine"
+description = "Core vocabulary (messages, streams, hooks, middleware) for the ailoop SDK"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["llm", "ai", "agent", "sdk"]
+categories = ["api-bindings", "asynchronous"]
 
 [features]
 testing = []

@@ -1,10 +1,15 @@
 [package]
 name = "ailoop-prompts"
-description = "Composable system prompt utilities for ailoop"
+description = "Composable system-prompt assembly for ailoop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["llm", "ai", "agent", "prompt"]
+categories = ["api-bindings"]
 
 [dependencies]
 ailoop-core.workspace = true

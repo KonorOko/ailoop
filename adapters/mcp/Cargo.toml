@@ -5,6 +5,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["llm", "ai", "mcp", "agent", "tool"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 ailoop-core.workspace = true

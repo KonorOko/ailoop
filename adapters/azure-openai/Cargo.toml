@@ -1,10 +1,15 @@
 [package]
 name = "ailoop-azure-openai"
-description = "Azure OpenAI provider adapter for ailoop"
+description = "Azure OpenAI v1 Chat Completions adapter for ailoop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["llm", "ai", "azure", "openai", "agent"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 ailoop-core.workspace = true

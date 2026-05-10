@@ -1,10 +1,15 @@
 [package]
 name = "ailoop-tools"
-description = "Tool registry and tool calling primitives for ailoop"
+description = "Tool registry and trait surface for ailoop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["llm", "ai", "agent", "tool"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 ailoop-core.workspace = true

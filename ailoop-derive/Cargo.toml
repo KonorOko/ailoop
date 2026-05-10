@@ -1,10 +1,15 @@
 [package]
 name = "ailoop-derive"
-description = "Derive macros for ailoop"
+description = "Procedural macros for ailoop (#[ailoop_tool], #[derive(ToolJsonType)])"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["llm", "ai", "agent", "macros"]
+categories = ["development-tools::procedural-macro-helpers"]
 
 [dependencies]
 convert_case.workspace = true

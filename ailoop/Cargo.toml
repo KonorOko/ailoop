@@ -1,10 +1,15 @@
 [package]
 name = "ailoop"
-description = "Ergonomic, provider-agnostic AI agent engine for Rust"
+description = "High-level façade for building LLM agent loops in Rust"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["llm", "ai", "agent", "anthropic", "openai"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 ailoop-core.workspace = true

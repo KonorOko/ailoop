@@ -1,10 +1,15 @@
 [package]
 name = "ailoop-anthropic"
-description = "Anthropic provider adapter for ailoop"
+description = "Anthropic Messages API adapter for ailoop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["llm", "ai", "anthropic", "claude", "agent"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 ailoop-core.workspace = true
