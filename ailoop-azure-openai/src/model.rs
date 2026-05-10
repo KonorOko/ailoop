@@ -8,7 +8,15 @@ use crate::request::build_body;
 use crate::stream::process_response;
 
 /// Chat Completions model bound to a specific deployment. Constructed via
-/// `AzureOpenAIClient::model(...)` or `CompletionClient::completion_model(...)`.
+/// [`AzureOpenAIClient::model`] or
+/// [`CompletionClient::completion_model`](ailoop_core::CompletionClient::completion_model).
+///
+/// Drops [`AssistantBlock::Reasoning`](ailoop_core::AssistantBlock::Reasoning)
+/// /
+/// [`AssistantBlock::RedactedReasoning`](ailoop_core::AssistantBlock::RedactedReasoning)
+/// on send because the Chat Completions wire shape has no slot for
+/// the reasoning signature; reasoning round-trip on Azure is gated on
+/// the Responses API model, which is out of scope for 1.0.
 #[derive(Clone)]
 pub struct AzureOpenAIChatModel {
     client: AzureOpenAIClient,
@@ -16,6 +24,10 @@ pub struct AzureOpenAIChatModel {
 }
 
 impl AzureOpenAIChatModel {
+    /// Bind `client` to a specific Azure `deployment` name. Prefer
+    /// [`AzureOpenAIClient::model`] for the one-client-one-deployment
+    /// case — this constructor is for adapter authors composing their
+    /// own pipelines.
     pub fn new(client: AzureOpenAIClient, deployment: impl Into<String>) -> Self {
         Self {
             client,

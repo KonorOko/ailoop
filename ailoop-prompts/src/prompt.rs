@@ -4,11 +4,25 @@ use ailoop_core::Tokenizer;
 
 use crate::errors::PromptError;
 
+/// Composable system prompt: an ordered list of [`PromptSection`]s.
+///
+/// The render order matches the construction order. Use
+/// [`Prompt::builder`] for a fluent constructor or [`Prompt::new`] +
+/// [`add_section`](Self::add_section) when sections come from a loop.
+/// Convert into the string the model sees with
+/// [`render`](Self::render) or via the [`Display`] / `Into<String>`
+/// impls.
 #[derive(Debug, Clone)]
 pub struct Prompt {
     sections: Vec<PromptSection>,
 }
 
+/// One section of a [`Prompt`].
+///
+/// Sections without a name render verbatim; named sections render with
+/// a Markdown `## {name}` header followed by the content. The name is
+/// load-bearing for the rendered shape — keep it short, keep it
+/// stable.
 #[derive(Debug, Clone)]
 pub struct PromptSection {
     name: Option<String>,
@@ -16,6 +30,8 @@ pub struct PromptSection {
 }
 
 impl PromptSection {
+    /// Build an unnamed section. Renders as `{content}\n\n` with no
+    /// header.
     pub fn new(content: impl Into<String>) -> Self {
         Self {
             name: None,
@@ -23,12 +39,24 @@ impl PromptSection {
         }
     }
 
+    /// Build a named section. Renders as `## {name}\n\n{content}\n\n`.
     pub fn with_name(name: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             name: Some(name.into()),
             content: content.into(),
         }
     }
+
+    /// Load a section's content from `path` (sync `std::fs::read_to_string`).
+    /// The resulting section is unnamed; chain with
+    /// [`Self::with_name`] manually if a header is wanted.
+    ///
+    /// Sync I/O is intentional: prompts are typically loaded once at
+    /// startup. Failures surface as [`PromptError::LoadFile`] carrying
+    /// the offending path and the underlying [`std::io::Error`]. Do
+    /// not call from within a hot async path — wrap in
+    /// `tokio::task::spawn_blocking` if the underlying filesystem may
+    /// be slow.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, PromptError> {
         let content = std::fs::read_to_string(&path).map_err(|source| PromptError::LoadFile {
             path: path.as_ref().to_path_buf(),
@@ -38,10 +66,14 @@ impl PromptSection {
         Ok(Self::new(content))
     }
 
+    /// Section name supplied at construction (`None` for unnamed
+    /// sections built via [`Self::new`] / [`Self::from_file`]).
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
     }
 
+    /// Section body text (without any header [`Prompt::render`] would
+    /// inject).
     pub fn content(&self) -> &str {
         &self.content
     }
@@ -64,22 +96,30 @@ impl Default for Prompt {
 }
 
 impl Prompt {
+    /// Begin assembling a prompt with the fluent
+    /// [`PromptBuilder`] API.
     pub fn builder() -> PromptBuilder {
         PromptBuilder::new()
     }
 
+    /// Build an empty prompt. Equivalent to [`Self::default`].
     pub fn new() -> Self {
         Prompt { sections: vec![] }
     }
 
+    /// Borrow the section vector in render order.
     pub fn sections(&self) -> &Vec<PromptSection> {
         &self.sections
     }
 
+    /// Append `section` after every existing one. The section will
+    /// appear last in the rendered output.
     pub fn add_section(&mut self, section: PromptSection) {
         self.sections.push(section);
     }
 
+    /// Remove the first section whose name matches `name`. No-op when
+    /// no such section exists; unnamed sections are never matched.
     pub fn remove_section(&mut self, name: &str) {
         if let Some(idx) = self
             .sections
@@ -90,6 +130,14 @@ impl Prompt {
         };
     }
 
+    /// Render every section into one string, in order.
+    ///
+    /// Named sections produce `## {name}\n\n{content}\n\n`; unnamed
+    /// sections produce `{content}\n\n`. The trailing blank line
+    /// between sections is intentional — it gives the model a clean
+    /// boundary without forcing callers to inject one in `content`.
+    /// This exact byte sequence is also what
+    /// [`token_count`](Self::token_count) measures.
     pub fn render(&self) -> String {
         let mut out = String::new();
 
@@ -128,6 +176,9 @@ impl From<&str> for Prompt {
     }
 }
 
+/// Fluent builder for [`Prompt`]. Each [`section`](Self::section)
+/// call appends to the running list; [`build`](Self::build) finalizes
+/// it.
 pub struct PromptBuilder {
     sections: Vec<PromptSection>,
 }
@@ -139,15 +190,19 @@ impl Default for PromptBuilder {
 }
 
 impl PromptBuilder {
+    /// Build an empty builder. Equivalent to [`Self::default`].
     pub fn new() -> Self {
         PromptBuilder { sections: vec![] }
     }
 
+    /// Append `section`. The next [`section`](Self::section) call (or
+    /// the rendered output) appears after it.
     pub fn section(mut self, section: PromptSection) -> Self {
         self.sections.push(section);
         self
     }
 
+    /// Finalize the builder and return the [`Prompt`].
     pub fn build(self) -> Prompt {
         Prompt {
             sections: self.sections,

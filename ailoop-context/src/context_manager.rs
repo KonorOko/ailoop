@@ -1,22 +1,52 @@
-use ailoop_core::{AssistantBlock, Message, UserBlock};
+//! [`ContextManager`] + [`ContextManagerBuilder`] + the report type
+//! [`compact_if_needed`](ContextManager::compact_if_needed) returns.
+
+use ailoop_core::{AssistantBlock, CharTokenizer, Message, Tokenizer, UserBlock};
 
 use crate::{
     compaction::{CompactionStrategy, TruncateStrategy},
     errors::{CompactionError, FromMessagesError},
-    tokens::{CharTokenizer, Tokenizer},
 };
 
-/// Reports what `ContextManager::compact_if_needed` did when it ran.
+/// Reports what [`ContextManager::compact_if_needed`] did when it ran.
 /// Returned wrapped in `Option`: `None` means compaction was not needed
 /// (history fits within `max_tokens`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CompactionReport {
+    /// Message count before compaction ran.
     pub before: usize,
+    /// Message count after compaction ran. `after < before` whenever
+    /// the strategy actually dropped or replaced messages.
     pub after: usize,
+    /// Stable, machine-readable strategy name from
+    /// [`CompactionStrategy::name`] (e.g. `"truncate"`,
+    /// `"summarize"`). Used as the `strategy` field of
+    /// [`StreamChunk::HistoryCompacted`].
+    ///
+    /// [`CompactionStrategy::name`]: crate::CompactionStrategy::name
+    /// [`StreamChunk::HistoryCompacted`]: ailoop_core::StreamChunk::HistoryCompacted
     pub strategy: &'static str,
 }
 
+/// Owns the message vector backing a single conversation, plus the
+/// budget and pin mask that govern how compaction reduces it.
+///
+/// Lifecycle: append turns with [`add_message`](Self::add_message) /
+/// [`extend`](Self::extend), inspect with [`messages`](Self::messages),
+/// pin survivors with [`pin_last`](Self::pin_last) /
+/// [`pin_at`](Self::pin_at) / [`pin_with_tool_result`](Self::pin_with_tool_result),
+/// and call [`compact_if_needed`](Self::compact_if_needed) before each
+/// outgoing [`ChatRequest`] to hold the history under the configured
+/// budget. Restore from a [`ConversationSnapshot`] via
+/// [`from_messages`](Self::from_messages).
+///
+/// The façade [`Conversation`](https://docs.rs/ailoop) wires one of
+/// these automatically — touch this type directly only when driving
+/// [`advanced::run_chat`](https://docs.rs/ailoop) or building tests.
+///
+/// [`ChatRequest`]: ailoop_core::ChatRequest
+/// [`ConversationSnapshot`]: crate::ConversationSnapshot
 pub struct ContextManager {
     messages: Vec<Message>,
     /// Parallel to `messages`: `pinned[i] == true` marks `messages[i]`
@@ -39,6 +69,13 @@ pub struct ContextManager {
 }
 
 impl ContextManager {
+    /// Begin configuring a new manager with `max_tokens` as the
+    /// budget [`compact_if_needed`](Self::compact_if_needed) will
+    /// hold the history under. Defaults: [`TruncateStrategy`] for
+    /// reduction, [`CharTokenizer`] (`len() / 4`) for sizing, four
+    /// preserved tail messages.
+    ///
+    /// [`TruncateStrategy`]: crate::TruncateStrategy
     pub fn builder(max_tokens: usize) -> ContextManagerBuilder {
         ContextManagerBuilder::new(max_tokens)
     }
@@ -69,6 +106,9 @@ impl ContextManager {
 }
 
 impl ContextManager {
+    /// Append `message` to the history with `pinned = false`. Use
+    /// [`pin_last`](Self::pin_last) immediately after the call to mark
+    /// it as a survivor.
     pub fn add_message(&mut self, message: Message) {
         self.messages.push(message);
         self.pinned.push(false);
@@ -82,10 +122,15 @@ impl ContextManager {
         self.tokenizer.count_messages(&self.messages)
     }
 
+    /// Borrow the current history slice. Indices into this slice align
+    /// with [`pinned`](Self::pinned).
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
 
+    /// Append every message in `new_messages`, all with `pinned =
+    /// false`. The engine uses this after a turn to fold the
+    /// assistant reply (and any tool results) back into the history.
     pub fn extend(&mut self, new_messages: Vec<Message>) {
         let added = new_messages.len();
         self.messages.extend(new_messages);
@@ -99,6 +144,8 @@ impl ContextManager {
         &self.pinned
     }
 
+    /// Whether `messages[idx]` is currently pinned. Out-of-bounds
+    /// indices return `false` rather than panicking.
     pub fn is_pinned(&self, idx: usize) -> bool {
         self.pinned.get(idx).copied().unwrap_or(false)
     }
@@ -202,6 +249,25 @@ impl ContextManager {
         }
     }
 
+    /// Run the configured [`CompactionStrategy`] when
+    /// [`estimated_tokens`](Self::estimated_tokens) reaches the
+    /// budget; otherwise return `Ok(None)` and leave the history
+    /// untouched.
+    ///
+    /// On success returns `Ok(Some(report))` describing the
+    /// before/after counts and the strategy name. The engine emits
+    /// [`StreamChunk::HistoryCompacted`] carrying the same fields so
+    /// observability middlewares can correlate the compaction with the
+    /// run that triggered it.
+    ///
+    /// Errors propagate from the strategy (commonly
+    /// [`CompactionError::SummarizationFailed`] when the summarizer
+    /// model itself fails). [`CompactionError::NotEnoughHistory`]
+    /// surfaces when the history has fewer messages than
+    /// `preserve_n_last` and there is nothing to drop.
+    ///
+    /// [`CompactionStrategy`]: crate::CompactionStrategy
+    /// [`StreamChunk::HistoryCompacted`]: ailoop_core::StreamChunk::HistoryCompacted
     pub async fn compact_if_needed(&mut self) -> Result<Option<CompactionReport>, CompactionError> {
         if self.estimated_tokens() < self.max_tokens {
             return Ok(None);
@@ -229,6 +295,10 @@ impl ContextManager {
     }
 }
 
+/// Configuration for a [`ContextManager`].
+///
+/// Construct via [`ContextManager::builder`]. Setters return
+/// `Self` so calls chain; [`build`](Self::build) is infallible.
 pub struct ContextManagerBuilder {
     max_tokens: usize,
     preserve_n_last: usize,
@@ -250,6 +320,11 @@ impl ContextManagerBuilder {
 }
 
 impl ContextManagerBuilder {
+    /// Number of trailing messages the strategy must preserve verbatim
+    /// (after walking back to a safe `User`-without-`ToolResult`
+    /// boundary). Default: 4. Lowering it lets compaction reclaim more
+    /// budget at the cost of dropping more recent context; raising it
+    /// keeps recent turns at the cost of compacting sooner.
     pub fn preserve_n_last(mut self, n: usize) -> Self {
         self.preserve_n_last = n;
         self
@@ -267,6 +342,13 @@ impl ContextManagerBuilder {
         }
     }
 
+    /// Wire a [`CompactionStrategy`] into the manager. Replaces the
+    /// default [`TruncateStrategy`]. Use
+    /// `Box::new(SummarizeStrategy::new(model))` to compress dropped
+    /// history into a model-generated summary instead of losing it.
+    ///
+    /// [`CompactionStrategy`]: crate::CompactionStrategy
+    /// [`TruncateStrategy`]: crate::TruncateStrategy
     pub fn strategy(self, strategy: Box<dyn CompactionStrategy>) -> ContextManagerBuilder {
         ContextManagerBuilder {
             max_tokens: self.max_tokens,
@@ -276,6 +358,8 @@ impl ContextManagerBuilder {
         }
     }
 
+    /// Finalize the configuration and build the [`ContextManager`].
+    /// Infallible — every error case is caught by the typed setters.
     pub fn build(self) -> ContextManager {
         ContextManager {
             messages: Vec::new(),

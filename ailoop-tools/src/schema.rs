@@ -11,8 +11,17 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
+/// Per-type JSON Schema fragment supplier for the
+/// [`#[ailoop_tool]`](https://docs.rs/ailoop) macro.
+///
+/// Blanket impls cover primitives, [`Vec`], [`Option`], [`Box`],
+/// `HashMap<String, V>`, `BTreeMap<String, V>`, and tuples up to
+/// arity 8. Derive
+/// [`#[derive(ToolJsonType)]`](https://docs.rs/ailoop) on a C-style
+/// enum to emit `{"type":"string","enum":[...]}`. Implement the
+/// trait by hand for richer custom shapes.
 pub trait ToolJsonType {
     /// Return a JSON Schema fragment describing this type.
     ///

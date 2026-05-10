@@ -12,7 +12,7 @@ use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{
     AssistantBlock, CancellationToken, FinishReason, RunConfig, StreamChunk, ToolTag, Usage,
 };
-use ailoop_tools::registry::ToolDyn;
+use ailoop_tools::ToolDyn;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 

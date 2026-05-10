@@ -47,7 +47,7 @@ pub enum EngineError<E: std::error::Error> {
     /// [`CompactionStrategy`]: ailoop_context::CompactionStrategy
     /// [`CompactionError`]: ailoop_context::CompactionError
     #[error("context error: {0}")]
-    Context(#[from] ailoop_context::errors::CompactionError),
+    Context(#[from] ailoop_context::CompactionError),
 
     /// The agent loop broke out because the iteration counter reached
     /// [`RunConfig::max_iterations`]. The wrapped value is the

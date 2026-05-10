@@ -12,14 +12,34 @@ use reqwest::StatusCode;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AnthropicApiErrorKind {
+    /// `overloaded_error` — Anthropic is at capacity. Transient;
+    /// honours `Retry-After` when present.
     Overloaded,
+    /// `rate_limit_error` — the caller exceeded a quota. Transient;
+    /// honours `Retry-After`.
     RateLimit,
+    /// `invalid_request_error` — malformed body, unknown model,
+    /// validation failure. Permanent — retrying without changes
+    /// produces the same error.
     InvalidRequest,
+    /// `authentication_error` — missing or invalid API key.
+    /// Permanent.
     Authentication,
+    /// `permission_error` — the API key is valid but lacks access to
+    /// the requested resource. Permanent.
     Permission,
+    /// `not_found_error` — model id or resource does not exist.
+    /// Permanent.
     NotFound,
+    /// `request_too_large` — request body exceeded provider limits.
+    /// Permanent unless the caller compacts and retries explicitly.
     RequestTooLarge,
+    /// `api_error` — generic server-side failure with no further
+    /// classification. Treated as transient.
     Api,
+    /// Forward-compatibility variant for any future `error.type`
+    /// strings. Treated conservatively as transient so unknown
+    /// variants don't strand requests on a retryable code.
     Other(String),
 }
 
@@ -42,9 +62,19 @@ impl AnthropicApiErrorKind {
     }
 }
 
+/// Failure surface of [`AnthropicModel::chat_stream`](crate::AnthropicModel)
+/// and the surrounding HTTP / SSE plumbing.
+///
+/// Wrapped by the façade as
+/// [`EngineError::Model`](https://docs.rs/ailoop) when it surfaces
+/// during a run. Implements [`Retryable`] so
+/// [`RetryingModel`](ailoop_core::RetryingModel) can drive backoff
+/// off the variant.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AnthropicError {
+    /// Transport-level failure from `reqwest` (DNS, TLS, connection
+    /// reset). Treated as transient by [`Retryable`].
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
 
@@ -54,9 +84,14 @@ pub enum AnthropicError {
     /// header was missing or unparseable.
     #[error("Anthropic API error ({status}, {kind:?}): {message}")]
     Api {
+        /// HTTP status code returned by the API.
         status: StatusCode,
+        /// Typed category derived from `error.type`.
         kind: AnthropicApiErrorKind,
+        /// Human-readable message from the error envelope.
         message: String,
+        /// Parsed `Retry-After` header, when present and parseable as
+        /// integer seconds. HTTP-date form returns `None`.
         retry_after: Option<Duration>,
     },
 
@@ -64,11 +99,20 @@ pub enum AnthropicError {
     /// error envelope (e.g. an upstream proxy returned HTML). The raw
     /// body is preserved so callers can still surface it.
     #[error("API returned status {status}: {body}")]
-    Status { status: StatusCode, body: String },
+    Status {
+        /// HTTP status code returned by the upstream.
+        status: StatusCode,
+        /// Raw response body, preserved verbatim.
+        body: String,
+    },
 
+    /// SSE framing error from `eventsource-stream` (chunked transport
+    /// failure, unparseable event boundaries). Treated as permanent
+    /// — retrying produces the same parse failure.
     #[error("SSE parse error: {0}")]
     Sse(#[from] eventsource_stream::EventStreamError<reqwest::Error>),
 
+    /// JSON deserialization of an event payload failed. Permanent.
     #[error("malformed event payload: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -78,7 +122,9 @@ pub enum AnthropicError {
     /// `AnthropicApiErrorKind::Overloaded` without parsing strings.
     #[error("Anthropic error event ({kind:?}): {message}")]
     Provider {
+        /// Typed category derived from the event payload.
         kind: AnthropicApiErrorKind,
+        /// Human-readable message from the event payload.
         message: String,
     },
 }

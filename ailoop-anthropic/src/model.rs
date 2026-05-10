@@ -7,6 +7,20 @@ use crate::stream::process_response;
 use ailoop_core::{ChatRequest, CompletionModel, StreamChunk};
 use futures::stream::BoxStream;
 
+/// [`CompletionModel`] implementation bound to a specific Anthropic
+/// model id (e.g. `"claude-sonnet-4-6"`). Constructed via
+/// [`AnthropicClient::model`] or
+/// [`CompletionClient::completion_model`](ailoop_core::CompletionClient::completion_model).
+///
+/// Honours every per-block [`CacheControl`](ailoop_core::CacheControl)
+/// supplied on the [`ChatRequest`] (system / messages / tools), emits
+/// the TTL-broken-down `cache_creation_5m_tokens` /
+/// `cache_creation_1h_tokens` counters on
+/// [`StreamChunk::TurnFinished`], and round-trips reasoning blocks via
+/// [`AssistantBlock::Reasoning`](ailoop_core::AssistantBlock::Reasoning).
+///
+/// [`CompletionClient`]: ailoop_core::CompletionClient
+/// [`StreamChunk::TurnFinished`]: ailoop_core::StreamChunk::TurnFinished
 #[derive(Clone)]
 pub struct AnthropicModel {
     client: AnthropicClient,
@@ -14,6 +28,10 @@ pub struct AnthropicModel {
 }
 
 impl AnthropicModel {
+    /// Bind `client` to a specific `model` id. Prefer
+    /// [`AnthropicClient::model`] for the one-client-one-model case
+    /// — this constructor is for adapter authors composing their own
+    /// pipelines.
     pub fn new(client: AnthropicClient, model: impl Into<String>) -> Self {
         Self {
             client,

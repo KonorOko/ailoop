@@ -7,7 +7,7 @@
 //! (or its inner `Conversation`) per call.
 
 use ailoop_core::{CompletionModel, FinishReason, ToolDefinition, ToolResultContent};
-use ailoop_tools::registry::ToolDyn;
+use ailoop_tools::ToolDyn;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 

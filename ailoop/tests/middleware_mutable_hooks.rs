@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use ailoop::{Conversation, Message, ToolDefinition, ToolResultContent, advanced::run_chat};
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{ChatMiddleware, FinishReason, RunConfig, RunId, StepId, StreamChunk, Usage};
-use ailoop_tools::{ToolRegistry, registry::ToolDyn};
+use ailoop_tools::{ToolDyn, ToolRegistry};
 use futures::StreamExt;
 use serde_json::{Value, json};
 

@@ -15,14 +15,31 @@ use reqwest::StatusCode;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AzureOpenAIApiErrorKind {
+    /// Per-resource quota exceeded. Transient; honours `Retry-After`
+    /// (and Azure's vendor-specific `retry-after-ms` header).
     RateLimit,
+    /// Malformed body, unknown deployment, validation failure.
+    /// Permanent — retrying without changes produces the same error.
     InvalidRequest,
+    /// Azure content-safety filter blocked the request or response.
+    /// Permanent — retrying produces the same block.
     ContentFilter,
+    /// Missing or invalid API key / token. Permanent.
     Authentication,
+    /// Caller authenticated successfully but lacks access. Permanent.
     Permission,
+    /// Resource (deployment id, model name) not found. Permanent.
     NotFound,
+    /// Specific case of [`NotFound`](Self::NotFound) where the error
+    /// payload identifies the failing resource as the deployment. Kept
+    /// distinct so callers can surface a clearer message (deployments
+    /// are a common configuration error).
     DeploymentNotFound,
+    /// Generic upstream 5xx. Treated as transient.
     ServerError,
+    /// Forward-compatibility variant for `error.code` strings the
+    /// adapter does not yet have a typed variant for. Treated
+    /// conservatively as transient.
     Other(String),
 }
 
@@ -46,9 +63,19 @@ impl AzureOpenAIApiErrorKind {
     }
 }
 
+/// Failure surface of [`AzureOpenAIChatModel::chat_stream`](crate::AzureOpenAIChatModel)
+/// and the surrounding HTTP / SSE plumbing.
+///
+/// Wrapped by the façade as
+/// [`EngineError::Model`](https://docs.rs/ailoop) when it surfaces
+/// during a run. Implements [`Retryable`] so
+/// [`RetryingModel`](ailoop_core::RetryingModel) can drive backoff
+/// off the variant.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AzureOpenAIError {
+    /// Transport-level failure from `reqwest` (DNS, TLS, connection
+    /// reset). Treated as transient by [`Retryable`].
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
 
@@ -58,9 +85,14 @@ pub enum AzureOpenAIError {
     /// is `None` when both headers were missing or unparseable.
     #[error("Azure OpenAI API error ({status}, {kind:?}): {message}")]
     Api {
+        /// HTTP status code returned by the API.
         status: StatusCode,
+        /// Typed category derived from `error.code`.
         kind: AzureOpenAIApiErrorKind,
+        /// Human-readable message from the error envelope.
         message: String,
+        /// Parsed `Retry-After` (or vendor `retry-after-ms`), when
+        /// present and parseable. HTTP-date form returns `None`.
         retry_after: Option<Duration>,
     },
 
@@ -68,16 +100,33 @@ pub enum AzureOpenAIError {
     /// error envelope (e.g. an Azure Front Door HTML page). The raw
     /// body is preserved so callers can still surface it.
     #[error("API returned status {status}: {body}")]
-    Status { status: StatusCode, body: String },
+    Status {
+        /// HTTP status code returned by the upstream.
+        status: StatusCode,
+        /// Raw response body, preserved verbatim.
+        body: String,
+    },
 
+    /// SSE framing error from `eventsource-stream` (chunked transport
+    /// failure, unparseable event boundaries). Treated as permanent.
     #[error("SSE parse error: {0}")]
     Sse(#[from] eventsource_stream::EventStreamError<reqwest::Error>),
 
+    /// JSON deserialization of an event payload failed. Permanent.
     #[error("malformed event payload: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// Mid-stream error event delivered over SSE. Carries the raw
+    /// `error.type` / message because Azure's SSE events do not expose
+    /// the same `error.code` shape as HTTP-envelope errors. Treated as
+    /// permanent — there is no typed signal to drive a retry decision.
     #[error("Azure OpenAI error event: {error_type}: {message}")]
-    Provider { error_type: String, message: String },
+    Provider {
+        /// Raw `error.type` string from the event payload.
+        error_type: String,
+        /// Human-readable message from the event payload.
+        message: String,
+    },
 
     /// Configuration error surfaced from `from_env` and similar constructors:
     /// missing endpoint, mutually exclusive secrets both set, etc.

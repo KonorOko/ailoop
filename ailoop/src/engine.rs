@@ -536,7 +536,7 @@ mod tests {
     use super::*;
     use ailoop_core::ToolDefinition;
     use ailoop_core::testing::ScriptedModel;
-    use ailoop_tools::registry::ToolDyn;
+    use ailoop_tools::ToolDyn;
     use serde_json::json;
 
     struct GetWeather;

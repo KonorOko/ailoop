@@ -1,3 +1,8 @@
+//! [`ToolRegistry`] container plus the [`Tool`] / [`ToolDyn`] trait
+//! pair. The blanket `impl<T: Tool> ToolDyn for T` lets every typed
+//! tool slot directly into the dynamic dispatch path used by the
+//! engine.
+
 use std::sync::Arc;
 
 use ailoop_core::{ToolDefinition, ToolResultContent, ToolTag};
@@ -6,29 +11,92 @@ use serde::Serialize;
 
 use crate::errors::ToolRegistryError;
 
+/// Owns every tool a [`Conversation`] can dispatch to and tracks which
+/// of them are currently active.
+///
+/// Registration order matters: [`active_tools`](Self::active_tools)
+/// iterates in insertion order (backed by [`IndexMap`]), and that
+/// order is what the engine forwards in [`ChatRequest::tools`]. The
+/// model sees tools in the same order the builder registered them.
+///
+/// `register` auto-activates the new tool. Capability filters
+/// ([`activate_by_tags`](Self::activate_by_tags) /
+/// [`deactivate_by_tags`](Self::deactivate_by_tags)) and the
+/// [`deactivate_all`](Self::deactivate_all) reset operate on the
+/// active set without touching registration.
+///
+/// [`Conversation`]: https://docs.rs/ailoop
+/// [`ChatRequest::tools`]: ailoop_core::ChatRequest::tools
 pub struct ToolRegistry {
     tools: IndexMap<String, Arc<dyn ToolDyn>>,
     active_tools: IndexSet<String>,
 }
 
+/// Typed tool entry point. Implement (or derive via
+/// [`#[ailoop_tool]`](https://docs.rs/ailoop)) to expose a function
+/// to the model with deserialized [`Args`](Self::Args) in and a
+/// serializable [`Output`](Self::Output) out.
+///
+/// Every `Tool` is automatically a [`ToolDyn`] via the blanket impl,
+/// so the same value can be registered with either
+/// [`ConversationBuilder::tool`](https://docs.rs/ailoop) (typed,
+/// preferred) or
+/// [`ConversationBuilder::tool_dyn`](https://docs.rs/ailoop) (dynamic,
+/// for plugin loaders / MCP).
 pub trait Tool: Send + Sync + Sized {
+    /// Wire-visible name of the tool. Must match
+    /// `^[a-zA-Z0-9_-]{1,64}$` for Anthropic compatibility (Azure
+    /// OpenAI is more permissive).
     const NAME: &'static str;
 
+    /// Argument struct deserialized from the model's JSON `input`.
     type Args: for<'a> serde::Deserialize<'a> + Send;
+    /// Successful return value. Serialized back as the tool result;
+    /// strings round-trip as [`ToolResultContent::Text`], anything
+    /// else is JSON-encoded into the same variant.
     type Output: Serialize + Send;
+    /// Failure type. Surfaced to the model as
+    /// [`ToolResultContent::Error`] (rendered via `Display`); never
+    /// reaches [`EngineError`](https://docs.rs/ailoop).
     type Error: std::error::Error + Send + Sync + 'static;
 
+    /// JSON-Schema description of this tool that the model sees in
+    /// every [`ChatRequest::tools`] entry. Typically derived by the
+    /// [`#[ailoop_tool]`](https://docs.rs/ailoop) macro from the
+    /// function signature plus optional doc-comments.
+    ///
+    /// [`ChatRequest::tools`]: ailoop_core::ChatRequest::tools
     fn definition(&self) -> ToolDefinition;
+    /// Invoke the tool. The blanket [`ToolDyn::call`] impl
+    /// deserializes the model's JSON into [`Args`](Self::Args),
+    /// dispatches here, then serializes the result.
     fn call(
         &self,
         args: Self::Args,
     ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send;
 }
 
+/// Object-safe sibling of [`Tool`] used wherever the registry needs
+/// `Arc<dyn ToolDyn>` — runtime tool discovery (MCP, plugin loaders,
+/// config-driven catalogs). The blanket `impl<T: Tool> ToolDyn for T`
+/// promotes every static tool to a dynamic one for free.
+///
+/// Implementing `ToolDyn` directly is the right move for tools whose
+/// names or schemas come from a server. For everything else, prefer
+/// [`Tool`] + the blanket impl: typed args, no manual JSON parsing.
 #[async_trait::async_trait]
 pub trait ToolDyn: Send + Sync {
+    /// Wire-visible name. The blanket impl returns
+    /// `T::NAME.to_string()`; manual impls (MCP) return the engine-
+    /// facing composed name (e.g. `mcp__time__get_current_time`).
     fn name(&self) -> String;
+    /// Tool definition the engine forwards to the provider.
     fn tool_definition(&self) -> ToolDefinition;
+    /// Dispatch a tool call. Errors that originate inside the tool
+    /// (bad args, exception during execution) come back as
+    /// [`ToolResultContent::Error`] so the model sees them as a tool
+    /// reply — never as `Err`. The `Result`-shaped surface for
+    /// transport-level failures lives on [`ToolRegistry::tool_call`].
     async fn call(&self, args: serde_json::Value) -> ToolResultContent;
 }
 
@@ -60,6 +128,7 @@ impl<T: Tool> ToolDyn for T {
 }
 
 impl ToolRegistry {
+    /// Build an empty registry with no tools and no active set.
     pub fn new() -> Self {
         Self {
             tools: IndexMap::new(),
@@ -67,6 +136,13 @@ impl ToolRegistry {
         }
     }
 
+    /// Look up `name` and dispatch the call. Returns
+    /// [`ToolRegistryError::NotFound`] when no tool with that name was
+    /// registered (the engine handles this in-band by feeding an
+    /// `Error` tool result back to the model rather than aborting the
+    /// run). Tool-internal failures come back inside the
+    /// [`ToolResultContent`] payload — they do not surface as `Err`
+    /// here.
     pub async fn tool_call(
         &self,
         name: &str,
@@ -80,6 +156,12 @@ impl ToolRegistry {
         Ok(tool.call(args).await)
     }
 
+    /// Iterate over the currently active tools in registration
+    /// (insertion) order. The engine uses this to assemble
+    /// [`ChatRequest::tools`] before each turn, so the model sees
+    /// tools in the order the builder registered them.
+    ///
+    /// [`ChatRequest::tools`]: ailoop_core::ChatRequest::tools
     pub fn active_tools(&self) -> impl Iterator<Item = &Arc<dyn ToolDyn>> {
         self.tools
             .iter()
@@ -87,6 +169,8 @@ impl ToolRegistry {
             .map(|(_, tool)| tool)
     }
 
+    /// Iterate over registered-but-inactive tools, in registration
+    /// order. The complement of [`active_tools`](Self::active_tools).
     pub fn inactive_tools(&self) -> impl Iterator<Item = &Arc<dyn ToolDyn>> {
         self.tools
             .iter()
@@ -94,6 +178,13 @@ impl ToolRegistry {
             .map(|(_, tool)| tool)
     }
 
+    /// Register `tool` and mark it active. Returns
+    /// [`ToolRegistryError::AlreadyRegistered`] when a tool with the
+    /// same wire name is already present — names are unique across
+    /// the registry. Auto-activation matches the convention that a
+    /// freshly registered tool should be reachable without a separate
+    /// activation step; capability filters can subtract from the
+    /// active set after the fact.
     pub fn register(&mut self, tool: Arc<dyn ToolDyn>) -> Result<(), ToolRegistryError> {
         let name = tool.tool_definition().name;
         if self.tools.contains_key(&name) {
@@ -105,6 +196,9 @@ impl ToolRegistry {
         Ok(())
     }
 
+    /// Add `tool_name` to the active set. Returns
+    /// [`ToolRegistryError::NotFound`] when the tool was never
+    /// registered. No-op when the tool is already active.
     pub fn activate_tool(&mut self, tool_name: &str) -> Result<(), ToolRegistryError> {
         if !self.tools.contains_key(tool_name) {
             return Err(ToolRegistryError::NotFound(tool_name.to_string()));
@@ -113,6 +207,11 @@ impl ToolRegistry {
         Ok(())
     }
 
+    /// Remove `tool_name` from the active set. Silent no-op for an
+    /// unknown name (asymmetric with
+    /// [`activate_tool`](Self::activate_tool), which errors): the
+    /// "tool is no longer active" state is the same whether the tool
+    /// exists or not, so the call is idempotent.
     pub fn deactivate_tool(&mut self, tool_name: &str) -> Result<(), ToolRegistryError> {
         self.active_tools.shift_remove(tool_name);
         Ok(())

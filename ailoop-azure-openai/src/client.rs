@@ -36,6 +36,12 @@ use crate::model::AzureOpenAIChatModel;
 /// ```
 #[async_trait::async_trait]
 pub trait TokenProvider: Send + Sync {
+    /// Return a bearer token suitable for the
+    /// `Authorization: Bearer <token>` header. The client invokes
+    /// this on every request and trusts the implementation to cache
+    /// internally — return cached values quickly when possible. Failed
+    /// fetches surface as [`AzureOpenAIError::Config`] (or any other
+    /// variant the implementation chooses).
     async fn token(&self) -> Result<String, AzureOpenAIError>;
 }
 
@@ -52,8 +58,15 @@ pub trait TokenProvider: Send + Sync {
 #[derive(Clone)]
 #[non_exhaustive]
 pub enum AzureOpenAIAuth {
+    /// Static API key; sent as `api-key: <key>`.
     ApiKey(String),
+    /// Static bearer token; sent as `Authorization: Bearer <token>`.
+    /// Token does not refresh; for any long-running process use
+    /// [`Provider`](Self::Provider) instead.
     Token(String),
+    /// Bearer token sourced fresh from a [`TokenProvider`] on every
+    /// request. The right choice for Microsoft Entra ID / managed
+    /// identity flows where tokens expire (~1h).
     Provider(Arc<dyn TokenProvider>),
 }
 
@@ -73,10 +86,20 @@ pub struct AzureOpenAIClient {
 }
 
 impl AzureOpenAIClient {
+    /// Environment variable [`from_env`](Self::from_env) reads for
+    /// the resource endpoint.
     pub const ENDPOINT_ENV: &'static str = "AZURE_OPENAI_ENDPOINT";
+    /// Environment variable [`from_env`](Self::from_env) reads when
+    /// using API-key auth.
     pub const API_KEY_ENV: &'static str = "AZURE_OPENAI_API_KEY";
+    /// Environment variable [`from_env`](Self::from_env) reads when
+    /// using static-bearer auth.
     pub const TOKEN_ENV: &'static str = "AZURE_OPENAI_TOKEN";
 
+    /// Build a client targeting `endpoint` with the supplied auth
+    /// strategy. `endpoint` is the Azure OpenAI resource root (e.g.
+    /// `https://my-resource.openai.azure.com`) — the `/openai/v1/...`
+    /// path is appended per request.
     pub fn new(endpoint: impl Into<String>, auth: AzureOpenAIAuth) -> Self {
         Self {
             http_client: HttpClient::new(),

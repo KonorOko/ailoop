@@ -1,3 +1,7 @@
+//! [`CompactionStrategy`] trait and the two built-in implementations.
+//! See [`TruncateStrategy`] (drop the prefix) and [`SummarizeStrategy`]
+//! (replace the prefix with a model-generated summary).
+
 use std::sync::Arc;
 
 use ailoop_core::{
@@ -19,21 +23,47 @@ use crate::errors::CompactionError;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CompactionOutput {
+    /// Post-compaction message vector, in chronological order. Includes
+    /// every pinned message from the input plus whatever tail the
+    /// strategy chose to keep.
     pub messages: Vec<Message>,
+    /// Post-compaction pin mask, parallel to [`Self::messages`]. Every
+    /// pinned input message must remain `true` here; new entries
+    /// (e.g. summary placeholders) are typically `false`.
     pub pinned: Vec<bool>,
 }
 
 impl CompactionOutput {
+    /// Bundle a freshly compacted history with its parallel pin mask.
+    /// `messages.len()` and `pinned.len()` must match — the
+    /// [`ContextManager`] asserts this in debug builds.
+    ///
+    /// [`ContextManager`]: crate::ContextManager
     pub fn new(messages: Vec<Message>, pinned: Vec<bool>) -> Self {
         Self { messages, pinned }
     }
 }
 
+/// User-implementable strategy for shrinking a [`ContextManager`]'s
+/// history when [`ContextManager::compact_if_needed`] runs.
+///
+/// Ships with two built-in implementations: [`TruncateStrategy`] drops
+/// the oldest unpinned messages until the budget fits;
+/// [`SummarizeStrategy`] replaces the dropped prefix with a model-
+/// generated summary so context is compressed rather than lost. Use
+/// `Box<dyn CompactionStrategy>` to swap algorithms at runtime, or
+/// implement the trait yourself for domain-specific reductions
+/// (sliding window, importance scoring, RAG-style summarization, …).
+///
+/// [`ContextManager`]: crate::ContextManager
+/// [`ContextManager::compact_if_needed`]: crate::ContextManager::compact_if_needed
 #[async_trait]
 pub trait CompactionStrategy: Send + Sync {
     /// Stable, machine-readable name of the strategy. Used by
-    /// `HistoryCompacted` events so callers can attribute compaction
+    /// [`HistoryCompacted`] events so callers can attribute compaction
     /// to a specific algorithm in logs/metrics.
+    ///
+    /// [`HistoryCompacted`]: ailoop_core::StreamChunk::HistoryCompacted
     fn name(&self) -> &'static str;
 
     /// Compact `messages` into a smaller history.
@@ -55,6 +85,12 @@ pub trait CompactionStrategy: Send + Sync {
     ) -> Result<CompactionOutput, CompactionError>;
 }
 
+/// Default [`CompactionStrategy`]: drop the oldest unpinned messages
+/// until the preserved tail starts at a safe `User`-without-
+/// `ToolResult` boundary. Pinned messages from the dropped prefix
+/// survive verbatim at their relative position; the cut never strands
+/// a `ToolResult` from its `ToolCall`. Reports under
+/// [`CompactionStrategy::name`] as `"truncate"`.
 pub struct TruncateStrategy;
 
 #[async_trait]
@@ -154,6 +190,9 @@ impl<M> SummarizeStrategy<M>
 where
     M: CompletionModel + Send + Sync + 'static,
 {
+    /// Build a strategy that calls `model` to summarize dropped
+    /// history. Defaults: [`DEFAULT_SUMMARIZER_PROMPT`] as the system
+    /// prompt and `max_tokens = 1024` for the summary output.
     pub fn new(model: Arc<M>) -> Self {
         Self {
             model,
@@ -162,11 +201,17 @@ where
         }
     }
 
+    /// Replace the system prompt fed to the summarizer model. The
+    /// default ([`DEFAULT_SUMMARIZER_PROMPT`]) is intentionally terse
+    /// so the transcript dominates the `max_tokens` budget.
     pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.summarizer_prompt = prompt.into();
         self
     }
 
+    /// Cap on the summary's output token count. Lower values produce
+    /// a tighter summary at the cost of detail; higher values risk
+    /// the summary itself blowing the budget on the next compaction.
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
         self

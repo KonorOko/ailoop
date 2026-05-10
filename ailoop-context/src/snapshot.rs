@@ -1,3 +1,6 @@
+//! [`ConversationSnapshot`] — versioned wire format used by
+//! [`HistoryStore`](crate::HistoryStore) backends.
+
 use ailoop_core::Message;
 use serde::{Deserialize, Serialize};
 
@@ -18,8 +21,17 @@ use crate::errors::FromMessagesError;
 #[serde(try_from = "RawConversationSnapshot")]
 #[non_exhaustive]
 pub struct ConversationSnapshot {
+    /// Wire-format version. Set by [`ConversationSnapshot::new`] to
+    /// [`ConversationSnapshot::VERSION`]; deserializing any other
+    /// value rejects the payload at parse time so callers fail loudly
+    /// on a forward-incompatible file.
     pub version: u32,
+    /// History messages, in chronological order.
     pub messages: Vec<Message>,
+    /// Parallel pin mask — `pinned[i]` is the survivor flag for
+    /// `messages[i]`. Same length as `messages`; the
+    /// `#[serde(try_from)]` arm rejects payloads where the two
+    /// vectors disagree, so post-deserialize the invariant holds.
     pub pinned: Vec<bool>,
 }
 
@@ -31,8 +43,16 @@ struct RawConversationSnapshot {
 }
 
 impl ConversationSnapshot {
+    /// Current wire-format version. Bumped when the on-disk shape
+    /// changes in a backward-incompatible way; older payloads then
+    /// fail to deserialize until a migration step lands.
     pub const VERSION: u32 = 1;
 
+    /// Bundle `messages` and `pinned` into a snapshot tagged with
+    /// the current [`VERSION`](Self::VERSION). Returns
+    /// [`FromMessagesError::LengthMismatch`] when the two vectors
+    /// disagree — same invariant the deserialize path enforces, so
+    /// snapshots produced via this constructor always round-trip.
     pub fn new(messages: Vec<Message>, pinned: Vec<bool>) -> Result<Self, FromMessagesError> {
         if messages.len() != pinned.len() {
             return Err(FromMessagesError::LengthMismatch {

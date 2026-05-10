@@ -4,7 +4,7 @@ use ailoop_core::{
     RunId, StreamChunk, ToolChoice, ToolTag, Usage,
 };
 use ailoop_prompts::{Prompt, PromptSection};
-use ailoop_tools::{ToolRegistry, registry::ToolDyn};
+use ailoop_tools::{ToolDyn, ToolRegistry};
 use futures::{Stream, StreamExt, stream::BoxStream};
 use serde_json::Value;
 use std::{

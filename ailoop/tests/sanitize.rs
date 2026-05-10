@@ -12,7 +12,7 @@ use ailoop_core::{
     AssistantBlock, ChatMiddleware, ChatRequest, FinishReason, RunConfig, RunId, StepId,
     StreamChunk, Usage, UserBlock,
 };
-use ailoop_tools::{ToolRegistry, registry::ToolDyn};
+use ailoop_tools::{ToolDyn, ToolRegistry};
 use futures::StreamExt;
 use serde_json::{Value, json};
 
