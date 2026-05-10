@@ -7,5 +7,5 @@ mod request;
 mod stream;
 
 pub use client::{AzureOpenAIAuth, AzureOpenAIClient, TokenProvider};
-pub use errors::{ApiErrorKind, AzureOpenAIError};
+pub use errors::{AzureOpenAIApiErrorKind, AzureOpenAIError};
 pub use model::AzureOpenAIChatModel;

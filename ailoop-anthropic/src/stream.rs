@@ -1,4 +1,4 @@
-use crate::errors::{AnthropicError, ApiErrorKind};
+use crate::errors::{AnthropicError, AnthropicApiErrorKind};
 use crate::events::{AnthropicBlock, AnthropicDelta, AnthropicEvent};
 
 use ailoop_core::{FinishReason, StreamChunk, Usage};
@@ -143,7 +143,7 @@ where
                 AnthropicEvent::Ping => { }
                 AnthropicEvent::Error { error } => {
                     Err(AnthropicError::Provider {
-                        kind: ApiErrorKind::from_error_type(&error.error_type),
+                        kind: AnthropicApiErrorKind::from_error_type(&error.error_type),
                         message: error.message,
                     })?;
                 }
@@ -375,7 +375,7 @@ mod tests {
         );
     }
 
-    /// Mid-stream `error` events must be classified into `ApiErrorKind`
+    /// Mid-stream `error` events must be classified into `AnthropicApiErrorKind`
     /// so `RetryingModel<M>` can match on `Overloaded` without parsing
     /// strings — same guarantee the HTTP path provides via `Api { kind }`.
     #[tokio::test]
@@ -405,7 +405,7 @@ mod tests {
 
         match last.expect("stream must yield the error") {
             Err(AnthropicError::Provider { kind, message }) => {
-                assert_eq!(kind, ApiErrorKind::Overloaded);
+                assert_eq!(kind, AnthropicApiErrorKind::Overloaded);
                 assert_eq!(message, "busy");
             }
             other => panic!("expected Provider{{Overloaded, ..}}, got {other:?}"),

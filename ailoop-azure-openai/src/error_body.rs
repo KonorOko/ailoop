@@ -3,7 +3,7 @@ use std::time::Duration;
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
 
-use crate::errors::{ApiErrorKind, AzureOpenAIError};
+use crate::errors::{AzureOpenAIApiErrorKind, AzureOpenAIError};
 
 /// Top-level shape of Azure OpenAI's HTTP error response:
 /// `{"error":{"code":"...","message":"...","type":"...","param":null}}`.
@@ -54,7 +54,9 @@ pub(crate) fn classify_http_error(
     match serde_json::from_str::<AzureApiErrorBody>(&body) {
         Ok(parsed) => AzureOpenAIError::Api {
             status,
-            kind: ApiErrorKind::from_error_code(parsed.error.code.as_deref().unwrap_or("")),
+            kind: AzureOpenAIApiErrorKind::from_error_code(
+                parsed.error.code.as_deref().unwrap_or(""),
+            ),
             message: parsed.error.message,
             retry_after,
         },
@@ -65,8 +67,8 @@ pub(crate) fn classify_http_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::StatusCode;
     use reqwest::header::{HeaderMap, HeaderValue};
+    use reqwest::StatusCode;
 
     #[test]
     fn parses_retry_after_ms_with_higher_priority() {
@@ -107,7 +109,7 @@ mod tests {
                 retry_after,
             } => {
                 assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-                assert_eq!(kind, ApiErrorKind::RateLimit);
+                assert_eq!(kind, AzureOpenAIApiErrorKind::RateLimit);
                 assert_eq!(message, "slow down");
                 assert_eq!(retry_after, Some(Duration::from_millis(2500)));
             }
@@ -123,7 +125,7 @@ mod tests {
         assert!(matches!(
             err,
             AzureOpenAIError::Api {
-                kind: ApiErrorKind::DeploymentNotFound,
+                kind: AzureOpenAIApiErrorKind::DeploymentNotFound,
                 ..
             }
         ));
@@ -136,7 +138,7 @@ mod tests {
         assert!(matches!(
             err,
             AzureOpenAIError::Api {
-                kind: ApiErrorKind::ContentFilter,
+                kind: AzureOpenAIApiErrorKind::ContentFilter,
                 ..
             }
         ));
@@ -148,7 +150,7 @@ mod tests {
         let err = classify_http_error(StatusCode::IM_A_TEAPOT, body, None);
         match err {
             AzureOpenAIError::Api { kind, .. } => {
-                assert_eq!(kind, ApiErrorKind::Other("FutureCode".into()));
+                assert_eq!(kind, AzureOpenAIApiErrorKind::Other("FutureCode".into()));
             }
             other => panic!("expected Api variant, got {other:?}"),
         }
@@ -161,7 +163,7 @@ mod tests {
         let err = classify_http_error(StatusCode::BAD_REQUEST, body, None);
         match err {
             AzureOpenAIError::Api { kind, message, .. } => {
-                assert_eq!(kind, ApiErrorKind::Other(String::new()));
+                assert_eq!(kind, AzureOpenAIApiErrorKind::Other(String::new()));
                 assert_eq!(message, "some message");
             }
             other => panic!("expected Api variant, got {other:?}"),

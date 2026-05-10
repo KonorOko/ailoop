@@ -3,7 +3,7 @@ use std::time::Duration;
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
 
-use crate::errors::{AnthropicError, ApiErrorKind};
+use crate::errors::{AnthropicApiErrorKind, AnthropicError};
 
 /// Top-level shape of Anthropic's HTTP error response:
 /// `{"type":"error","error":{"type":"...","message":"..."}}`.
@@ -41,7 +41,7 @@ pub(crate) fn classify_http_error(
     match serde_json::from_str::<AnthropicApiErrorBody>(&body) {
         Ok(parsed) => AnthropicError::Api {
             status,
-            kind: ApiErrorKind::from_error_type(&parsed.error.error_type),
+            kind: AnthropicApiErrorKind::from_error_type(&parsed.error.error_type),
             message: parsed.error.message,
             retry_after,
         },
@@ -52,8 +52,8 @@ pub(crate) fn classify_http_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::StatusCode;
     use reqwest::header::{HeaderMap, HeaderValue};
+    use reqwest::StatusCode;
 
     #[test]
     fn parses_retry_after_seconds() {
@@ -98,7 +98,7 @@ mod tests {
                 retry_after,
             } => {
                 assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-                assert_eq!(kind, ApiErrorKind::RateLimit);
+                assert_eq!(kind, AnthropicApiErrorKind::RateLimit);
                 assert_eq!(message, "slow down");
                 assert_eq!(retry_after, Some(Duration::from_secs(15)));
             }
@@ -114,7 +114,7 @@ mod tests {
         assert!(matches!(
             err,
             AnthropicError::Api {
-                kind: ApiErrorKind::Overloaded,
+                kind: AnthropicApiErrorKind::Overloaded,
                 ..
             }
         ));
@@ -127,7 +127,10 @@ mod tests {
         let err = classify_http_error(StatusCode::IM_A_TEAPOT, body, None);
         match err {
             AnthropicError::Api { kind, .. } => {
-                assert_eq!(kind, ApiErrorKind::Other("future_error_kind".into()));
+                assert_eq!(
+                    kind,
+                    AnthropicApiErrorKind::Other("future_error_kind".into())
+                );
             }
             other => panic!("expected Api variant, got {other:?}"),
         }

@@ -14,7 +14,7 @@ use reqwest::StatusCode;
 /// `RetryingModel<M>`) never lose information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum ApiErrorKind {
+pub enum AzureOpenAIApiErrorKind {
     RateLimit,
     InvalidRequest,
     ContentFilter,
@@ -26,7 +26,7 @@ pub enum ApiErrorKind {
     Other(String),
 }
 
-impl ApiErrorKind {
+impl AzureOpenAIApiErrorKind {
     /// Map Azure's `error.code` strings to typed variants. Azure mixes
     /// snake_case (`invalid_request_error`) with PascalCase
     /// (`DeploymentNotFound`); both forms are matched. Unknown codes
@@ -59,7 +59,7 @@ pub enum AzureOpenAIError {
     #[error("Azure OpenAI API error ({status}, {kind:?}): {message}")]
     Api {
         status: StatusCode,
-        kind: ApiErrorKind,
+        kind: AzureOpenAIApiErrorKind,
         message: String,
         retry_after: Option<Duration>,
     },
@@ -85,21 +85,24 @@ pub enum AzureOpenAIError {
     Config(String),
 }
 
-/// Map an Azure-typed `ApiErrorKind` to a retry decision. Azure's code
+/// Map an Azure-typed `AzureOpenAIApiErrorKind` to a retry decision. Azure's code
 /// taxonomy is less stable than Anthropic's, so `Other(_)` is treated
 /// conservatively as transient — better an extra retry than to strand a
 /// request when the API ships a new code we haven't typed yet.
-fn classify_kind(kind: &ApiErrorKind, retry_after: Option<Duration>) -> RetryClassification {
+fn classify_kind(
+    kind: &AzureOpenAIApiErrorKind,
+    retry_after: Option<Duration>,
+) -> RetryClassification {
     match kind {
-        ApiErrorKind::RateLimit | ApiErrorKind::ServerError | ApiErrorKind::Other(_) => {
-            RetryClassification::Transient { retry_after }
-        }
-        ApiErrorKind::Authentication
-        | ApiErrorKind::Permission
-        | ApiErrorKind::InvalidRequest
-        | ApiErrorKind::NotFound
-        | ApiErrorKind::DeploymentNotFound
-        | ApiErrorKind::ContentFilter => RetryClassification::Permanent,
+        AzureOpenAIApiErrorKind::RateLimit
+        | AzureOpenAIApiErrorKind::ServerError
+        | AzureOpenAIApiErrorKind::Other(_) => RetryClassification::Transient { retry_after },
+        AzureOpenAIApiErrorKind::Authentication
+        | AzureOpenAIApiErrorKind::Permission
+        | AzureOpenAIApiErrorKind::InvalidRequest
+        | AzureOpenAIApiErrorKind::NotFound
+        | AzureOpenAIApiErrorKind::DeploymentNotFound
+        | AzureOpenAIApiErrorKind::ContentFilter => RetryClassification::Permanent,
     }
 }
 
@@ -137,7 +140,7 @@ mod tests {
     fn rate_limit_with_retry_after_is_transient() {
         let err = AzureOpenAIError::Api {
             status: StatusCode::TOO_MANY_REQUESTS,
-            kind: ApiErrorKind::RateLimit,
+            kind: AzureOpenAIApiErrorKind::RateLimit,
             message: "throttled".into(),
             retry_after: Some(Duration::from_millis(750)),
         };
@@ -153,7 +156,7 @@ mod tests {
     fn server_error_is_transient() {
         let err = AzureOpenAIError::Api {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            kind: ApiErrorKind::ServerError,
+            kind: AzureOpenAIApiErrorKind::ServerError,
             message: "boom".into(),
             retry_after: None,
         };
@@ -167,7 +170,7 @@ mod tests {
     fn authentication_is_permanent() {
         let err = AzureOpenAIError::Api {
             status: StatusCode::UNAUTHORIZED,
-            kind: ApiErrorKind::Authentication,
+            kind: AzureOpenAIApiErrorKind::Authentication,
             message: "bad key".into(),
             retry_after: None,
         };
@@ -178,7 +181,7 @@ mod tests {
     fn deployment_not_found_is_permanent() {
         let err = AzureOpenAIError::Api {
             status: StatusCode::NOT_FOUND,
-            kind: ApiErrorKind::DeploymentNotFound,
+            kind: AzureOpenAIApiErrorKind::DeploymentNotFound,
             message: "no such deployment".into(),
             retry_after: None,
         };
@@ -189,7 +192,7 @@ mod tests {
     fn unknown_kind_is_conservatively_transient() {
         let err = AzureOpenAIError::Api {
             status: StatusCode::BAD_GATEWAY,
-            kind: ApiErrorKind::Other("WeirdNewCode".into()),
+            kind: AzureOpenAIApiErrorKind::Other("WeirdNewCode".into()),
             message: "?".into(),
             retry_after: None,
         };

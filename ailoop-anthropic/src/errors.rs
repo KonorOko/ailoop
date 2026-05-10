@@ -11,7 +11,7 @@ use reqwest::StatusCode;
 /// `Overloaded` and `RateLimit` to drive backoff, and ignore the rest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum ApiErrorKind {
+pub enum AnthropicApiErrorKind {
     Overloaded,
     RateLimit,
     InvalidRequest,
@@ -23,7 +23,7 @@ pub enum ApiErrorKind {
     Other(String),
 }
 
-impl ApiErrorKind {
+impl AnthropicApiErrorKind {
     /// Map Anthropic's documented `error.type` strings to typed variants.
     /// Unknown types are captured as `Other(s)` so callers can still log
     /// them and so we never silently drop information.
@@ -55,7 +55,7 @@ pub enum AnthropicError {
     #[error("Anthropic API error ({status}, {kind:?}): {message}")]
     Api {
         status: StatusCode,
-        kind: ApiErrorKind,
+        kind: AnthropicApiErrorKind,
         message: String,
         retry_after: Option<Duration>,
     },
@@ -75,29 +75,35 @@ pub enum AnthropicError {
     /// Mid-stream error event delivered over SSE. No HTTP headers are
     /// available at this layer, so `retry_after` is intentionally absent;
     /// the typed `kind` lets callers (e.g. `RetryingModel<M>`) match on
-    /// `ApiErrorKind::Overloaded` without parsing strings.
+    /// `AnthropicApiErrorKind::Overloaded` without parsing strings.
     #[error("Anthropic error event ({kind:?}): {message}")]
-    Provider { kind: ApiErrorKind, message: String },
+    Provider {
+        kind: AnthropicApiErrorKind,
+        message: String,
+    },
 }
 
-/// Map an Anthropic-typed `ApiErrorKind` to a retry decision. Used both
+/// Map an Anthropic-typed `AnthropicApiErrorKind` to a retry decision. Used both
 /// for HTTP-envelope errors (where `retry_after` may be `Some`) and for
 /// SSE `Provider` errors (where it is always `None`).
-fn classify_kind(kind: &ApiErrorKind, retry_after: Option<Duration>) -> RetryClassification {
+fn classify_kind(
+    kind: &AnthropicApiErrorKind,
+    retry_after: Option<Duration>,
+) -> RetryClassification {
     match kind {
         // Overloaded / rate limit / generic api_error are the canonical
         // transient signals on Anthropic. `Other(_)` is conservative —
         // unknown kinds default to transient so we don't strand a request
         // on a future error type that's actually retryable.
-        ApiErrorKind::Overloaded
-        | ApiErrorKind::RateLimit
-        | ApiErrorKind::Api
-        | ApiErrorKind::Other(_) => RetryClassification::Transient { retry_after },
-        ApiErrorKind::Authentication
-        | ApiErrorKind::Permission
-        | ApiErrorKind::InvalidRequest
-        | ApiErrorKind::NotFound
-        | ApiErrorKind::RequestTooLarge => RetryClassification::Permanent,
+        AnthropicApiErrorKind::Overloaded
+        | AnthropicApiErrorKind::RateLimit
+        | AnthropicApiErrorKind::Api
+        | AnthropicApiErrorKind::Other(_) => RetryClassification::Transient { retry_after },
+        AnthropicApiErrorKind::Authentication
+        | AnthropicApiErrorKind::Permission
+        | AnthropicApiErrorKind::InvalidRequest
+        | AnthropicApiErrorKind::NotFound
+        | AnthropicApiErrorKind::RequestTooLarge => RetryClassification::Permanent,
     }
 }
 
@@ -130,7 +136,7 @@ mod tests {
     fn rate_limit_with_retry_after_is_transient() {
         let err = AnthropicError::Api {
             status: StatusCode::TOO_MANY_REQUESTS,
-            kind: ApiErrorKind::RateLimit,
+            kind: AnthropicApiErrorKind::RateLimit,
             message: "slow down".into(),
             retry_after: Some(Duration::from_secs(2)),
         };
@@ -145,7 +151,7 @@ mod tests {
     #[test]
     fn overloaded_provider_event_is_transient_without_retry_after() {
         let err = AnthropicError::Provider {
-            kind: ApiErrorKind::Overloaded,
+            kind: AnthropicApiErrorKind::Overloaded,
             message: "overloaded".into(),
         };
         assert_eq!(
@@ -158,7 +164,7 @@ mod tests {
     fn authentication_is_permanent() {
         let err = AnthropicError::Api {
             status: StatusCode::UNAUTHORIZED,
-            kind: ApiErrorKind::Authentication,
+            kind: AnthropicApiErrorKind::Authentication,
             message: "bad key".into(),
             retry_after: None,
         };
@@ -169,7 +175,7 @@ mod tests {
     fn unknown_kind_is_conservatively_transient() {
         let err = AnthropicError::Api {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            kind: ApiErrorKind::Other("future_kind".into()),
+            kind: AnthropicApiErrorKind::Other("future_kind".into()),
             message: "?".into(),
             retry_after: None,
         };
