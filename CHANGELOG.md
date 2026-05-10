@@ -8,6 +8,84 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [1.0.0-rc.2] — 2026-05-10
+
+### Added
+
+- `ToolContext` and `ToolActivation` (`ailoop-tools`): per-dispatch
+  context handed to every tool handler, exposing the run/step ids and
+  a handle into the per-run active tool set. Tools that need to flip
+  other tools on or off mid-run (deferred-tools / `search_tools`-style
+  meta-tools) can call `ctx.tools().activate(name)` /
+  `ctx.tools().list_inactive()` instead of threading
+  `Arc<Mutex<HashSet<String>>>` through middleware.
+- `ConversationBuilder::initial_active_tools(...)`: restrict the
+  initial active set to a named subset. Other registered tools stay
+  in the catalog and can be activated at runtime via the new
+  `ToolContext` handle. Composes with `with_capabilities` (capability
+  filter applies first).
+- `ToolRegistry::tool_call_with_ctx`, `ToolRegistry::catalog_arc`,
+  `ToolRegistry::snapshot_active`: lower-level building blocks the
+  engine uses to thread `ToolContext` through dispatch.
+- `examples/deferred-tools`: end-to-end demonstration of the
+  `search_tools` pattern.
+
+### Changed (BREAKING)
+
+- `Tool::call` and `ToolDyn::call` now take an extra `&ToolContext`
+  parameter. The `#[ailoop_tool]` macro absorbs this transparently
+  for handlers that don't need it; functions that do need it can opt
+  in by adding a trailing `ctx: &ToolContext` parameter to the
+  function signature, and the macro routes the engine-supplied
+  context through.
+- Manual `impl ToolDyn for ...` (MCP-style adapters, plugin loaders)
+  must add the new `ctx: &ToolContext` parameter to `call`. Handlers
+  that don't use it can ignore the argument (`_ctx`).
+- `ToolRegistry::tool_call(name, args)` keeps the same signature for
+  standalone callers; internally it now constructs a detached
+  `ToolContext`. Engine-level dispatch goes through the new
+  `tool_call_with_ctx`.
+
+### Migration
+
+```rust
+// Before
+impl ToolDyn for MyTool {
+    async fn call(&self, args: Value) -> ToolResultContent { ... }
+}
+
+// After
+use ailoop::ToolContext;
+impl ToolDyn for MyTool {
+    async fn call(&self, args: Value, _ctx: &ToolContext) -> ToolResultContent { ... }
+}
+```
+
+For the deferred-tools pattern, register every tool but expose only a
+meta-tool initially:
+
+```rust
+let mut chat = Conversation::builder(model)
+    .tool(SearchTools)
+    .tool(Add).tool(Multiply).tool(Haversine)
+    .initial_active_tools(["search_tools"])
+    .build()?;
+```
+
+The `search_tools` handler reaches the active set through `ctx`:
+
+```rust
+#[ailoop_tool(description = "Activate tools matching a query")]
+async fn search_tools(query: String, ctx: &ToolContext) -> String {
+    for def in ctx.tools().list_inactive() {
+        if def.name.contains(&query) {
+            ctx.tools().activate(&def.name).ok();
+        }
+    }
+    "done".into()
+}
+```
+
 ## [1.0.0-rc.1] — 2026-05-10
 
 First release candidate. ailoop iterated under `0.1.x` without

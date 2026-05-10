@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ailoop"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "ailoop-context",
  "ailoop-core",
@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-anthropic"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "ailoop-core",
  "async-stream",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-azure-openai"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "ailoop-core",
  "async-stream",
@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-context"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "ailoop-core",
  "async-trait",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-core"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "async-trait",
  "futures",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-derive"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "convert_case",
  "proc-macro-crate",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-mcp"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "ailoop-core",
  "ailoop-tools",
@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-prompts"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "ailoop-core",
  "async-trait",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-tools"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "ailoop-core",
  "async-trait",
@@ -348,6 +348,17 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "deferred-tools"
+version = "0.1.0"
+dependencies = [
+ "ailoop",
+ "ailoop-anthropic",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "displaydoc"

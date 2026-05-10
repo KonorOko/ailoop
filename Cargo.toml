@@ -10,6 +10,7 @@ members = [
     "adapters/azure-openai",
     "adapters/mcp",
     "examples/basic-chat",
+    "examples/deferred-tools",
     "examples/mcp-time",
     "examples/persistent-chat",
     "examples/tool-use",
@@ -17,7 +18,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["ailoop authors"]
@@ -25,15 +26,15 @@ repository = "https://github.com/KonorOko/ailoop"
 homepage = "https://github.com/KonorOko/ailoop"
 
 [workspace.dependencies]
-ailoop = { path = "ailoop", version = "1.0.0-rc.1" }
-ailoop-core = { path = "ailoop-core", version = "1.0.0-rc.1" }
-ailoop-prompts = { path = "ailoop-prompts", version = "1.0.0-rc.1" }
-ailoop-context = { path = "ailoop-context", version = "1.0.0-rc.1" }
-ailoop-tools = { path = "ailoop-tools", version = "1.0.0-rc.1" }
-ailoop-anthropic = { path = "adapters/anthropic", version = "1.0.0-rc.1" }
-ailoop-azure-openai = { path = "adapters/azure-openai", version = "1.0.0-rc.1" }
-ailoop-derive = { path = "ailoop-derive", version = "1.0.0-rc.1" }
-ailoop-mcp = { path = "adapters/mcp", version = "1.0.0-rc.1" }
+ailoop = { path = "ailoop", version = "1.0.0-rc.2" }
+ailoop-core = { path = "ailoop-core", version = "1.0.0-rc.2" }
+ailoop-prompts = { path = "ailoop-prompts", version = "1.0.0-rc.2" }
+ailoop-context = { path = "ailoop-context", version = "1.0.0-rc.2" }
+ailoop-tools = { path = "ailoop-tools", version = "1.0.0-rc.2" }
+ailoop-anthropic = { path = "adapters/anthropic", version = "1.0.0-rc.2" }
+ailoop-azure-openai = { path = "adapters/azure-openai", version = "1.0.0-rc.2" }
+ailoop-derive = { path = "ailoop-derive", version = "1.0.0-rc.2" }
+ailoop-mcp = { path = "adapters/mcp", version = "1.0.0-rc.2" }
 
 async-trait = "0.1.89"
 async-stream = "0.3.6"

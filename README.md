@@ -75,6 +75,7 @@ works).
 | -------------------------------------------------------- | ----------------------------------------------------------- |
 | [`basic-chat`](examples/basic-chat/src/main.rs)          | Minimal one-shot chat with no tools                         |
 | [`tool-use`](examples/tool-use/src/main.rs)              | A typed `#[ailoop_tool]` that the model calls when needed   |
+| [`deferred-tools`](examples/deferred-tools/src/main.rs)  | Hide most tools behind a `search_tools` meta-tool that the model uses to activate them on demand |
 | [`mcp-time`](examples/mcp-time/src/main.rs)              | Tools discovered from a real MCP server (`mcp-server-time`) |
 | [`persistent-chat`](examples/persistent-chat/src/main.rs) | Snapshot / restore a `Conversation` across process restarts |
 
@@ -82,6 +83,7 @@ works).
 export ANTHROPIC_API_KEY=sk-ant-...
 cargo run -p basic-chat
 cargo run -p tool-use
+cargo run -p deferred-tools
 cargo run -p mcp-time         # also requires `uvx` on PATH (`pip install uv`)
 cargo run -p persistent-chat
 ```
