@@ -1,3 +1,6 @@
+//! Conversation message model: [`Message`], its block enums, and the
+//! [`SystemPrompt`] / [`CacheControl`] support types.
+
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -21,20 +24,45 @@ pub enum CacheControl {
     EphemeralWithTtl(Duration),
 }
 
+/// One turn in the conversation history exchanged with a provider.
+///
+/// `Message` is the wire shape: every provider adapter maps this enum
+/// to its own block model (Anthropic Messages, OpenAI Chat
+/// Completions, etc.). Only the user and assistant roles live here —
+/// system instructions are passed separately through
+/// [`crate::ChatRequest::system_prompt`] because most providers
+/// represent them out-of-band.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Message {
-    User { blocks: Vec<UserBlock> },
-    Assistant { blocks: Vec<AssistantBlock> },
+    /// A user-authored turn: free text, tool results from the previous
+    /// step, or a mix.
+    User {
+        /// Blocks rendered in order. Tool results live here because, on
+        /// the wire, they are sent back to the model as user content.
+        blocks: Vec<UserBlock>,
+    },
+    /// A turn produced by the model: visible text, tool calls,
+    /// reasoning. Tool results are in the *next* `User` turn.
+    Assistant {
+        /// Blocks rendered in order. Ordering is provider-significant
+        /// for reasoning + tool-use chains (Anthropic extended
+        /// thinking).
+        blocks: Vec<AssistantBlock>,
+    },
 }
 
 impl Message {
+    /// Shorthand for a user turn containing a single text block.
     pub fn user(text: impl Into<String>) -> Message {
         Message::User {
             blocks: vec![UserBlock::text(text)],
         }
     }
 
+    /// Shorthand for an assistant turn containing a single text block.
+    /// Use the [`Message::Assistant`] variant directly when seeding
+    /// history with tool calls or reasoning.
     pub fn assistant_text(text: impl Into<String>) -> Message {
         Message::Assistant {
             blocks: vec![AssistantBlock::text(text)],
@@ -42,24 +70,41 @@ impl Message {
     }
 }
 
+/// One block inside a [`Message::User`] turn.
+///
+/// Free user text and tool results both live here because providers
+/// route tool results back through the user role on the wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum UserBlock {
+    /// Free user text.
     Text {
+        /// Text content.
         text: String,
-        /// Per-request hint; not part of persisted conversation state.
+        /// Per-request cache hint. `#[serde(skip)]` — the cache
+        /// breakpoint is a per-call directive to the provider, not
+        /// part of the persisted conversation state, so it is dropped
+        /// on snapshot round-trip and restored as `None`.
         #[serde(skip, default)]
         cache_control: Option<CacheControl>,
     },
+    /// Result of a tool invocation paired with the assistant
+    /// [`AssistantBlock::ToolCall`] of the previous turn (matched by
+    /// id).
     ToolResult {
+        /// Matches the `id` on the originating [`AssistantBlock::ToolCall`].
         call_id: String,
+        /// The tool's reply, distinguishing successful output from
+        /// tool-reported errors.
         content: ToolResultContent,
+        /// See [`UserBlock::Text::cache_control`].
         #[serde(skip, default)]
         cache_control: Option<CacheControl>,
     },
 }
 
 impl UserBlock {
+    /// Build a [`UserBlock::Text`] with no cache breakpoint.
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text {
             text: text.into(),
@@ -67,6 +112,11 @@ impl UserBlock {
         }
     }
 
+    /// Build a [`UserBlock::ToolResult`] with no cache breakpoint. The
+    /// `content` argument is anything that converts into
+    /// [`ToolResultContent`] — `String` and `&str` map to the
+    /// `Text` variant by default; pass [`ToolResultContent::Error`]
+    /// explicitly to flag a tool-reported failure.
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<ToolResultContent>) -> Self {
         Self::ToolResult {
             call_id: call_id.into(),
@@ -89,6 +139,7 @@ impl UserBlock {
         self
     }
 
+    /// Read the current cache breakpoint, if any.
     pub fn cache_control(&self) -> Option<&CacheControl> {
         match self {
             Self::Text { cache_control, .. } | Self::ToolResult { cache_control, .. } => {
@@ -98,18 +149,36 @@ impl UserBlock {
     }
 }
 
+/// One block inside a [`Message::Assistant`] turn.
+///
+/// Block ordering is preserved on replay because some providers
+/// (Anthropic extended thinking) require the original sequence on
+/// every subsequent request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AssistantBlock {
+    /// Visible model-authored text.
     Text {
+        /// Text content.
         text: String,
+        /// See [`UserBlock::Text::cache_control`].
         #[serde(skip, default)]
         cache_control: Option<CacheControl>,
     },
+    /// A tool invocation request from the model. Pair with a
+    /// [`UserBlock::ToolResult`] in the next user turn that matches
+    /// `id` to `call_id`.
     ToolCall {
+        /// Provider-assigned id; mirrors back as `call_id` on the
+        /// matching [`UserBlock::ToolResult`].
         id: String,
+        /// Tool name as registered in the [`crate::ChatRequest::tools`]
+        /// list.
         name: String,
+        /// JSON arguments. Adapters serialize this through to the
+        /// provider verbatim; the engine does not validate the schema.
         args: serde_json::Value,
+        /// See [`UserBlock::Text::cache_control`].
         #[serde(skip, default)]
         cache_control: Option<CacheControl>,
     },
@@ -123,16 +192,24 @@ pub enum AssistantBlock {
     /// `redacted_thinking` blocks. Place breakpoints on adjacent text or
     /// tool blocks instead.
     Reasoning {
+        /// Visible reasoning text.
         text: String,
+        /// Provider signature (Anthropic extended thinking). Replay
+        /// verbatim on subsequent turns when tools are involved;
+        /// `None` for providers without a signature concept.
         signature: Option<String>,
     },
     /// Opaque reasoning block whose content the provider chose to hide.
     /// `data` is verbatim provider material — store it untouched and replay
     /// it back when the next request continues a tool-use chain.
-    RedactedReasoning { data: String },
+    RedactedReasoning {
+        /// Verbatim provider payload; treat as opaque bytes.
+        data: String,
+    },
 }
 
 impl AssistantBlock {
+    /// Build an [`AssistantBlock::Text`] with no cache breakpoint.
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text {
             text: text.into(),
@@ -140,6 +217,7 @@ impl AssistantBlock {
         }
     }
 
+    /// Build an [`AssistantBlock::ToolCall`] with no cache breakpoint.
     pub fn tool_call(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -169,6 +247,8 @@ impl AssistantBlock {
         self
     }
 
+    /// Read the current cache breakpoint. Always `None` for the
+    /// reasoning variants (they do not carry breakpoints on the wire).
     pub fn cache_control(&self) -> Option<&CacheControl> {
         match self {
             Self::Text { cache_control, .. } | Self::ToolCall { cache_control, .. } => {
@@ -179,10 +259,25 @@ impl AssistantBlock {
     }
 }
 
+/// Content of a tool reply sent back to the model in a
+/// [`UserBlock::ToolResult`].
+///
+/// `Error` is **not** a Rust [`Result::Err`] — both variants represent
+/// successful tool calls whose outcome the engine relays to the model.
+/// `Text` is a normal reply; `Error` flags the reply as a failure the
+/// model should account for (e.g. "the API returned 404"), and adapters
+/// pass that flag to the provider when supported (Anthropic
+/// `is_error: true`). Engine-level errors (panic in the handler,
+/// arguments that don't deserialize, registry lookup miss) are
+/// converted to a synthesized `Error` reply so the loop can continue;
+/// transport errors propagate through `Result` channels instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ToolResultContent {
+    /// Successful tool reply.
     Text(String),
+    /// Tool reply flagged as an error to the model. See the type-level
+    /// note for the distinction from [`Result::Err`].
     Error(String),
 }
 
@@ -207,18 +302,28 @@ impl From<&str> for ToolResultContent {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum SystemPrompt {
+    /// Single string passed to the provider as-is. The default for
+    /// callers that don't care about prompt caching; matches `From<&str>`
+    /// / `From<String>`.
     Plain(String),
+    /// Sequence of blocks with optional per-block cache breakpoints.
+    /// Anthropic emits this as the wire `system` array; providers
+    /// without per-block caching concatenate the texts.
     Blocks(Vec<SystemBlock>),
 }
 
+/// One entry inside a [`SystemPrompt::Blocks`] sequence.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SystemBlock {
+    /// Text content of this block.
     pub text: String,
+    /// Optional cache breakpoint for this block.
     pub cache_control: Option<CacheControl>,
 }
 
 impl SystemBlock {
+    /// Build a block with the given text and no cache breakpoint.
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
@@ -226,6 +331,7 @@ impl SystemBlock {
         }
     }
 
+    /// Builder-style helper: attach a cache breakpoint to this block.
     pub fn with_cache_control(mut self, cache_control: CacheControl) -> Self {
         self.cache_control = Some(cache_control);
         self

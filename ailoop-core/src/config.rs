@@ -1,3 +1,5 @@
+//! Per-run configuration: see [`RunConfig`].
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,11 +9,34 @@ use crate::ids::RunId;
 use crate::message::SystemPrompt;
 use crate::middleware::ChatMiddleware;
 
+/// Per-run configuration consumed by the engine entry point.
+///
+/// The defaults shipped via [`RunConfig::default`] are tuned for
+/// short interactive turns (10 iterations, 4096 max output tokens, no
+/// timeout). Use struct-update syntax to override what you need:
+/// `RunConfig { max_iterations: 20, ..Default::default() }`. The
+/// struct is `#[non_exhaustive]`, so external callers must always go
+/// through `Default` (or [`RunConfig::new`]) to construct it.
 #[non_exhaustive]
 pub struct RunConfig {
+    /// System prompt prepended to the conversation. `None` lets the
+    /// provider use its own default behaviour. Use
+    /// [`SystemPrompt::Blocks`] to opt in to per-block cache breakpoints.
     pub system_prompt: Option<SystemPrompt>,
+    /// Maximum number of provider turns before the engine aborts the
+    /// run with [`crate::FinishReason::Aborted`]. One iteration covers a
+    /// `chat_stream` call plus the tool calls it triggers. The cap
+    /// prevents runaway tool-use loops; pair with an [`crate::ChatMiddleware`]
+    /// such as `AntiLoop` for content-aware loop detection.
     pub max_iterations: usize,
+    /// Default `max_tokens` for every per-turn [`crate::ChatRequest`]
+    /// the engine builds. User-supplied middlewares can override this
+    /// per request via [`crate::ChatMiddleware::on_chat_request`].
     pub max_tokens: u32,
+    /// Middlewares the engine invokes in registration order. The
+    /// façade prepends an internal middleware that injects per-request
+    /// defaults; entries supplied here run after it and can override
+    /// any field.
     pub middlewares: Vec<Arc<dyn ChatMiddleware>>,
     /// Caller-supplied id for the run. When `None`, the engine mints a
     /// fresh UUID v4. Set this when an outer system needs to correlate
@@ -50,6 +75,11 @@ impl Default for RunConfig {
 }
 
 impl RunConfig {
+    /// Build a config with the given iteration cap and otherwise
+    /// default values. Equivalent to
+    /// `RunConfig { max_iterations, ..Default::default() }`; provided
+    /// because capping iterations is the most common single-field
+    /// override.
     pub fn new(max_iterations: usize) -> Self {
         Self {
             max_iterations,

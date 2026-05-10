@@ -31,9 +31,12 @@ use crate::traits::CompletionModel;
 /// Implemented by each provider's error type (e.g. `AnthropicError`,
 /// `AzureOpenAIError`) so [`RetryingModel`] stays provider-agnostic.
 pub trait Retryable {
+    /// Decide whether this error should retry, and after how long.
     fn retry_classification(&self) -> RetryClassification;
 }
 
+/// Outcome of [`Retryable::retry_classification`]: whether the
+/// decorator should attempt the call again, and after how long.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RetryClassification {
@@ -41,7 +44,13 @@ pub enum RetryClassification {
     Permanent,
     /// Worth another attempt after `retry_after` (when the server told us
     /// how long to wait) or after the decorator's own backoff.
-    Transient { retry_after: Option<Duration> },
+    Transient {
+        /// Server-supplied delay (parsed from `Retry-After` /
+        /// `retry-after-ms` headers). When `Some`, the decorator
+        /// honours it as a floor; when `None`, the decorator falls
+        /// back to its own exponential schedule.
+        retry_after: Option<Duration>,
+    },
 }
 
 /// Backoff settings for [`RetryingModel`].
@@ -52,9 +61,20 @@ pub enum RetryClassification {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RetryConfig {
+    /// Total number of calls to the inner model, **including the
+    /// first one**. `1` disables retries; `3` allows two retries
+    /// after the initial failure.
     pub max_attempts: u32,
+    /// First retry delay. Doubles on each subsequent attempt
+    /// (`base_delay`, `2 * base_delay`, `4 * base_delay`, ...) up to
+    /// [`Self::max_delay`].
     pub base_delay: Duration,
+    /// Hard cap on the per-retry delay. The exponential schedule
+    /// stops growing once it hits this value.
     pub max_delay: Duration,
+    /// When `true`, add 0–10% randomness to each delay so concurrent
+    /// clients don't synchronize their retries. A server-supplied
+    /// `Retry-After` is treated as a floor — jitter only adds time.
     pub jitter: bool,
 }
 
@@ -78,18 +98,23 @@ pub struct RetryingModel<M> {
 }
 
 impl<M> RetryingModel<M> {
+    /// Wrap `inner` with [`RetryConfig::default`].
     pub fn new(inner: M) -> Self {
         Self::with_config(inner, RetryConfig::default())
     }
 
+    /// Wrap `inner` with explicit retry settings.
     pub fn with_config(inner: M, config: RetryConfig) -> Self {
         Self { inner, config }
     }
 
+    /// Borrow the wrapped model. Useful for tests that need to assert
+    /// on the inner state without unwrapping.
     pub fn inner(&self) -> &M {
         &self.inner
     }
 
+    /// Unwrap and return the inner model, dropping the retry layer.
     pub fn into_inner(self) -> M {
         self.inner
     }
