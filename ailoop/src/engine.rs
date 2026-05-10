@@ -84,12 +84,15 @@ async fn fire_abort_hooks(
         mw.on_run_finished(run_id, &finish_reason, &usage, &new_messages)
             .await;
     }
-    let chunk = StreamChunk::RunFinished {
+    let mut chunk = StreamChunk::RunFinished {
         run_id: run_id.clone(),
         reason: finish_reason,
         usage,
         new_messages,
     };
+    for mw in middlewares {
+        mw.on_chunk_mut(&mut chunk).await;
+    }
     for mw in middlewares {
         mw.on_chunk(&chunk).await;
     }
@@ -154,7 +157,8 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             };
         }
 
-        let chunk = StreamChunk::RunStarted { run_id: run_id.clone() };
+        let mut chunk = StreamChunk::RunStarted { run_id: run_id.clone() };
+        for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
         for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
         yield chunk;
 
@@ -170,7 +174,8 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             }
 
             let step_id = StepId::new();
-            let chunk = StreamChunk::StepStarted { run_id: run_id.clone(), step_id: step_id.clone(), iteration };
+            let mut chunk = StreamChunk::StepStarted { run_id: run_id.clone(), step_id: step_id.clone(), iteration };
+            for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
             for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
             yield chunk;
 
@@ -250,6 +255,15 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                 };
                 let chunk = bail_with_hooks!(chunk.map_err(EngineError::Model), &config.middlewares, &run_id)?;
 
+                // Mutating phase first: every `_mut` runs before any
+                // observer, so the engine itself, the assistant-history
+                // builder below, and the stream consumer all see the
+                // same fully-mutated chunk. See the trait doc on
+                // `on_chunk_mut` for the contract.
+                let mut chunk = chunk;
+                for mw in &config.middlewares {
+                    mw.on_chunk_mut(&mut chunk).await;
+                }
                 for mw in &config.middlewares {
                     mw.on_chunk(&chunk).await;
                 }
@@ -311,7 +325,35 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             }
 
             let mut tools_result = Vec::new();
-            for (id, name, args) in tool_calls {
+            for (id, name, mut args) in tool_calls {
+
+                // Input-transform phase: every `_mut` runs before any
+                // gating decision so a sanitizer can rewrite args before
+                // an `ApprovalMiddleware` sees them. Mutated `args` flow
+                // through to the tool invocation below.
+                let mut aborted = false;
+                let mut abort_reason = String::new();
+                for mw in &config.middlewares {
+                    if let Err(reason) = race_abort(
+                        mw.on_before_tool_call_mut(&run_id, &step_id, &name, &mut args),
+                        &mut abort_fut,
+                    ).await {
+                        aborted = true;
+                        abort_reason = reason;
+                        break;
+                    }
+                }
+                if aborted {
+                    if !tools_result.is_empty() {
+                        current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
+                    }
+                    let new_messages = current_messages.split_off(messages.len());
+                    let chunk = fire_abort_hooks(
+                        &config.middlewares, &run_id, abort_reason, usage_run, new_messages,
+                    ).await;
+                    yield chunk;
+                    return;
+                }
 
                 let decision = match race_abort(
                     run_tool_chain(&config.middlewares, &run_id, &step_id, &name, &args),
@@ -331,7 +373,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                     }
                 };
 
-                let content = match decision {
+                let mut content = match decision {
                     ToolDecision::Continue => {
                         let call_result = race_abort(
                             tools.tool_call(&name, args.clone()),
@@ -373,6 +415,30 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                     }
                 };
 
+                // Output-transform phase: every `_mut` runs before any
+                // observer, so observers and the engine's emitted
+                // `ToolResult` chunk all see the same mutated result.
+                for mw in &config.middlewares {
+                    if let Err(reason) = race_abort(
+                        mw.on_after_tool_call_mut(&run_id, &step_id, &name, &args, &mut content),
+                        &mut abort_fut,
+                    ).await {
+                        // Same persistence discipline as the observer
+                        // path below: the just-completed tool's result
+                        // (whatever the partially-applied transforms
+                        // left it as) must land in history so the next
+                        // assistant turn isn't missing a tool_result.
+                        tools_result.push(UserBlock::tool_result(id.clone(), content.clone()));
+                        current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
+                        let new_messages = current_messages.split_off(messages.len());
+                        let chunk = fire_abort_hooks(
+                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                        ).await;
+                        yield chunk;
+                        return;
+                    }
+                }
+
                 for mw in &config.middlewares {
                     if let Err(reason) = race_abort(
                         mw.on_after_tool_call(&run_id, &step_id, &name, &args, &content),
@@ -392,12 +458,13 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                     }
                 }
 
-                let chunk = StreamChunk::ToolResult {
+                let mut chunk = StreamChunk::ToolResult {
                     run_id: run_id.clone(),
                     step_id: step_id.clone(),
                     call_id: id.clone(),
                     content: content.clone(),
                 };
+                for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
                 for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
                 yield chunk;
 
@@ -408,12 +475,13 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                 current_messages.push(Message::User { blocks: tools_result });
             }
 
-            let chunk = StreamChunk::StepFinished {
+            let mut chunk = StreamChunk::StepFinished {
                 run_id: run_id.clone(),
                 step_id: step_id.clone(),
                 iteration,
                 new_messages_so_far: Arc::new(current_messages[messages.len()..].to_vec()),
             };
+            for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
             for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
             yield chunk;
 
@@ -430,12 +498,13 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             mw.on_run_finished(&run_id, &finish_reason, &usage_run, &new_messages).await;
         }
 
-        let chunk = StreamChunk::RunFinished {
+        let mut chunk = StreamChunk::RunFinished {
             run_id: run_id.clone(),
             reason: finish_reason,
             usage: usage_run,
             new_messages,
         };
+        for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
         for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
         yield chunk;
     };
