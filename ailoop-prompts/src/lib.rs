@@ -1,10 +1,7 @@
 mod errors;
 mod prompt;
+mod tokenizer;
 
 pub use errors::PromptError;
 pub use prompt::{Prompt, PromptSection};
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}
+pub use tokenizer::{CharTokenizer, Tokenizer};

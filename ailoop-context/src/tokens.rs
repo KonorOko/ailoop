@@ -1,68 +1,35 @@
-use ailoop_core::{AssistantBlock, Message, ToolResultContent, UserBlock};
+//! Token-counting hooks for [`crate::ContextManager`].
+//!
+//! As of Train B (Real token budget), the canonical trait lives in
+//! `ailoop-prompts` so every crate that needs to size text or messages
+//! measures against the same contract. This module re-exports
+//! [`Tokenizer`] for callers that already depend on `ailoop-context`,
+//! and keeps the legacy [`CharEstimator`] name working — marked
+//! `#[deprecated]` — so existing call sites compile without immediate
+//! churn.
+//!
+//! New code should reference `ailoop_prompts::Tokenizer` (or the
+//! re-export here) and pass implementations into
+//! [`crate::ContextManagerBuilder::tokenizer`]. The `CharTokenizer`
+//! fallback (`text.len() / 4`) is documented as a coarse approximation,
+//! fine for tests and bring-up but explicitly not the recommended
+//! production default — wire up `ailoop_anthropic::OnlineCalibratedTokenizer`
+//! (or your provider's equivalent) when budgets matter.
+//!
+//! The pre-Train-B `TokenEstimator` trait has been subsumed by
+//! [`Tokenizer`]; it lived only inside `ailoop-context`, so removing
+//! it does not affect downstream crates. Use `Tokenizer` directly and
+//! call its `count_*` methods (see the trait in `ailoop-prompts`).
 
-pub trait TokenEstimator: Send + Sync {
-    fn estimate_text(&self, text: &str) -> usize;
+pub use ailoop_prompts::{CharTokenizer, Tokenizer};
 
-    fn estimate_message(&self, message: &Message) -> usize {
-        match message {
-            Message::User { blocks } => {
-                let mut total = 0;
-                blocks.iter().for_each(|block| match block {
-                    UserBlock::Text { text, .. } => total += self.estimate_text(text),
-                    UserBlock::ToolResult {
-                        call_id, content, ..
-                    } => match content {
-                        ToolResultContent::Error(error) => {
-                            total += self.estimate_text(call_id) + self.estimate_text(error)
-                        }
-                        ToolResultContent::Text(text) => {
-                            total += self.estimate_text(call_id) + self.estimate_text(text)
-                        }
-                    },
-                    _ => {}
-                });
-
-                total
-            }
-
-            Message::Assistant { blocks } => {
-                let mut total = 0;
-                blocks.iter().for_each(|block| match block {
-                    AssistantBlock::Text { text, .. } => total += self.estimate_text(text),
-                    AssistantBlock::ToolCall { id, name, args, .. } => {
-                        total += self.estimate_text(id)
-                            + self.estimate_text(name)
-                            + self.estimate_text(&args.to_string())
-                    }
-                    AssistantBlock::Reasoning { text, signature } => {
-                        total += self.estimate_text(text);
-                        if let Some(sig) = signature {
-                            total += self.estimate_text(sig);
-                        }
-                    }
-                    AssistantBlock::RedactedReasoning { data } => {
-                        total += self.estimate_text(data);
-                    }
-                    _ => {}
-                });
-
-                total
-            }
-        }
-    }
-
-    fn estimate_context(&self, messages: &[Message]) -> usize {
-        messages
-            .iter()
-            .map(|m| self.estimate_message(m))
-            .sum::<usize>()
-    }
-}
-
-pub struct CharEstimator;
-
-impl TokenEstimator for CharEstimator {
-    fn estimate_text(&self, text: &str) -> usize {
-        text.len() / 4
-    }
-}
+/// Deprecated alias for [`CharTokenizer`]. The fallback
+/// `text.len() / 4` implementation moved to `ailoop-prompts` so every
+/// crate can reach it without depending on `ailoop-context`. Re-exported
+/// here as a type alias for back-compat with code that referenced
+/// `ailoop_context::tokens::CharEstimator`.
+#[deprecated(
+    since = "0.1.1",
+    note = "renamed to `CharTokenizer`; moved to `ailoop-prompts` and re-exported here"
+)]
+pub type CharEstimator = CharTokenizer;

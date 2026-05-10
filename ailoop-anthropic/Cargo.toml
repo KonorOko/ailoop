@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 ailoop-core.workspace = true
+ailoop-prompts.workspace = true
 
 eventsource-stream.workspace = true
 reqwest.workspace = true

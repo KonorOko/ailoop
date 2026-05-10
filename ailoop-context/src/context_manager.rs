@@ -3,7 +3,7 @@ use ailoop_core::{AssistantBlock, Message, UserBlock};
 use crate::{
     compaction::{CompactionStrategy, TruncateStrategy},
     errors::CompactionError,
-    tokens::{CharEstimator, TokenEstimator},
+    tokens::{CharTokenizer, Tokenizer},
 };
 
 /// Reports what `ContextManager::compact_if_needed` did when it ran.
@@ -26,7 +26,15 @@ pub struct ContextManager {
     max_tokens: usize,
     preserve_n_last: usize,
     strategy: Box<dyn CompactionStrategy>,
-    estimator: Box<dyn TokenEstimator>,
+    /// Tokenizer used to size [`Self::messages`] against
+    /// [`Self::max_tokens`] in [`Self::compact_if_needed`]. Defaults
+    /// to [`CharTokenizer`] (`len() / 4`) when the builder is not
+    /// given one — a coarse fallback fine for tests and bring-up but
+    /// explicitly not recommended for production budgeting; wire up a
+    /// provider-specific [`Tokenizer`] (e.g.
+    /// `ailoop_anthropic::OnlineCalibratedTokenizer`) when correctness
+    /// matters.
+    tokenizer: Box<dyn Tokenizer>,
 }
 
 impl ContextManager {
@@ -41,8 +49,12 @@ impl ContextManager {
         self.pinned.push(false);
     }
 
+    /// Approximate token cost of the entire history under the
+    /// configured [`Tokenizer`]. The accuracy of this number is only
+    /// as good as the tokenizer wired into the builder — under the
+    /// default [`CharTokenizer`] it is a `len() / 4` ballpark.
     pub fn estimated_tokens(&self) -> usize {
-        self.estimator.estimate_context(&self.messages)
+        self.tokenizer.count_messages(&self.messages)
     }
 
     pub fn messages(&self) -> &[Message] {
@@ -194,7 +206,7 @@ impl ContextManager {
 pub struct ContextManagerBuilder {
     max_tokens: usize,
     preserve_n_last: usize,
-    estimator: Box<dyn TokenEstimator>,
+    tokenizer: Box<dyn Tokenizer>,
     strategy: Box<dyn CompactionStrategy>,
 }
 
@@ -203,7 +215,9 @@ impl ContextManagerBuilder {
         Self {
             max_tokens,
             preserve_n_last: 4,
-            estimator: Box::new(CharEstimator),
+            // Fallback default — see the doc on `ContextManager::tokenizer`.
+            // Production code should override via `Self::tokenizer`.
+            tokenizer: Box::new(CharTokenizer),
             strategy: Box::new(TruncateStrategy),
         }
     }
@@ -215,11 +229,14 @@ impl ContextManagerBuilder {
         self
     }
 
-    pub fn estimator(self, estimator: Box<dyn TokenEstimator>) -> ContextManagerBuilder {
+    /// Wire a [`Tokenizer`] into the manager. Replaces the default
+    /// [`CharTokenizer`] fallback so [`ContextManager::compact_if_needed`]
+    /// measures the budget in real tokens rather than `len() / 4`.
+    pub fn tokenizer(self, tokenizer: Box<dyn Tokenizer>) -> ContextManagerBuilder {
         ContextManagerBuilder {
             max_tokens: self.max_tokens,
             preserve_n_last: self.preserve_n_last,
-            estimator,
+            tokenizer,
             strategy: self.strategy,
         }
     }
@@ -228,7 +245,7 @@ impl ContextManagerBuilder {
         ContextManagerBuilder {
             max_tokens: self.max_tokens,
             preserve_n_last: self.preserve_n_last,
-            estimator: self.estimator,
+            tokenizer: self.tokenizer,
             strategy,
         }
     }
@@ -240,7 +257,7 @@ impl ContextManagerBuilder {
             max_tokens: self.max_tokens,
             preserve_n_last: self.preserve_n_last,
             strategy: self.strategy,
-            estimator: self.estimator,
+            tokenizer: self.tokenizer,
         }
     }
 }
@@ -281,8 +298,8 @@ mod tests {
 
     #[tokio::test]
     async fn compact_if_needed_returns_report_when_over_budget() {
-        // CharEstimator is len()/4. Use a tiny budget so a couple of
-        // small messages already trip the limit.
+        // CharTokenizer fallback is len()/4. Use a tiny budget so a
+        // couple of small messages already trip the limit.
         let mut mgr = ContextManager::builder(10).preserve_n_last(2).build();
         mgr.add_message(Message::user("first turn"));
         mgr.add_message(Message::assistant_text("first reply"));
@@ -398,5 +415,44 @@ mod tests {
         mgr.pin_with_tool_result(1);
         assert!(mgr.is_pinned(0), "tool_call partner must be pinned");
         assert!(mgr.is_pinned(1));
+    }
+
+    /// Train B contract: `compact_if_needed` measures the budget in
+    /// real tokens via the configured [`Tokenizer`], not in characters.
+    /// A tokenizer that bills every message at a fixed cost lets us
+    /// drive compaction by message count alone, independently of the
+    /// underlying `text.len()`.
+    #[tokio::test]
+    async fn compact_uses_tokenizer_budget_not_character_count() {
+        struct PerMessageTokenizer;
+        impl Tokenizer for PerMessageTokenizer {
+            fn count_text(&self, _text: &str) -> usize {
+                10
+            }
+        }
+
+        // Budget: 35 tokens. Five 1-text-block messages cost 50 tokens
+        // (5 * 10), so compaction must run. Under the legacy
+        // CharTokenizer fallback the same content (under ~50 chars
+        // total) would fit comfortably under 35 — proving the budget
+        // is sourced from the supplied tokenizer.
+        let mut mgr = ContextManager::builder(35)
+            .tokenizer(Box::new(PerMessageTokenizer))
+            .preserve_n_last(2)
+            .build();
+        for i in 0..5 {
+            mgr.add_message(Message::user(format!("q{i}")));
+        }
+        assert_eq!(mgr.estimated_tokens(), 50);
+
+        let report = mgr
+            .compact_if_needed()
+            .await
+            .expect("compaction should succeed")
+            .expect("over-budget history must compact");
+        assert_eq!(report.before, 5);
+        assert!(report.after < report.before);
+        // After compaction the tail is still bound by `preserve_n_last`.
+        assert_eq!(report.after, 2);
     }
 }

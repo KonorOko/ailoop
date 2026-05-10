@@ -28,6 +28,7 @@ name = "ailoop-anthropic"
 version = "0.1.0"
 dependencies = [
  "ailoop-core",
+ "ailoop-prompts",
  "async-stream",
  "async-trait",
  "dotenvy",
@@ -62,6 +63,7 @@ name = "ailoop-context"
 version = "0.1.0"
 dependencies = [
  "ailoop-core",
+ "ailoop-prompts",
  "async-trait",
  "futures",
  "indexmap",
@@ -115,6 +117,7 @@ version = "0.1.0"
 dependencies = [
  "ailoop-core",
  "async-trait",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
 ]

@@ -1,6 +1,6 @@
 use std::{fmt::Display, path::Path};
 
-use crate::errors::PromptError;
+use crate::{errors::PromptError, tokenizer::Tokenizer};
 
 #[derive(Debug, Clone)]
 pub struct Prompt {
@@ -42,6 +42,22 @@ impl PromptSection {
 
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    /// Approximate token count of this section's content under
+    /// `tokenizer`. The optional `## name` header that
+    /// [`Prompt::render`] would prepend is **not** included — counting
+    /// the header is the rendered prompt's responsibility, not the
+    /// section's. For the full prompt-level cost, use
+    /// [`Prompt::token_count`].
+    pub fn token_count(&self, tokenizer: &dyn Tokenizer) -> usize {
+        tokenizer.count_text(&self.content)
+    }
+}
+
+impl Default for Prompt {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -86,6 +102,14 @@ impl Prompt {
         }
         out
     }
+
+    /// Approximate token count of the rendered prompt under
+    /// `tokenizer`. Counts the same string the model would receive,
+    /// including `## name` headers and trailing blank lines emitted by
+    /// [`Self::render`].
+    pub fn token_count(&self, tokenizer: &dyn Tokenizer) -> usize {
+        tokenizer.count_text(&self.render())
+    }
 }
 
 impl Display for Prompt {
@@ -104,6 +128,12 @@ impl From<&str> for Prompt {
 
 pub struct PromptBuilder {
     sections: Vec<PromptSection>,
+}
+
+impl Default for PromptBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PromptBuilder {
@@ -171,6 +201,31 @@ mod tests {
             .build();
 
         assert_eq!(prompt.render(), "preamble\n\n## Tone\n\nBe concise.\n\n");
+    }
+
+    /// `Prompt::token_count` must measure exactly what the model sees:
+    /// the rendered string including `## name` headers and the trailing
+    /// blank lines `render()` emits between sections.
+    #[test]
+    fn prompt_token_count_matches_rendered_text_under_word_tokenizer() {
+        struct WordTokenizer;
+        impl crate::Tokenizer for WordTokenizer {
+            fn count_text(&self, text: &str) -> usize {
+                text.split_whitespace().count()
+            }
+        }
+
+        let prompt = Prompt::builder()
+            .section(PromptSection::with_name("Tone", "Be concise."))
+            .section(PromptSection::new("preamble line"))
+            .build();
+
+        // Rendered: "## Tone\n\nBe concise.\n\npreamble line\n\n"
+        // Words: ##, Tone, Be, concise., preamble, line = 6
+        assert_eq!(prompt.token_count(&WordTokenizer), 6);
+        // PromptSection::token_count must NOT include the header.
+        let sec = PromptSection::with_name("Header", "body of section");
+        assert_eq!(sec.token_count(&WordTokenizer), 3);
     }
 
     #[test]
