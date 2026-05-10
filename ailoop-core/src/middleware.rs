@@ -9,7 +9,7 @@ use crate::RunConfig;
 #[allow(unused_variables)]
 pub trait ChatMiddleware: Send + Sync {
     // chat
-    async fn on_run_start(
+    async fn on_run_started(
         &self,
         run_id: &RunId,
         messages: &[Message],

@@ -204,7 +204,7 @@ mod tests {
         struct AbortMw;
         #[async_trait::async_trait]
         impl ChatMiddleware for AbortMw {
-            async fn on_run_start(&self, _: &RunId, _: &[Message], _: &RunConfig) -> HookAction {
+            async fn on_run_started(&self, _: &RunId, _: &[Message], _: &RunConfig) -> HookAction {
                 HookAction::Terminate {
                     reason: "policy".into(),
                 }

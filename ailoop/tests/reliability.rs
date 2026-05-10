@@ -234,20 +234,20 @@ async fn abort_during_tool_loop_preserves_prior_tool_results() {
     // and then hangs. The engine must persist the first tool's result
     // in `RunFinished.new_messages` so history is consistent on resume.
     let turn = vec![
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_a".into(),
             name: "cancel_on_second".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_a".into(),
             name: "cancel_on_second".into(),
             args: json!({}),
         },
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_b".into(),
             name: "cancel_on_second".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_b".into(),
             name: "cancel_on_second".into(),
             args: json!({}),
@@ -386,11 +386,11 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
     }
 
     let turn = vec![
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_x".into(),
             name: "noop".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_x".into(),
             name: "noop".into(),
             args: json!({}),
@@ -438,7 +438,7 @@ async fn hook_action_terminate_still_fires_on_run_finished() {
 
     #[async_trait]
     impl ChatMiddleware for AbortingMw {
-        async fn on_run_start(
+        async fn on_run_started(
             &self,
             _run_id: &RunId,
             _messages: &[Message],

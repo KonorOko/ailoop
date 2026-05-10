@@ -8,7 +8,7 @@ pub enum StreamChunk {
     TextDelta {
         delta: String,
     },
-    ToolCallStart {
+    ToolCallStarted {
         id: String,
         name: String,
     },
@@ -16,7 +16,7 @@ pub enum StreamChunk {
         id: String,
         delta: String,
     },
-    ToolCallEnd {
+    ToolCallFinished {
         id: String,
         name: String,
         args: serde_json::Value,
@@ -28,7 +28,7 @@ pub enum StreamChunk {
     /// applicable (Anthropic extended thinking); other providers may emit
     /// `None`. Engines should pair this with the accumulated reasoning text
     /// to materialize an `AssistantBlock::Reasoning`.
-    ReasoningEnd {
+    ReasoningFinished {
         signature: Option<String>,
     },
     /// A complete redacted reasoning block delivered atomically. `data` is

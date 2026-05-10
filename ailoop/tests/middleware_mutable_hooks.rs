@@ -211,11 +211,11 @@ async fn on_before_tool_call_mut_mutation_visible_to_tool_and_observer() {
     }
 
     let turn1 = vec![
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_1".into(),
             name: "echo".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_1".into(),
             name: "echo".into(),
             args: json!({"secret": "abc"}),
@@ -324,11 +324,11 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
     }
 
     let turn1 = vec![
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_1".into(),
             name: "echo".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_1".into(),
             name: "echo".into(),
             args: json!({}),

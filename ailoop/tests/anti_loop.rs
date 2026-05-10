@@ -42,11 +42,11 @@ fn tool_turn(id: &str, args: Value, text: Option<&str>) -> Vec<StreamChunk> {
     if let Some(t) = text {
         chunks.push(StreamChunk::TextDelta { delta: t.into() });
     }
-    chunks.push(StreamChunk::ToolCallStart {
+    chunks.push(StreamChunk::ToolCallStarted {
         id: id.into(),
         name: "get_weather".into(),
     });
-    chunks.push(StreamChunk::ToolCallEnd {
+    chunks.push(StreamChunk::ToolCallFinished {
         id: id.into(),
         name: "get_weather".into(),
         args,

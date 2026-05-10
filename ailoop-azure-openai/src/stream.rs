@@ -95,7 +95,7 @@ where
                             );
                             emitted_starts.insert(idx);
                             tool_call_order.push(idx);
-                            yield StreamChunk::ToolCallStart {
+                            yield StreamChunk::ToolCallStarted {
                                 id: id.clone(),
                                 name: name.clone(),
                             };
@@ -124,7 +124,7 @@ where
                         if let Some(state) = tool_calls.remove(&idx) {
                             let args = serde_json::from_str(&state.args_buf)
                                 .unwrap_or(serde_json::json!({}));
-                            yield StreamChunk::ToolCallEnd {
+                            yield StreamChunk::ToolCallFinished {
                                 id: state.id,
                                 name: state.name,
                                 args,
@@ -228,11 +228,11 @@ mod tests {
         let chunks = run(events).await;
         let mut iter = chunks.into_iter();
         match iter.next().unwrap() {
-            StreamChunk::ToolCallStart { id, name } => {
+            StreamChunk::ToolCallStarted { id, name } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "get_weather");
             }
-            other => panic!("expected ToolCallStart, got {other:?}"),
+            other => panic!("expected ToolCallStarted, got {other:?}"),
         }
         match iter.next().unwrap() {
             StreamChunk::ToolCallArgsDelta { id, delta } => {
@@ -249,12 +249,12 @@ mod tests {
             other => panic!("expected ToolCallArgsDelta, got {other:?}"),
         }
         match iter.next().unwrap() {
-            StreamChunk::ToolCallEnd { id, name, args } => {
+            StreamChunk::ToolCallFinished { id, name, args } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "get_weather");
                 assert_eq!(args, json!({ "loc": "SF" }));
             }
-            other => panic!("expected ToolCallEnd, got {other:?}"),
+            other => panic!("expected ToolCallFinished, got {other:?}"),
         }
         match iter.next().unwrap() {
             StreamChunk::TurnFinished { reason, usage, .. } => {
@@ -293,9 +293,9 @@ mod tests {
         let mut finished = 0;
         for chunk in chunks {
             match chunk {
-                StreamChunk::ToolCallStart { id, name } => starts.push((id, name)),
+                StreamChunk::ToolCallStarted { id, name } => starts.push((id, name)),
                 StreamChunk::ToolCallArgsDelta { id, delta } => args.push((id, delta)),
-                StreamChunk::ToolCallEnd { id, args, .. } => ends.push((id, args)),
+                StreamChunk::ToolCallFinished { id, args, .. } => ends.push((id, args)),
                 StreamChunk::TurnFinished { .. } => finished += 1,
                 other => panic!("unexpected chunk {other:?}"),
             }
@@ -454,20 +454,20 @@ mod tests {
         let mut finished: Option<FinishReason> = None;
         for chunk in &chunks {
             match chunk {
-                StreamChunk::ToolCallStart { id, name } => {
+                StreamChunk::ToolCallStarted { id, name } => {
                     assert!(!id.is_empty(), "tool call id must not be empty");
                     assert!(!name.is_empty(), "tool call name must not be empty");
                     starts += 1;
                 }
                 StreamChunk::ToolCallArgsDelta { .. } => args_deltas += 1,
-                StreamChunk::ToolCallEnd { args, .. } => ends.push(args.clone()),
+                StreamChunk::ToolCallFinished { args, .. } => ends.push(args.clone()),
                 StreamChunk::TurnFinished { reason, .. } => finished = Some(reason.clone()),
                 _ => {}
             }
         }
-        assert_eq!(starts, 1, "expected one ToolCallStart");
+        assert_eq!(starts, 1, "expected one ToolCallStarted");
         assert!(args_deltas >= 1, "expected at least one args delta");
-        assert_eq!(ends.len(), 1, "expected one ToolCallEnd");
+        assert_eq!(ends.len(), 1, "expected one ToolCallFinished");
         assert!(
             ends[0].is_object(),
             "tool call args should parse to a JSON object, got {:?}",

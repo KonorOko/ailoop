@@ -31,7 +31,7 @@ impl TracingMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for TracingMiddleware {
-    async fn on_run_start(
+    async fn on_run_started(
         &self,
         run_id: &RunId,
         messages: &[Message],
@@ -65,27 +65,27 @@ impl ChatMiddleware for TracingMiddleware {
             StreamChunk::ReasoningDelta { delta } => {
                 tracing::trace!(target: "ailoop.chunk", chars = delta.len(), "reasoning delta");
             }
-            StreamChunk::ReasoningEnd { .. } => {
-                tracing::trace!(target: "ailoop.chunk", "reasoning end");
+            StreamChunk::ReasoningFinished { .. } => {
+                tracing::trace!(target: "ailoop.chunk", "reasoning finished");
             }
             StreamChunk::RedactedReasoningBlock { .. } => {
                 tracing::debug!(target: "ailoop.chunk", "redacted reasoning block");
             }
-            StreamChunk::ToolCallStart { id, name } => {
+            StreamChunk::ToolCallStarted { id, name } => {
                 tracing::info!(
                     target: "ailoop.chunk",
                     call_id = %id,
                     name = %name,
-                    "tool call start",
+                    "tool call started",
                 );
             }
             StreamChunk::ToolCallArgsDelta { .. } => {}
-            StreamChunk::ToolCallEnd { id, name, .. } => {
+            StreamChunk::ToolCallFinished { id, name, .. } => {
                 tracing::debug!(
                     target: "ailoop.chunk",
                     call_id = %id,
                     name = %name,
-                    "tool call end",
+                    "tool call finished",
                 );
             }
             StreamChunk::TurnFinished {
@@ -255,7 +255,7 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, || {
             futures::executor::block_on(async {
-                mw.on_run_start(&run_id, &[], &RunConfig::default()).await;
+                mw.on_run_started(&run_id, &[], &RunConfig::default()).await;
                 mw.on_before_tool_call(&run_id, &step_id, "get_weather", &serde_json::Value::Null)
                     .await;
                 mw.on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
@@ -276,7 +276,7 @@ mod tests {
             log.contains(&run_id_str),
             "expected log to contain run_id `{run_id_str}`, got:\n{log}"
         );
-        assert!(log.contains("run started"), "missing on_run_start event");
+        assert!(log.contains("run started"), "missing on_run_started event");
         assert!(
             log.contains("tool call starting"),
             "missing on_before_tool_call event"

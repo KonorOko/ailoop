@@ -71,11 +71,11 @@ async fn run_returns_final_text_for_text_only_turn() {
 #[tokio::test]
 async fn run_final_text_reflects_last_assistant_turn_only() {
     let turn1 = vec![
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_1".into(),
             name: "get_weather".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_1".into(),
             name: "get_weather".into(),
             args: json!({}),
@@ -170,7 +170,7 @@ async fn run_returns_ok_with_aborted_finish_reason_on_timeout() {
     struct AbortingMw;
     #[async_trait]
     impl ChatMiddleware for AbortingMw {
-        async fn on_run_start(
+        async fn on_run_started(
             &self,
             _run_id: &RunId,
             _messages: &[Message],

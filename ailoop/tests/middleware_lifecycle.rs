@@ -41,13 +41,13 @@ impl RecordingMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for RecordingMiddleware {
-    async fn on_run_start(
+    async fn on_run_started(
         &self,
         _run_id: &RunId,
         _messages: &[Message],
         _config: &RunConfig,
     ) -> HookAction {
-        self.push("on_run_start");
+        self.push("on_run_started");
         HookAction::Continue
     }
 
@@ -61,11 +61,11 @@ impl ChatMiddleware for RecordingMiddleware {
             StreamChunk::StepStarted { .. } => "on_chunk:StepStarted",
             StreamChunk::TextDelta { .. } => "on_chunk:TextDelta",
             StreamChunk::ReasoningDelta { .. } => "on_chunk:ReasoningDelta",
-            StreamChunk::ReasoningEnd { .. } => "on_chunk:ReasoningEnd",
+            StreamChunk::ReasoningFinished { .. } => "on_chunk:ReasoningFinished",
             StreamChunk::RedactedReasoningBlock { .. } => "on_chunk:RedactedReasoningBlock",
-            StreamChunk::ToolCallStart { .. } => "on_chunk:ToolCallStart",
+            StreamChunk::ToolCallStarted { .. } => "on_chunk:ToolCallStarted",
             StreamChunk::ToolCallArgsDelta { .. } => "on_chunk:ToolCallArgsDelta",
-            StreamChunk::ToolCallEnd { .. } => "on_chunk:ToolCallEnd",
+            StreamChunk::ToolCallFinished { .. } => "on_chunk:ToolCallFinished",
             StreamChunk::TurnFinished { .. } => "on_chunk:TurnFinished",
             StreamChunk::ToolResult { .. } => "on_chunk:ToolResult",
             StreamChunk::StepFinished { .. } => "on_chunk:StepFinished",
@@ -143,11 +143,11 @@ async fn engine_invokes_middleware_hooks_in_order() {
         StreamChunk::TextDelta {
             delta: "let me check ".into(),
         },
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_1".into(),
             name: "get_weather".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_1".into(),
             name: "get_weather".into(),
             args: json!({}),
@@ -186,13 +186,13 @@ async fn engine_invokes_middleware_hooks_in_order() {
 
     let entries = recorder.entries();
     let expected = vec![
-        "on_run_start",
+        "on_run_started",
         "on_chunk:RunStarted",
         "on_chunk:StepStarted",
         "on_chat_request",
         "on_chunk:TextDelta",
-        "on_chunk:ToolCallStart",
-        "on_chunk:ToolCallEnd",
+        "on_chunk:ToolCallStarted",
+        "on_chunk:ToolCallFinished",
         "on_chunk:TurnFinished",
         "on_before_tool_call",
         "on_after_tool_call",

@@ -144,7 +144,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
 
         for mw in &config.middlewares {
             let action = match race_abort(
-                mw.on_run_start(&run_id, &messages, &config),
+                mw.on_run_started(&run_id, &messages, &config),
                 &mut abort_fut,
             ).await {
                 Ok(a) => a,
@@ -277,16 +277,16 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                     StreamChunk::ReasoningDelta { delta } => {
                         reasoning_buf.push_str(delta);
                     },
-                    StreamChunk::ToolCallStart { .. } => {
+                    StreamChunk::ToolCallStarted { .. } => {
                         if !text_buf.is_empty() {
                             assistant_blocks.push(AssistantBlock::text(std::mem::take(&mut text_buf)));
                         }
                     },
-                    StreamChunk::ToolCallEnd { id, name, args } => {
+                    StreamChunk::ToolCallFinished { id, name, args } => {
                         assistant_blocks.push(AssistantBlock::tool_call(id.clone(), name.clone(), args.clone()));
                         tool_calls.push((id.clone(), name.clone(), args.clone()))
                     },
-                    StreamChunk::ReasoningEnd { signature } => {
+                    StreamChunk::ReasoningFinished { signature } => {
                         // Reasoning blocks must keep their original position
                         // relative to text and tool_use; flush any pending
                         // text first so order on replay matches the wire.
@@ -574,14 +574,14 @@ mod tests {
             StreamChunk::ReasoningDelta {
                 delta: "step.".into(),
             },
-            StreamChunk::ReasoningEnd {
+            StreamChunk::ReasoningFinished {
                 signature: Some("sig-xyz".into()),
             },
-            StreamChunk::ToolCallStart {
+            StreamChunk::ToolCallStarted {
                 id: "toolu_1".into(),
                 name: "get_weather".into(),
             },
-            StreamChunk::ToolCallEnd {
+            StreamChunk::ToolCallFinished {
                 id: "toolu_1".into(),
                 name: "get_weather".into(),
                 args: json!({"location": "SF"}),
@@ -662,11 +662,11 @@ mod tests {
     #[tokio::test]
     async fn engine_chunks_share_run_id_and_step_ids_match_per_iteration() {
         let turn1 = vec![
-            StreamChunk::ToolCallStart {
+            StreamChunk::ToolCallStarted {
                 id: "toolu_1".into(),
                 name: "get_weather".into(),
             },
-            StreamChunk::ToolCallEnd {
+            StreamChunk::ToolCallFinished {
                 id: "toolu_1".into(),
                 name: "get_weather".into(),
                 args: json!({}),
@@ -764,7 +764,7 @@ mod tests {
         }
     }
 
-    /// `HookAction::Terminate` from `on_run_start` must still drive the planned
+    /// `HookAction::Terminate` from `on_run_started` must still drive the planned
     /// termination contract: every middleware sees `on_run_finished` once with
     /// `FinishReason::Aborted`. Observers like `TokenBudget` accumulate the
     /// final turn there; if the engine emits `RunFinished` without firing the
@@ -781,7 +781,7 @@ mod tests {
 
         #[async_trait::async_trait]
         impl ChatMiddleware for AbortingMw {
-            async fn on_run_start(
+            async fn on_run_started(
                 &self,
                 _run_id: &RunId,
                 _messages: &[Message],
@@ -874,20 +874,20 @@ mod tests {
         }
 
         let turn = vec![
-            StreamChunk::ToolCallStart {
+            StreamChunk::ToolCallStarted {
                 id: "toolu_a".into(),
                 name: "get_weather".into(),
             },
-            StreamChunk::ToolCallEnd {
+            StreamChunk::ToolCallFinished {
                 id: "toolu_a".into(),
                 name: "get_weather".into(),
                 args: json!({}),
             },
-            StreamChunk::ToolCallStart {
+            StreamChunk::ToolCallStarted {
                 id: "toolu_b".into(),
                 name: "get_weather".into(),
             },
-            StreamChunk::ToolCallEnd {
+            StreamChunk::ToolCallFinished {
                 id: "toolu_b".into(),
                 name: "get_weather".into(),
                 args: json!({}),

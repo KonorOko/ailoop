@@ -66,7 +66,7 @@ where
                         }
                         AnthropicBlock::ToolUse {id, name, ..} => {
                             blocks.insert(index, BlockState::ToolUse { id: id.clone(), name: name.clone(), args_buf: String::new() });
-                            yield StreamChunk::ToolCallStart { id, name };
+                            yield StreamChunk::ToolCallStarted { id, name };
                         }
                         AnthropicBlock::Thinking { thinking, signature } => {
                             // start values are usually empty; deltas fill them in.
@@ -117,10 +117,10 @@ where
                         Some(BlockState::ToolUse { id, name, args_buf }) => {
                             let args = serde_json::from_str(&args_buf)
                                 .unwrap_or(serde_json::json!({}));
-                            yield StreamChunk::ToolCallEnd { id, name, args };
+                            yield StreamChunk::ToolCallFinished { id, name, args };
                         }
                         Some(BlockState::Thinking { signature }) => {
-                            yield StreamChunk::ReasoningEnd { signature };
+                            yield StreamChunk::ReasoningFinished { signature };
                         }
                         Some(BlockState::Text) | Some(BlockState::Unknown) | None => {}
                     }
@@ -233,9 +233,9 @@ mod tests {
 
     /// Reproduces the canonical Anthropic stream for an extended-thinking
     /// turn that ends in a tool call: thinking → signature → tool_use →
-    /// stop. Verifies that the engine sees ReasoningDelta×N + ReasoningEnd
-    /// with the signature, then ToolCallStart, ToolCallArgsDelta×N,
-    /// ToolCallEnd with parsed args, and finally TurnFinished{ToolUse}.
+    /// stop. Verifies that the engine sees ReasoningDelta×N + ReasoningFinished
+    /// with the signature, then ToolCallStarted, ToolCallArgsDelta×N,
+    /// ToolCallFinished with parsed args, and finally TurnFinished{ToolUse}.
     #[tokio::test]
     async fn thinking_then_tool_use_round_trip() {
         let events = vec![
@@ -322,17 +322,17 @@ mod tests {
             other => panic!("expected ReasoningDelta, got {other:?}"),
         }
         match iter.next().expect("reasoning end") {
-            StreamChunk::ReasoningEnd { signature } => {
+            StreamChunk::ReasoningFinished { signature } => {
                 assert_eq!(signature.as_deref(), Some("sig-xyz"));
             }
-            other => panic!("expected ReasoningEnd, got {other:?}"),
+            other => panic!("expected ReasoningFinished, got {other:?}"),
         }
         match iter.next().expect("tool call start") {
-            StreamChunk::ToolCallStart { id, name } => {
+            StreamChunk::ToolCallStarted { id, name } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(name, "get_weather");
             }
-            other => panic!("expected ToolCallStart, got {other:?}"),
+            other => panic!("expected ToolCallStarted, got {other:?}"),
         }
         match iter.next().expect("args delta 1") {
             StreamChunk::ToolCallArgsDelta { id, delta } => {
@@ -349,12 +349,12 @@ mod tests {
             other => panic!("expected ToolCallArgsDelta, got {other:?}"),
         }
         match iter.next().expect("tool call end") {
-            StreamChunk::ToolCallEnd { id, name, args } => {
+            StreamChunk::ToolCallFinished { id, name, args } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(name, "get_weather");
                 assert_eq!(args, json!({"location": "SF"}));
             }
-            other => panic!("expected ToolCallEnd, got {other:?}"),
+            other => panic!("expected ToolCallFinished, got {other:?}"),
         }
         match iter.next().expect("turn finished") {
             StreamChunk::TurnFinished {

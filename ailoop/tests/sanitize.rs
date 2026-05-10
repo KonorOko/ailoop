@@ -108,11 +108,11 @@ async fn on_user_text_rewrites_outgoing_user_blocks() {
 #[tokio::test]
 async fn on_tool_args_rewrites_args_before_tool_invocation() {
     let turn1 = vec![
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_1".into(),
             name: "echo".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_1".into(),
             name: "echo".into(),
             args: json!({"q": "hello"}),
@@ -172,11 +172,11 @@ async fn on_tool_args_rewrites_args_before_tool_invocation() {
 #[tokio::test]
 async fn on_tool_result_rewrites_result_before_next_turn() {
     let turn1 = vec![
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_1".into(),
             name: "leaky".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_1".into(),
             name: "leaky".into(),
             args: json!({}),
@@ -267,11 +267,11 @@ async fn on_assistant_text_is_off_by_default() {
         StreamChunk::TextDelta {
             delta: "alice replied".into(),
         },
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_1".into(),
             name: "echo".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_1".into(),
             name: "echo".into(),
             args: json!({}),
@@ -330,11 +330,11 @@ async fn enable_assistant_text_opts_in_to_assistant_rewrites() {
         StreamChunk::TextDelta {
             delta: "alice replied".into(),
         },
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_1".into(),
             name: "echo".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_1".into(),
             name: "echo".into(),
             args: json!({}),
@@ -392,14 +392,14 @@ async fn reasoning_blocks_are_not_sanitized() {
         StreamChunk::ReasoningDelta {
             delta: "alice thinking".into(),
         },
-        StreamChunk::ReasoningEnd {
+        StreamChunk::ReasoningFinished {
             signature: Some("sig-1".into()),
         },
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_1".into(),
             name: "echo".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_1".into(),
             name: "echo".into(),
             args: json!({}),
@@ -499,20 +499,20 @@ async fn tool_args_callback_can_filter_by_name() {
     }
 
     let turn1 = vec![
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_1".into(),
             name: "fetch".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_1".into(),
             name: "fetch".into(),
             args: json!({"q": "hello"}),
         },
-        StreamChunk::ToolCallStart {
+        StreamChunk::ToolCallStarted {
             id: "toolu_2".into(),
             name: "other_tool".into(),
         },
-        StreamChunk::ToolCallEnd {
+        StreamChunk::ToolCallFinished {
             id: "toolu_2".into(),
             name: "other_tool".into(),
             args: json!({"q": "hello"}),

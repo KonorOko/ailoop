@@ -115,7 +115,7 @@ impl Default for AntiLoop {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for AntiLoop {
-    async fn on_run_start(
+    async fn on_run_started(
         &self,
         run_id: &RunId,
         _messages: &[Message],

@@ -45,6 +45,9 @@ use tokio::sync::Mutex;
 
 /// Current schema version embedded on every line. Bump on any
 /// payload-shape break so downstream consumers can match on it.
+/// Pre-1.0, breaking renames land in place under `schema: 1`; the
+/// version field exists to gate post-1.0 evolution, so spending a
+/// number now would leave the first real bump at `2` either way.
 const SCHEMA_VERSION: u32 = 1;
 
 /// Append-only NDJSON sink. Holds the open file behind a tokio
@@ -180,7 +183,7 @@ fn tool_result_body(r: &ToolResultContent) -> &str {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for JsonTracer {
-    async fn on_run_start(
+    async fn on_run_started(
         &self,
         run_id: &RunId,
         messages: &[Message],
@@ -226,35 +229,35 @@ impl ChatMiddleware for JsonTracer {
                 }
                 self.emit("reasoning_delta", p).await;
             }
-            StreamChunk::ReasoningEnd { signature } => {
+            StreamChunk::ReasoningFinished { signature } => {
                 let mut p = serde_json::Map::new();
                 p.insert("has_signature".into(), json!(signature.is_some()));
-                self.emit("reasoning_end", p).await;
+                self.emit("reasoning_finished", p).await;
             }
             StreamChunk::RedactedReasoningBlock { data } => {
                 let mut p = serde_json::Map::new();
                 p.insert("bytes".into(), json!(data.len()));
                 self.emit("redacted_reasoning", p).await;
             }
-            StreamChunk::ToolCallStart { id, name } => {
+            StreamChunk::ToolCallStarted { id, name } => {
                 let mut p = serde_json::Map::new();
                 p.insert("call_id".into(), json!(id));
                 p.insert("name".into(), json!(name));
-                self.emit("tool_call_start", p).await;
+                self.emit("tool_call_started", p).await;
             }
             StreamChunk::ToolCallArgsDelta { .. } => {
                 // Suppressed for parity with TracingMiddleware: the
-                // accumulated args land on `ToolCallEnd` and per-delta
+                // accumulated args land on `ToolCallFinished` and per-delta
                 // entries would dominate the log.
             }
-            StreamChunk::ToolCallEnd { id, name, args } => {
+            StreamChunk::ToolCallFinished { id, name, args } => {
                 let mut p = serde_json::Map::new();
                 p.insert("call_id".into(), json!(id));
                 p.insert("name".into(), json!(name));
                 if self.verbose {
                     p.insert("args".into(), args.clone());
                 }
-                self.emit("tool_call_end", p).await;
+                self.emit("tool_call_finished", p).await;
             }
             StreamChunk::ToolResult {
                 run_id,
@@ -428,7 +431,7 @@ mod tests {
         let step_id = StepId::new();
 
         tracer
-            .on_run_start(&run_id, &[Message::user("hi")], &RunConfig::default())
+            .on_run_started(&run_id, &[Message::user("hi")], &RunConfig::default())
             .await;
         tracer
             .on_before_tool_call(&run_id, &step_id, "echo", &Value::Null)
