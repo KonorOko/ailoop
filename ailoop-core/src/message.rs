@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Cache breakpoint placed on a content block, system prompt block, or
 /// tool definition. Providers that support prompt caching (Anthropic
@@ -21,7 +21,7 @@ pub enum CacheControl {
     EphemeralWithTtl(Duration),
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Message {
     User { blocks: Vec<UserBlock> },
     Assistant { blocks: Vec<AssistantBlock> },
@@ -41,19 +41,19 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum UserBlock {
     Text {
         text: String,
         /// Per-request hint; not part of persisted conversation state.
-        #[serde(skip)]
+        #[serde(skip, default)]
         cache_control: Option<CacheControl>,
     },
     ToolResult {
         call_id: String,
         content: ToolResultContent,
-        #[serde(skip)]
+        #[serde(skip, default)]
         cache_control: Option<CacheControl>,
     },
 }
@@ -97,19 +97,19 @@ impl UserBlock {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AssistantBlock {
     Text {
         text: String,
-        #[serde(skip)]
+        #[serde(skip, default)]
         cache_control: Option<CacheControl>,
     },
     ToolCall {
         id: String,
         name: String,
         args: serde_json::Value,
-        #[serde(skip)]
+        #[serde(skip, default)]
         cache_control: Option<CacheControl>,
     },
     /// Visible reasoning emitted by the model. `signature` is provider-issued
@@ -178,7 +178,7 @@ impl AssistantBlock {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ToolResultContent {
     Text(String),
     Error(String),
@@ -253,5 +253,136 @@ impl SystemPrompt {
                 .collect::<Vec<_>>()
                 .join("\n\n"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn round_trip(msg: &Message) -> Message {
+        let json = serde_json::to_string(msg).expect("serialize");
+        serde_json::from_str(&json).expect("deserialize")
+    }
+
+    fn assert_user_text_eq(msg: &Message, expected: &str) {
+        match msg {
+            Message::User { blocks } => match &blocks[0] {
+                UserBlock::Text {
+                    text,
+                    cache_control,
+                } => {
+                    assert_eq!(text, expected);
+                    assert!(cache_control.is_none(), "cache_control must not round-trip");
+                }
+                other => panic!("expected UserBlock::Text, got {other:?}"),
+            },
+            other => panic!("expected Message::User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trip_user_text_drops_cache_control() {
+        let msg = Message::User {
+            blocks: vec![
+                UserBlock::text("hello").with_cache_control(Some(CacheControl::Ephemeral)),
+            ],
+        };
+        let restored = round_trip(&msg);
+        assert_user_text_eq(&restored, "hello");
+    }
+
+    #[test]
+    fn round_trip_user_tool_result() {
+        let msg = Message::User {
+            blocks: vec![UserBlock::tool_result(
+                "call-1",
+                ToolResultContent::Text("ok".into()),
+            )],
+        };
+        let restored = round_trip(&msg);
+        match &restored {
+            Message::User { blocks } => match &blocks[0] {
+                UserBlock::ToolResult {
+                    call_id,
+                    content,
+                    cache_control,
+                } => {
+                    assert_eq!(call_id, "call-1");
+                    assert!(matches!(content, ToolResultContent::Text(t) if t == "ok"));
+                    assert!(cache_control.is_none());
+                }
+                other => panic!("expected ToolResult, got {other:?}"),
+            },
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trip_assistant_text_and_tool_call() {
+        let msg = Message::Assistant {
+            blocks: vec![
+                AssistantBlock::text("thinking out loud"),
+                AssistantBlock::tool_call("c1", "fetch", json!({"q": "x"})),
+            ],
+        };
+        let restored = round_trip(&msg);
+        match &restored {
+            Message::Assistant { blocks } => {
+                assert_eq!(blocks.len(), 2);
+                match &blocks[0] {
+                    AssistantBlock::Text { text, .. } => assert_eq!(text, "thinking out loud"),
+                    other => panic!("expected Text, got {other:?}"),
+                }
+                match &blocks[1] {
+                    AssistantBlock::ToolCall { id, name, args, .. } => {
+                        assert_eq!(id, "c1");
+                        assert_eq!(name, "fetch");
+                        assert_eq!(args, &json!({"q": "x"}));
+                    }
+                    other => panic!("expected ToolCall, got {other:?}"),
+                }
+            }
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trip_assistant_reasoning_variants() {
+        let msg = Message::Assistant {
+            blocks: vec![
+                AssistantBlock::Reasoning {
+                    text: "consider X".into(),
+                    signature: Some("sig-1".into()),
+                },
+                AssistantBlock::RedactedReasoning {
+                    data: "opaque".into(),
+                },
+            ],
+        };
+        let restored = round_trip(&msg);
+        match &restored {
+            Message::Assistant { blocks } => match (&blocks[0], &blocks[1]) {
+                (
+                    AssistantBlock::Reasoning { text, signature },
+                    AssistantBlock::RedactedReasoning { data },
+                ) => {
+                    assert_eq!(text, "consider X");
+                    assert_eq!(signature.as_deref(), Some("sig-1"));
+                    assert_eq!(data, "opaque");
+                }
+                other => panic!("unexpected blocks: {other:?}"),
+            },
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trip_tool_result_error_variant() {
+        let content = ToolResultContent::Error("boom".into());
+        let json = serde_json::to_string(&content).unwrap();
+        let back: ToolResultContent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, ToolResultContent::Error(s) if s == "boom"));
     }
 }
