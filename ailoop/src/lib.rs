@@ -3,6 +3,7 @@ mod conversation;
 mod engine;
 mod errors;
 mod middleware;
+mod sanitize;
 mod sub_agent;
 #[cfg(feature = "tracing")]
 mod tracing_middleware;
@@ -23,6 +24,7 @@ pub use anti_loop::{AntiLoop, TextPredicate};
 pub use conversation::{Conversation, ConversationBuilder, RunOutcome};
 pub use engine::run_chat;
 pub use middleware::ApprovalMiddleware;
+pub use sanitize::{Sanitize, TextRewriter, ToolArgsRewriter, ToolResultRewriter};
 pub use sub_agent::SubAgentTool;
 #[cfg(feature = "tracing")]
 pub use tracing_middleware::TracingMiddleware;
