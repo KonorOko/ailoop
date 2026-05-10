@@ -27,6 +27,11 @@
 //!
 //! - [`Tool`], [`ToolDyn`] — the two trait shapes.
 //! - [`ToolRegistry`] — registration + activation + dispatch.
+//! - [`ToolContext`], [`ToolActivation`] — per-dispatch context the
+//!   engine hands to every tool handler. Carries the run/step ids and
+//!   a handle into the per-run active tool set so meta-tools can
+//!   activate other tools mid-run (deferred-tools / `search_tools`
+//!   patterns) without shared mutable state on the user side.
 //! - [`ToolJsonType`] — per-type JSON Schema fragments. The
 //!   [`#[ailoop_tool]`](https://docs.rs/ailoop) macro falls back to
 //!   this trait for unknown parameter types; derive it with
@@ -36,10 +41,12 @@
 
 #![deny(missing_docs)]
 
+pub mod context;
 pub mod errors;
 pub mod registry;
 pub mod schema;
 
+pub use context::{ToolActivation, ToolActivationError, ToolContext};
 pub use errors::ToolRegistryError;
 pub use registry::{Tool, ToolDyn, ToolRegistry};
 pub use schema::ToolJsonType;
