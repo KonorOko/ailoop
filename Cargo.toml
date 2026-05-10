@@ -1,14 +1,14 @@
 [workspace]
 members = [
     "ailoop",
-    "ailoop-anthropic",
-    "ailoop-azure-openai",
     "ailoop-context",
     "ailoop-core",
     "ailoop-derive",
-    "ailoop-mcp",
     "ailoop-prompts",
     "ailoop-tools",
+    "adapters/anthropic",
+    "adapters/azure-openai",
+    "adapters/mcp",
     "examples/basic-chat",
     "examples/mcp-time",
     "examples/persistent-chat",
@@ -28,10 +28,10 @@ ailoop-core = { path = "ailoop-core" }
 ailoop-prompts = { path = "ailoop-prompts" }
 ailoop-context = { path = "ailoop-context" }
 ailoop-tools = { path = "ailoop-tools" }
-ailoop-anthropic = { path = "ailoop-anthropic" }
-ailoop-azure-openai = { path = "ailoop-azure-openai" }
+ailoop-anthropic = { path = "adapters/anthropic" }
+ailoop-azure-openai = { path = "adapters/azure-openai" }
 ailoop-derive = { path = "ailoop-derive" }
-ailoop-mcp = { path = "ailoop-mcp" }
+ailoop-mcp = { path = "adapters/mcp" }
 
 async-trait = "0.1.89"
 async-stream = "0.3.6"
