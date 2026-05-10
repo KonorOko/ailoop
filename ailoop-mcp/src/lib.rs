@@ -8,6 +8,9 @@
 
 mod connection;
 mod errors;
+mod naming;
+mod tool;
 
 pub use connection::{McpConnection, McpConnectionBuilder};
 pub use errors::McpError;
+pub use tool::McpTool;

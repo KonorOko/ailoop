@@ -1,10 +1,14 @@
 use std::sync::Arc;
 
+use ailoop_core::{ToolDefinition, ToolTag};
+use ailoop_tools::ToolDyn;
 use rmcp::service::{RoleClient, RunningService, ServiceExt};
 use rmcp::transport::TokioChildProcess;
 use tokio::process::Command;
 
 use crate::errors::McpError;
+use crate::naming;
+use crate::tool::McpTool;
 
 /// Live connection to an MCP server over stdio.
 ///
@@ -44,6 +48,55 @@ impl McpConnection {
         self.inner
             .peer_info()
             .map(|info| info.server_info.name.clone())
+    }
+
+    /// Discover the server's tools and wrap each one as
+    /// `Arc<dyn ToolDyn>`. Each wrapper holds an `Arc` clone of the
+    /// underlying rmcp client, so the connection survives as long as
+    /// any returned tool is alive.
+    ///
+    /// Tools are exposed to the engine as
+    /// `mcp__<server_label>__<tool_name>` (Claude-Desktop convention).
+    /// Names that exceed 64 characters or contain disallowed
+    /// characters are sanitized — see [`crate::naming`] for details.
+    ///
+    /// Every tool is tagged with `[Network, Custom("mcp")]`. Use the
+    /// `Custom("mcp")` tag with `with_approval_for_tags` if you want
+    /// to gate every MCP call through a single approval callback.
+    pub async fn list_tools(&self) -> Result<Vec<Arc<dyn ToolDyn>>, McpError> {
+        let tools = self
+            .inner
+            .list_all_tools()
+            .await
+            .map_err(|e| McpError::Service(e.to_string()))?;
+
+        let default_tags = vec![ToolTag::Network, ToolTag::Custom("mcp".into())];
+
+        let wrappers = tools
+            .into_iter()
+            .map(|t| {
+                let name_at_server = t.name.to_string();
+                let name_for_engine = naming::compose(&self.server_label, &name_at_server);
+                let definition = ToolDefinition {
+                    name: name_for_engine.clone(),
+                    description: t
+                        .description
+                        .map(|d| d.to_string())
+                        .unwrap_or_default(),
+                    input_schema: serde_json::Value::Object((*t.input_schema).clone()),
+                    tags: default_tags.clone(),
+                    cache_control: None,
+                };
+                Arc::new(McpTool {
+                    client: self.inner.clone(),
+                    name_for_engine,
+                    name_at_server,
+                    definition,
+                }) as Arc<dyn ToolDyn>
+            })
+            .collect();
+
+        Ok(wrappers)
     }
 }
 
