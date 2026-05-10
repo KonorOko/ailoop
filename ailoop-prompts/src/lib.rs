@@ -2,7 +2,7 @@ mod errors;
 mod prompt;
 
 pub use errors::PromptError;
-pub use prompt::{Prompt, PromptSection};
+pub use prompt::{Prompt, PromptBuilder, PromptSection};
 
 // Re-export `Tokenizer` from `ailoop-core` so callers that already
 // depend on `ailoop-prompts` can reach it without pulling in

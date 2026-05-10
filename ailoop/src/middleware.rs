@@ -7,9 +7,9 @@ use serde_json::Value;
 
 use crate::{Prompt, PromptSection};
 
-pub struct SystemPromptMiddleware {
-    pub base: Prompt,
-    pub tools_sections: HashMap<String, PromptSection>,
+pub(crate) struct SystemPromptMiddleware {
+    pub(crate) base: Prompt,
+    pub(crate) tools_sections: HashMap<String, PromptSection>,
 }
 
 #[async_trait::async_trait]
