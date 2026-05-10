@@ -239,6 +239,19 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
+    /// Register a tool whose name is not known at compile time. Useful
+    /// for runtime-discovered tools (MCP servers, plugin loaders,
+    /// configuration-driven tool sets) where the concrete type is
+    /// erased behind `Arc<dyn ToolDyn>`. The static counterpart
+    /// [`tool`](Self::tool) only accepts `Sized` values, so it cannot
+    /// take a trait object directly.
+    pub fn tool_dyn(mut self, tool: Arc<dyn ToolDyn>) -> Self {
+        if let Err(e) = self.tools.register(tool) {
+            self.errors.push(e.into());
+        }
+        self
+    }
+
     pub fn tool_with_prompt_file<T>(mut self, tool: T, prompt_path: impl AsRef<Path>) -> Self
     where
         T: ToolDyn + 'static,
@@ -512,7 +525,6 @@ impl<'a, M: CompletionModel> Stream for RunStream<'a, M> {
 mod tests {
     use super::*;
     use ailoop_core::{ChatRequest, CompletionModel, StreamChunk, ToolDecision};
-    use ailoop_tools::registry::ToolDyn as _;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -664,6 +676,48 @@ mod tests {
         dispatch_through_chain(&chat, "untagged", &json!({})).await;
 
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tool_dyn_registers_runtime_tool() {
+        let chat = Conversation::builder(MockModel)
+            .tool_dyn(Arc::new(FakeTool {
+                name: "runtime_tool",
+                tags: vec![],
+            }))
+            .build()
+            .unwrap();
+
+        assert_eq!(chat.active_tool_names(), vec!["runtime_tool".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn tool_dyn_accepts_a_runtime_built_vector() {
+        let discovered: Vec<Arc<dyn ToolDyn>> = vec![
+            Arc::new(FakeTool {
+                name: "alpha",
+                tags: vec![],
+            }),
+            Arc::new(FakeTool {
+                name: "beta",
+                tags: vec![],
+            }),
+            Arc::new(FakeTool {
+                name: "gamma",
+                tags: vec![],
+            }),
+        ];
+
+        let mut builder = Conversation::builder(MockModel);
+        for t in discovered {
+            builder = builder.tool_dyn(t);
+        }
+        let chat = builder.build().unwrap();
+
+        assert_eq!(
+            chat.active_tool_names(),
+            vec!["alpha".to_string(), "beta".into(), "gamma".into()]
+        );
     }
 
     #[tokio::test]
