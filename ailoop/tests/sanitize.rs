@@ -14,7 +14,7 @@ use ailoop_core::{
     AssistantBlock, ChatMiddleware, ChatRequest, FinishReason, RunConfig, RunId, StepId,
     StreamChunk, Usage, UserBlock,
 };
-use ailoop_tools::{ToolDyn, ToolRegistry};
+use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use futures::StreamExt;
 use serde_json::{Value, json};
 
@@ -49,7 +49,7 @@ impl ToolDyn for EchoArgs {
             vec![],
         )
     }
-    async fn call(&self, args: Value) -> ToolResultContent {
+    async fn call(&self, args: Value, _ctx: &ToolContext) -> ToolResultContent {
         ToolResultContent::text(args.to_string())
     }
 }
@@ -71,7 +71,7 @@ impl ToolDyn for LeakySecret {
             vec![],
         )
     }
-    async fn call(&self, _: Value) -> ToolResultContent {
+    async fn call(&self, _: Value, _ctx: &ToolContext) -> ToolResultContent {
         ToolResultContent::text("alice token: secret-123")
     }
 }
@@ -470,7 +470,7 @@ async fn tool_args_callback_can_filter_by_name() {
                 vec![],
             )
         }
-        async fn call(&self, args: Value) -> ToolResultContent {
+        async fn call(&self, args: Value, _ctx: &ToolContext) -> ToolResultContent {
             ToolResultContent::text(args.to_string())
         }
     }
@@ -491,7 +491,7 @@ async fn tool_args_callback_can_filter_by_name() {
                 vec![],
             )
         }
-        async fn call(&self, args: Value) -> ToolResultContent {
+        async fn call(&self, args: Value, _ctx: &ToolContext) -> ToolResultContent {
             ToolResultContent::text(args.to_string())
         }
     }

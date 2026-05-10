@@ -11,6 +11,7 @@
 
 use ailoop_core::ToolTag;
 use ailoop_mcp::McpConnection;
+use ailoop_tools::ToolContext;
 use serde_json::json;
 
 async fn connect() -> McpConnection {
@@ -75,7 +76,9 @@ async fn calls_get_current_time_tool() {
         .find(|t| t.tool_definition().name.contains("current_time"))
         .expect("mcp-server-time should expose a get_current_time-style tool");
 
-    let result = tool.call(json!({"timezone": "UTC"})).await;
+    let result = tool
+        .call(json!({"timezone": "UTC"}), &ToolContext::detached())
+        .await;
     assert!(!result.is_error, "unexpected error reply: {result:?}");
     let text = result.as_text().expect("expected a text payload");
     assert!(!text.is_empty(), "expected a non-empty text payload");
@@ -92,6 +95,6 @@ async fn invalid_args_surface_as_tool_error_not_engine_error() {
         .expect("get_current_time tool");
 
     // Missing required `timezone` argument.
-    let result = tool.call(json!({})).await;
+    let result = tool.call(json!({}), &ToolContext::detached()).await;
     assert!(result.is_error, "expected is_error=true, got {:?}", result);
 }

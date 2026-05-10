@@ -7,7 +7,7 @@
 //! (or its inner `Conversation`) per call.
 
 use ailoop_core::{CompletionModel, FinishReason, ToolDefinition, ToolResultContent};
-use ailoop_tools::ToolDyn;
+use ailoop_tools::{ToolContext, ToolDyn};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
@@ -106,7 +106,7 @@ where
         )
     }
 
-    async fn call(&self, args: Value) -> ToolResultContent {
+    async fn call(&self, args: Value, _ctx: &ToolContext) -> ToolResultContent {
         let prompt = args
             .get("prompt")
             .and_then(Value::as_str)
@@ -160,7 +160,9 @@ mod tests {
         let conv = Conversation::builder(model).build().expect("build");
         let tool = SubAgentTool::new("delegate", "delegate to a sub-agent", conv);
 
-        let result = tool.call(json!({"prompt": "do the thing"})).await;
+        let result = tool
+            .call(json!({"prompt": "do the thing"}), &ToolContext::detached())
+            .await;
         assert_eq!(result.as_text(), Some("delegated answer"));
         assert!(!result.is_error);
     }
@@ -189,8 +191,12 @@ mod tests {
             .expect("build");
         let tool = SubAgentTool::new("delegate", "delegate", conv);
 
-        let first = tool.call(json!({"prompt": "P1"})).await;
-        let second = tool.call(json!({"prompt": "P2"})).await;
+        let first = tool
+            .call(json!({"prompt": "P1"}), &ToolContext::detached())
+            .await;
+        let second = tool
+            .call(json!({"prompt": "P2"}), &ToolContext::detached())
+            .await;
 
         assert_eq!(first.as_text(), Some("first"));
         assert_eq!(second.as_text(), Some("second"));
@@ -259,7 +265,9 @@ mod tests {
             .expect("build");
         let tool = SubAgentTool::new("delegate", "delegate", conv);
 
-        let result = tool.call(json!({"prompt": "anything"})).await;
+        let result = tool
+            .call(json!({"prompt": "anything"}), &ToolContext::detached())
+            .await;
         let text = result.as_text().expect("expected text body on abort");
         assert!(
             text.contains("aborted") && text.contains("policy"),

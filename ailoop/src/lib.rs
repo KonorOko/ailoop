@@ -77,7 +77,10 @@ pub use ailoop_prompts::{Prompt, PromptBuilder, PromptSection};
 // the derive macro of the same name. The two live in different
 // namespaces (one is a trait, one is a macro), so both can be brought
 // into scope by `use ailoop::*;` without conflict.
-pub use ailoop_tools::{Tool, ToolDyn, ToolJsonType, ToolRegistry, errors::ToolRegistryError};
+pub use ailoop_tools::{
+    Tool, ToolActivation, ToolActivationError, ToolContext, ToolDyn, ToolJsonType, ToolRegistry,
+    errors::ToolRegistryError,
+};
 pub use anti_loop::{AntiLoop, TextPredicate};
 pub use conversation::{Conversation, ConversationBuilder, RunOutcome, RunStream};
 pub use errors::{BuildError, EngineError};

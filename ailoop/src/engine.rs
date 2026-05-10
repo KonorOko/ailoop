@@ -9,7 +9,7 @@ use ailoop_core::{
     HookAction, Message, RunConfig, RunId, StepId, StreamChunk, ToolDecision, ToolResultContent,
     Usage, UserBlock,
 };
-use ailoop_tools::{ToolRegistry, errors::ToolRegistryError};
+use ailoop_tools::{ToolActivation, ToolContext, ToolRegistry, errors::ToolRegistryError};
 use async_stream::try_stream;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
@@ -132,6 +132,13 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
     config: RunConfig,
 ) -> Result<BoxStream<'a, Result<StreamChunk, EngineError<M::Error>>>, EngineError<M::Error>> {
     let run_id = config.run_id.clone().unwrap_or_default();
+    // Snapshot the catalog + active set once at run start. Per-turn
+    // `req.tools` and per-dispatch `ToolContext`s are built from these
+    // shared handles, so any mutation a tool makes via
+    // `ctx.tools().activate(...)` is visible on the next turn without
+    // touching the underlying `ToolRegistry`.
+    let catalog = tools.catalog_arc();
+    let active_snapshot = tools.snapshot_active();
     let stream = try_stream! {
         // The abort future resolves with a textual reason when either
         // the timeout elapses or the cancellation token fires; until
@@ -198,7 +205,17 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             let mut tool_calls = Vec::new();
 
             let mut req = ChatRequest::new(current_messages.clone(), config.max_tokens);
-            req.tools = Some(tools.active_tools().map(|t| t.tool_definition()).collect());
+            // Re-read the active set fresh each turn — a tool from the
+            // previous step may have called `ctx.tools().activate(...)`
+            // and that change must reach the model on this turn.
+            req.tools = Some({
+                let active = active_snapshot.lock().expect("active_snapshot lock");
+                catalog
+                    .iter()
+                    .filter(|(name, _)| active.contains(*name))
+                    .map(|(_, tool)| tool.tool_definition())
+                    .collect()
+            });
             req.system_prompt = config.system_prompt.clone();
 
             for mw in &config.middlewares {
@@ -377,14 +394,26 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
 
                 let mut content = match decision {
                     ToolDecision::Continue => {
+                        let ctx = ToolContext::new(
+                            run_id.clone(),
+                            step_id.clone(),
+                            ToolActivation::new(catalog.clone(), active_snapshot.clone()),
+                        );
                         let call_result = race_abort(
-                            tools.tool_call(&name, args.clone()),
+                            tools.tool_call_with_ctx(&name, args.clone(), &ctx),
                             &mut abort_fut,
                         ).await;
                         match call_result {
                             Ok(Ok(content)) => content,
                             Ok(Err(ToolRegistryError::NotFound(_))) => {
-                                let available_tools: Vec<String> = tools.active_tools().map(|t| t.tool_definition().name).collect();
+                                let available_tools: Vec<String> = {
+                                    let active = active_snapshot.lock().expect("active_snapshot lock");
+                                    catalog
+                                        .iter()
+                                        .filter(|(n, _)| active.contains(*n))
+                                        .map(|(n, _)| n.clone())
+                                        .collect()
+                                };
                                 ToolResultContent::error(format!("Tool '{name}' not found. Available tools: [{}]", available_tools.join(", ")))
                             },
                             Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id)?,
@@ -554,7 +583,7 @@ mod tests {
                 vec![],
             )
         }
-        async fn call(&self, _: serde_json::Value) -> ToolResultContent {
+        async fn call(&self, _: serde_json::Value, _ctx: &ToolContext) -> ToolResultContent {
             ToolResultContent::text("sunny")
         }
     }

@@ -3,12 +3,13 @@
 //! tool slot directly into the dynamic dispatch path used by the
 //! engine.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ailoop_core::{ToolDefinition, ToolResultContent, ToolTag};
 use indexmap::{IndexMap, IndexSet};
 use serde::Serialize;
 
+use crate::context::ToolContext;
 use crate::errors::ToolRegistryError;
 
 /// Owns every tool a [`Conversation`] can dispatch to and tracks which
@@ -72,9 +73,17 @@ pub trait Tool: Send + Sync + Sized {
     /// Invoke the tool. The blanket [`ToolDyn::call`] impl
     /// deserializes the model's JSON into [`Args`](Self::Args),
     /// dispatches here, then serializes the result.
+    ///
+    /// `ctx` carries the [`RunId`](ailoop_core::RunId) /
+    /// [`StepId`](ailoop_core::StepId) of the current dispatch and a
+    /// [`ToolActivation`](crate::ToolActivation) handle into the per-run
+    /// active set. Most handlers ignore it; meta-tools that load other
+    /// tools on demand (`search_tools`, MCP discovery) call
+    /// `ctx.tools().activate(name)` to expose tools on the next turn.
     fn call(
         &self,
         args: Self::Args,
+        ctx: &ToolContext,
     ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send;
 }
 
@@ -100,7 +109,13 @@ pub trait ToolDyn: Send + Sync {
     /// them as a tool reply — never as `Err`. The `Result`-shaped
     /// surface for transport-level failures lives on
     /// [`ToolRegistry::tool_call`].
-    async fn call(&self, args: serde_json::Value) -> ToolResultContent;
+    ///
+    /// `ctx` carries per-dispatch identifiers and a
+    /// [`ToolActivation`](crate::ToolActivation) handle for tools
+    /// that need to mutate the active set (deferred / dynamic
+    /// tool loading). Handlers that don't need it simply ignore
+    /// the parameter.
+    async fn call(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolResultContent;
 }
 
 #[async_trait::async_trait]
@@ -113,13 +128,13 @@ impl<T: Tool> ToolDyn for T {
         T::definition(&self)
     }
 
-    async fn call(&self, args: serde_json::Value) -> ToolResultContent {
+    async fn call(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolResultContent {
         let typed: T::Args = match serde_json::from_value(args) {
             Ok(a) => a,
             Err(e) => return ToolResultContent::error(format!("Invalid args: {e}")),
         };
 
-        match T::call(&self, typed).await {
+        match T::call(&self, typed, ctx).await {
             Ok(out) => match serde_json::to_value(&out) {
                 Ok(serde_json::Value::String(s)) => ToolResultContent::text(s),
                 Ok(v) => ToolResultContent::text(v.to_string()),
@@ -139,24 +154,59 @@ impl ToolRegistry {
         }
     }
 
-    /// Look up `name` and dispatch the call. Returns
-    /// [`ToolRegistryError::NotFound`] when no tool with that name was
-    /// registered (the engine handles this in-band by feeding an
-    /// `Error` tool result back to the model rather than aborting the
-    /// run). Tool-internal failures come back inside the
-    /// [`ToolResultContent`] payload — they do not surface as `Err`
-    /// here.
+    /// Look up `name` and dispatch the call with a freshly built
+    /// detached [`ToolContext`]. Convenience entry point for
+    /// standalone callers (tests, scripts) that don't carry an
+    /// engine-issued context. Returns [`ToolRegistryError::NotFound`]
+    /// when no tool with that name was registered (the engine handles
+    /// this in-band by feeding an `Error` tool result back to the
+    /// model rather than aborting the run). Tool-internal failures
+    /// come back inside the [`ToolResultContent`] payload — they do
+    /// not surface as `Err` here.
     pub async fn tool_call(
         &self,
         name: &str,
         args: serde_json::Value,
+    ) -> Result<ToolResultContent, ToolRegistryError> {
+        self.tool_call_with_ctx(name, args, &ToolContext::detached())
+            .await
+    }
+
+    /// Look up `name` and dispatch the call, threading the supplied
+    /// [`ToolContext`] through to the handler. The engine uses this
+    /// path with a per-dispatch context so handlers can mutate the
+    /// per-run active set; standalone callers prefer
+    /// [`Self::tool_call`].
+    pub async fn tool_call_with_ctx(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        ctx: &ToolContext,
     ) -> Result<ToolResultContent, ToolRegistryError> {
         let tool = self
             .tools
             .get(name)
             .ok_or_else(|| ToolRegistryError::NotFound(name.into()))?;
 
-        Ok(tool.call(args).await)
+        Ok(tool.call(args, ctx).await)
+    }
+
+    /// Return a shared snapshot of the catalog (every registered
+    /// tool, by name, in registration order). The engine takes one
+    /// at the start of each run and hands it to every per-dispatch
+    /// [`ToolActivation`] so that `list_*` reads are cheap and don't
+    /// reach back into the registry.
+    pub fn catalog_arc(&self) -> Arc<IndexMap<String, Arc<dyn ToolDyn>>> {
+        Arc::new(self.tools.clone())
+    }
+
+    /// Build a fresh per-run active-set handle initialised from the
+    /// current active set. Returns the `Arc<Mutex<...>>` the engine
+    /// hands to every [`ToolActivation`] for this run; mutations
+    /// inside a tool handler are visible to the engine on the next
+    /// turn without touching the underlying registry.
+    pub fn snapshot_active(&self) -> Arc<Mutex<IndexSet<String>>> {
+        Arc::new(Mutex::new(self.active_tools.clone()))
     }
 
     /// Iterate over the currently active tools in registration
@@ -301,6 +351,7 @@ mod tests {
         fn call(
             &self,
             args: Self::Args,
+            _ctx: &ToolContext,
         ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
             async move { std::fs::read_to_string(&args.path) }
         }
@@ -373,7 +424,11 @@ mod tests {
             )
         }
 
-        async fn call(&self, _args: serde_json::Value) -> ToolResultContent {
+        async fn call(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> ToolResultContent {
             ToolResultContent::text("")
         }
     }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ailoop_core::{ToolDefinition, ToolResultContent};
-use ailoop_tools::ToolDyn;
+use ailoop_tools::{ToolContext, ToolDyn};
 use rmcp::model::{CallToolRequestParams, Content, RawContent};
 use rmcp::service::{RoleClient, RunningService};
 
@@ -42,7 +42,7 @@ impl ToolDyn for McpTool {
         self.definition.clone()
     }
 
-    async fn call(&self, args: serde_json::Value) -> ToolResultContent {
+    async fn call(&self, args: serde_json::Value, _ctx: &ToolContext) -> ToolResultContent {
         let mut req = CallToolRequestParams::new(self.name_at_server.clone());
         if let serde_json::Value::Object(map) = args {
             req = req.with_arguments(map);

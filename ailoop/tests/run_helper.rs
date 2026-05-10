@@ -12,7 +12,7 @@ use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{
     AssistantBlock, CancellationToken, FinishReason, RunConfig, StreamChunk, ToolTag, Usage,
 };
-use ailoop_tools::ToolDyn;
+use ailoop_tools::{ToolContext, ToolDyn};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -112,7 +112,7 @@ async fn run_final_text_reflects_last_assistant_turn_only() {
                 vec![ToolTag::ReadOnly],
             )
         }
-        async fn call(&self, _: Value) -> ToolResultContent {
+        async fn call(&self, _: Value, _ctx: &ToolContext) -> ToolResultContent {
             ToolResultContent::text("sunny")
         }
     }

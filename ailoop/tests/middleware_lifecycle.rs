@@ -12,7 +12,7 @@ use ailoop_core::{
     ChatMiddleware, ChatRequest, FinishReason, HookAction, RunConfig, RunId, StepId, StreamChunk,
     ToolDecision, Usage,
 };
-use ailoop_tools::{ToolDyn, ToolRegistry};
+use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use futures::StreamExt;
 use serde_json::{Value, json};
 
@@ -128,7 +128,7 @@ impl ToolDyn for GetWeather {
             vec![],
         )
     }
-    async fn call(&self, _: Value) -> ToolResultContent {
+    async fn call(&self, _: Value, _ctx: &ToolContext) -> ToolResultContent {
         ToolResultContent::text("sunny")
     }
 }

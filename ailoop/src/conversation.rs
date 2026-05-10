@@ -290,6 +290,7 @@ pub struct ConversationBuilder<M: CompletionModel> {
     tool_prompts: HashMap<String, PromptSection>,
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
     capabilities: Option<Vec<ToolTag>>,
+    initial_active: Option<Vec<String>>,
     approval: Option<ApprovalSpec>,
     request_defaults: RequestDefaults,
     errors: Vec<BuildError>,
@@ -313,6 +314,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             tools,
             middlewares: vec![],
             capabilities: None,
+            initial_active: None,
             approval: None,
             request_defaults: RequestDefaults::default(),
             errors: vec![],
@@ -428,6 +430,30 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// Successive calls overwrite the previous filter.
     pub fn with_capabilities(mut self, capabilities: &[ToolTag]) -> Self {
         self.capabilities = Some(capabilities.to_vec());
+        self
+    }
+
+    /// Restrict the *initial* active set to the named tools, by exact
+    /// wire name. Other registered tools stay in the catalog (so a
+    /// handler can flip them on via
+    /// [`ToolContext::tools`](ailoop_tools::ToolContext::tools)) but
+    /// are not sent to the model on the first turn.
+    ///
+    /// This is the entry point for the deferred-tools pattern: register
+    /// every tool the agent might ever need, expose only a meta-tool
+    /// like `search_tools` initially, and let the model expand the
+    /// active set on demand.
+    ///
+    /// Applied at `build()` time *after* [`with_capabilities`](Self::with_capabilities),
+    /// so `initial_active_tools` operates on the capability-filtered
+    /// set — names not in the filtered catalog are silently ignored.
+    /// Successive calls overwrite the previous list.
+    pub fn initial_active_tools<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.initial_active = Some(names.into_iter().map(Into::into).collect());
         self
     }
 
@@ -648,6 +674,17 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             tools.deactivate_all();
             tools.activate_by_tags(&capabilities);
         }
+        if let Some(initial_active) = self.initial_active {
+            tools.deactivate_all();
+            for name in initial_active {
+                // `activate_tool` errors only on unknown names; the
+                // documented contract is to silently skip names not in
+                // the (possibly capability-filtered) catalog so that
+                // `initial_active_tools` composes cleanly with
+                // `with_capabilities`.
+                let _ = tools.activate_tool(&name);
+            }
+        }
 
         if let Some(spec) = self.approval {
             let approval_mw = match spec.tags {
@@ -760,7 +797,11 @@ mod tests {
                 self.tags.clone(),
             )
         }
-        async fn call(&self, _args: serde_json::Value) -> ailoop_core::ToolResultContent {
+        async fn call(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &ailoop_tools::ToolContext,
+        ) -> ailoop_core::ToolResultContent {
             ailoop_core::ToolResultContent::text("")
         }
     }

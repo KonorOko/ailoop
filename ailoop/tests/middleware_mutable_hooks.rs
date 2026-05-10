@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use ailoop::{Conversation, Message, ToolDefinition, ToolResultContent, advanced::run_chat};
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{ChatMiddleware, FinishReason, RunConfig, RunId, StepId, StreamChunk, Usage};
-use ailoop_tools::{ToolDyn, ToolRegistry};
+use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use futures::StreamExt;
 use serde_json::{Value, json};
 
@@ -165,7 +165,7 @@ impl ToolDyn for EchoArgs {
             vec![],
         )
     }
-    async fn call(&self, args: Value) -> ToolResultContent {
+    async fn call(&self, args: Value, _ctx: &ToolContext) -> ToolResultContent {
         // Echo what the tool actually received so tests can assert
         // that `_mut` mutations propagate through to the tool.
         ToolResultContent::text(args.to_string())

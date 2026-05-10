@@ -15,7 +15,7 @@ use ailoop_core::{
     CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, HookAction,
     RunConfig, RunId, StepId, StreamChunk, ToolDecision, Usage,
 };
-use ailoop_tools::{ToolDyn, ToolRegistry};
+use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -68,7 +68,7 @@ impl ToolDyn for CancelOnSecondCall {
             vec![],
         )
     }
-    async fn call(&self, _: Value) -> ToolResultContent {
+    async fn call(&self, _: Value, _ctx: &ToolContext) -> ToolResultContent {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
             ToolResultContent::text("first")
@@ -380,7 +380,7 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
                 vec![],
             )
         }
-        async fn call(&self, _: Value) -> ToolResultContent {
+        async fn call(&self, _: Value, _ctx: &ToolContext) -> ToolResultContent {
             ToolResultContent::text("never")
         }
     }
