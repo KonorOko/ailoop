@@ -13,6 +13,7 @@ use reqwest::StatusCode;
 /// preserves whatever was returned so callers (logs, metrics, future
 /// `RetryingModel<M>`) never lose information.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ApiErrorKind {
     RateLimit,
     InvalidRequest,
@@ -46,6 +47,7 @@ impl ApiErrorKind {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AzureOpenAIError {
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),

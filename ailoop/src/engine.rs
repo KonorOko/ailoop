@@ -154,6 +154,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                     yield chunk;
                     return;
                 }
+                _ => {}
             };
         }
 
@@ -403,6 +404,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                         yield chunk;
                         return;
                     }
+                    _ => ToolResultContent::Error("unsupported ToolDecision variant".into()),
                 };
 
                 // Output-transform phase: every `_mut` runs before any

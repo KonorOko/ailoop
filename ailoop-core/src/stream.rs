@@ -88,6 +88,7 @@ pub enum StreamChunk {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum FinishReason {
     EndTurn,
     ToolUse,
@@ -98,6 +99,7 @@ pub enum FinishReason {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,

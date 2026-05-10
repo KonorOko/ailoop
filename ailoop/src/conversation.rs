@@ -39,6 +39,7 @@ pub struct Conversation<M: CompletionModel> {
 /// produced any text, or when the last assistant message contains only
 /// non-text blocks (`ToolCall`, `Reasoning`, `RedactedReasoning`).
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct RunOutcome {
     pub run_id: RunId,
     pub finish_reason: FinishReason,

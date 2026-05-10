@@ -22,6 +22,7 @@ pub enum CacheControl {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Message {
     User { blocks: Vec<UserBlock> },
     Assistant { blocks: Vec<AssistantBlock> },
@@ -179,6 +180,7 @@ impl AssistantBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ToolResultContent {
     Text(String),
     Error(String),
@@ -210,6 +212,7 @@ pub enum SystemPrompt {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SystemBlock {
     pub text: String,
     pub cache_control: Option<CacheControl>,
@@ -285,9 +288,7 @@ mod tests {
     #[test]
     fn round_trip_user_text_drops_cache_control() {
         let msg = Message::User {
-            blocks: vec![
-                UserBlock::text("hello").with_cache_control(Some(CacheControl::Ephemeral)),
-            ],
+            blocks: vec![UserBlock::text("hello").with_cache_control(Some(CacheControl::Ephemeral))],
         };
         let restored = round_trip(&msg);
         assert_user_text_eq(&restored, "hello");

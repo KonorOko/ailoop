@@ -131,6 +131,7 @@ fn to_anthropic_message(message: &Message) -> serde_json::Value {
             "role": "assistant",
             "content": blocks.iter().map(to_anthropic_assistant_block).collect::<Vec<_>>(),
         }),
+        _ => json!({ "role": "user", "content": [] }),
     }
 }
 
@@ -154,6 +155,7 @@ fn to_anthropic_user_block(block: &UserBlock) -> serde_json::Value {
             let (text, is_error) = match content {
                 ToolResultContent::Text(t) => (t.as_str(), false),
                 ToolResultContent::Error(e) => (e.as_str(), true),
+                _ => ("", false),
             };
             let mut obj = serde_json::Map::new();
             obj.insert("type".into(), json!("tool_result"));

@@ -81,6 +81,7 @@ async fn calls_get_current_time_tool() {
             assert!(!s.is_empty(), "expected a non-empty text payload");
         }
         ToolResultContent::Error(e) => panic!("unexpected error reply: {e}"),
+        _ => panic!("unexpected tool result variant"),
     }
 }
 
@@ -99,5 +100,6 @@ async fn invalid_args_surface_as_tool_error_not_engine_error() {
     match result {
         ToolResultContent::Error(_) => {}
         ToolResultContent::Text(t) => panic!("expected Error reply, got Text: {t}"),
+        _ => panic!("unexpected tool result variant"),
     }
 }

@@ -18,6 +18,7 @@ pub enum EngineError<E: std::error::Error> {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BuildError {
     #[error("tool registration failed: {0}")]
     ToolRegistry(#[from] ToolRegistryError),

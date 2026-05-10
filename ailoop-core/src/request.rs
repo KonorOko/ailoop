@@ -4,6 +4,7 @@ use serde_json::Value;
 use crate::{CacheControl, Message, SystemPrompt};
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct ChatRequest {
     pub messages: Vec<Message>,
     pub system_prompt: Option<SystemPrompt>,
@@ -75,6 +76,7 @@ pub enum ToolChoice {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[non_exhaustive]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,

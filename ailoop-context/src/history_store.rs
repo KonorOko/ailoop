@@ -71,6 +71,7 @@ impl JsonFileHistoryStore {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum JsonFileHistoryStoreError {
     #[error("failed to read/write snapshot file: {0}")]
     Io(#[from] std::io::Error),

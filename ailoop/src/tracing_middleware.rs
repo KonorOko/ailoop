@@ -20,6 +20,7 @@ use serde_json::Value;
 /// the `tracing` crate. Register a subscriber (e.g.
 /// `tracing_subscriber::fmt`) to consume the output.
 #[derive(Debug, Default, Clone)]
+#[non_exhaustive]
 pub struct TracingMiddleware;
 
 impl TracingMiddleware {

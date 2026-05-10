@@ -50,6 +50,7 @@ pub trait TokenProvider: Send + Sync {
 ///   token on each request. This is the right choice for Microsoft Entra
 ///   ID / managed identity flows where tokens expire (~1h).
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum AzureOpenAIAuth {
     ApiKey(String),
     Token(String),

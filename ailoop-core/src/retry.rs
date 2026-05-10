@@ -35,6 +35,7 @@ pub trait Retryable {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RetryClassification {
     /// Never retry. Auth, validation, schema errors, etc.
     Permanent,
@@ -49,6 +50,7 @@ pub enum RetryClassification {
 /// including the first one. `max_attempts: 3` means up to two retries
 /// after the original failure.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RetryConfig {
     pub max_attempts: u32,
     pub base_delay: Duration,

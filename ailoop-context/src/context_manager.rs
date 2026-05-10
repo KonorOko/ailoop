@@ -10,6 +10,7 @@ use crate::{
 /// Returned wrapped in `Option`: `None` means compaction was not needed
 /// (history fits within `max_tokens`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CompactionReport {
     pub before: usize,
     pub after: usize,
@@ -175,6 +176,7 @@ impl ContextManager {
                     _ => None,
                 })
                 .collect(),
+            _ => Vec::new(),
         };
 
         if target_ids.is_empty() {
@@ -421,6 +423,7 @@ mod tests {
                         saw_result = true;
                     }
                 }
+                _ => {}
             }
         }
         assert!(

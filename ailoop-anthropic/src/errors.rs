@@ -10,6 +10,7 @@ use reqwest::StatusCode;
 /// Consumers (for example a future `RetryingModel<M>`) can pattern-match
 /// `Overloaded` and `RateLimit` to drive backoff, and ignore the rest.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ApiErrorKind {
     Overloaded,
     RateLimit,
@@ -42,6 +43,7 @@ impl ApiErrorKind {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AnthropicError {
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),

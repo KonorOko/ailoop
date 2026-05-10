@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum CompactionError {
     #[error("Not enough history to compact")]
     NotEnoughHistory,
@@ -18,6 +19,7 @@ pub enum CompactionError {
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FromMessagesError {
     #[error(
         "messages and pinned must have the same length (messages: {messages}, pinned: {pinned})"

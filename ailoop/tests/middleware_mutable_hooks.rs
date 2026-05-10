@@ -301,6 +301,7 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
             *self.seen.lock().unwrap() = Some(match result {
                 ToolResultContent::Text(t) => ToolResultContent::Text(t.clone()),
                 ToolResultContent::Error(e) => ToolResultContent::Error(e.clone()),
+                _ => ToolResultContent::Error("unknown variant".into()),
             });
         }
     }

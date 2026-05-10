@@ -17,6 +17,7 @@ use crate::errors::CompactionError;
 /// message it preserves so the [`crate::ContextManager`] can keep its
 /// internal mask consistent across compactions.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CompactionOutput {
     pub messages: Vec<Message>,
     pub pinned: Vec<bool>,
@@ -114,6 +115,7 @@ fn is_safe_start(msg: &Message) -> bool {
             .iter()
             .any(|b| matches!(b, UserBlock::ToolResult { .. })),
         Message::Assistant { .. } => false,
+        _ => false,
     }
 }
 
@@ -285,6 +287,7 @@ fn flatten_for_summary(msg: &Message) -> Message {
                         let body = match content {
                             ToolResultContent::Text(t) => t.clone(),
                             ToolResultContent::Error(e) => format!("[error] {e}"),
+                            _ => "[unsupported tool result]".to_string(),
                         };
                         UserBlock::text(format!("[tool_result:{call_id}] {body}"))
                     }
@@ -312,6 +315,7 @@ fn flatten_for_summary(msg: &Message) -> Message {
                 })
                 .collect(),
         },
+        _ => Message::user("[unsupported message]"),
     }
 }
 

@@ -66,6 +66,7 @@ fn to_messages(system_prompt: Option<&str>, messages: &[Message]) -> Vec<Value> 
         match msg {
             Message::User { blocks } => append_user_blocks(&mut out, blocks),
             Message::Assistant { blocks } => append_assistant_blocks(&mut out, blocks),
+            _ => {}
         }
     }
     out
@@ -92,6 +93,7 @@ fn append_user_blocks(out: &mut Vec<Value>, blocks: &[UserBlock]) {
                 let text = match content {
                     ToolResultContent::Text(t) => t.as_str(),
                     ToolResultContent::Error(e) => e.as_str(),
+                    _ => "",
                 };
                 out.push(json!({
                     "role": "tool",

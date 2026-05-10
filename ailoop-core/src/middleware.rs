@@ -86,11 +86,13 @@ pub trait ChatMiddleware: Send + Sync {
     }
 }
 
+#[non_exhaustive]
 pub enum HookAction {
     Continue,
     Terminate { reason: String },
 }
 
+#[non_exhaustive]
 pub enum ToolDecision {
     Continue,
     Skip { reason: String },

@@ -139,6 +139,7 @@ fn finish_reason_str(r: &FinishReason) -> &'static str {
         FinishReason::StopSequence => "stop_sequence",
         FinishReason::Aborted(_) => "aborted",
         FinishReason::Other(_) => "other",
+        _ => "unknown",
     }
 }
 
@@ -166,12 +167,14 @@ fn tool_result_outcome(r: &ToolResultContent) -> &'static str {
     match r {
         ToolResultContent::Text(_) => "text",
         ToolResultContent::Error(_) => "error",
+        _ => "unknown",
     }
 }
 
 fn tool_result_body(r: &ToolResultContent) -> &str {
     match r {
         ToolResultContent::Text(s) | ToolResultContent::Error(s) => s,
+        _ => "",
     }
 }
 

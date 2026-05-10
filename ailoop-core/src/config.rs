@@ -7,6 +7,7 @@ use crate::ids::RunId;
 use crate::message::SystemPrompt;
 use crate::middleware::ChatMiddleware;
 
+#[non_exhaustive]
 pub struct RunConfig {
     pub system_prompt: Option<SystemPrompt>,
     pub max_iterations: usize,

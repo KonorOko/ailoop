@@ -8,6 +8,7 @@ use thiserror::Error;
 /// the model sees the failure as a tool reply, mirroring the
 /// `SubAgentTool` policy.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum McpError {
     #[error("MCP transport creation failed: {0}")]
     TransportCreation(String),

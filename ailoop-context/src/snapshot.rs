@@ -16,6 +16,7 @@ use crate::errors::FromMessagesError;
 /// deserializing any other value fails with an explicit error.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(try_from = "RawConversationSnapshot")]
+#[non_exhaustive]
 pub struct ConversationSnapshot {
     pub version: u32,
     pub messages: Vec<Message>,

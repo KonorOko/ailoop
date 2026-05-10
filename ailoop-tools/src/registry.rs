@@ -249,7 +249,8 @@ mod tests {
 
         match result {
             ToolResultContent::Text(text) => assert_eq!("content", text),
-            ToolResultContent::Error(error) => panic!("Failed to read"),
+            ToolResultContent::Error(_) => panic!("Failed to read"),
+            _ => panic!("unexpected tool result variant"),
         }
     }
 
