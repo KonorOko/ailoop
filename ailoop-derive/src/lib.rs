@@ -48,6 +48,10 @@ fn ailoop_tool_path() -> proc_macro2::TokenStream {
     resolve_item_path(&["ailoop", "ailoop-tools"], "Tool")
 }
 
+fn ailoop_tool_context_path() -> proc_macro2::TokenStream {
+    resolve_item_path(&["ailoop", "ailoop-tools"], "ToolContext")
+}
+
 fn ailoop_tool_definition_path() -> proc_macro2::TokenStream {
     resolve_item_path(&["ailoop", "ailoop-core"], "ToolDefinition")
 }
@@ -58,6 +62,27 @@ fn ailoop_tool_tag_path() -> proc_macro2::TokenStream {
 
 fn ailoop_tool_json_type_path() -> proc_macro2::TokenStream {
     resolve_item_path(&["ailoop", "ailoop-tools"], "ToolJsonType")
+}
+
+/// Returns `true` if `ty` is a reference whose final path segment is
+/// `ToolContext` — this is what the macro looks for in the user's fn
+/// signature to detect an opt-in `ctx: &ToolContext` trailing parameter.
+/// Any path prefix matches (`ToolContext`, `ailoop_tools::ToolContext`,
+/// `ailoop::ToolContext`) so users don't have to import the type a
+/// specific way.
+fn is_tool_context_ref(ty: &Type) -> bool {
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    let Type::Path(type_path) = &*reference.elem else {
+        return false;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .map(|seg| seg.ident == "ToolContext")
+        .unwrap_or(false)
 }
 
 fn extract_doc_comment(attrs: &[syn::Attribute]) -> Option<String> {
@@ -500,7 +525,24 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut param_descriptions: Vec<String> = Vec::new();
     let mut json_types: Vec<proc_macro2::TokenStream> = Vec::new();
 
-    for arg in input_fn.sig.inputs.iter_mut() {
+    // Detect a trailing `ctx: &ToolContext` parameter. When present,
+    // the macro routes the engine-supplied `ToolContext` through to
+    // the user's function and excludes it from the generated `Args`
+    // struct (the model never sees this parameter). When absent, the
+    // generated `Tool::call` still receives a `_ctx: &ToolContext`
+    // (silently ignored) so the trait signature is uniform.
+    let total_inputs = input_fn.sig.inputs.len();
+    let takes_ctx = match input_fn.sig.inputs.iter().last() {
+        Some(syn::FnArg::Typed(pat_type)) => is_tool_context_ref(&pat_type.ty),
+        _ => false,
+    };
+    let payload_inputs = if takes_ctx { total_inputs - 1 } else { total_inputs };
+
+    for (idx, arg) in input_fn.sig.inputs.iter_mut().enumerate() {
+        if takes_ctx && idx == payload_inputs {
+            // Skip the trailing ctx param — it is not a model-visible argument.
+            continue;
+        }
         let syn::FnArg::Typed(pat_type) = arg else {
             continue;
         };
@@ -545,10 +587,11 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
     let params_struct_name = format_ident!("{}Parameters", struct_name);
     let static_name = format_ident!("{}", fn_name_str.to_uppercase());
 
-    let inner_call = if is_async {
-        quote! { #fn_name(#(args.#param_names,)*).await }
-    } else {
-        quote! { #fn_name(#(args.#param_names,)*) }
+    let inner_call = match (is_async, takes_ctx) {
+        (true, true) => quote! { #fn_name(#(args.#param_names,)* ctx).await },
+        (true, false) => quote! { #fn_name(#(args.#param_names,)*).await },
+        (false, true) => quote! { #fn_name(#(args.#param_names,)* ctx) },
+        (false, false) => quote! { #fn_name(#(args.#param_names,)*) },
     };
 
     let call_body = if is_fallible {
@@ -558,6 +601,7 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     let tool_path = ailoop_tool_path();
+    let tool_context_path = ailoop_tool_context_path();
     let tool_definition_path = ailoop_tool_definition_path();
     let tool_tag_path = ailoop_tool_tag_path();
 
@@ -637,6 +681,7 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
             fn call(
                 &self,
                 args: Self::Args,
+                #[allow(unused_variables)] ctx: &#tool_context_path,
             ) -> impl ::core::future::Future<Output = ::core::result::Result<Self::Output, Self::Error>> + Send {
                 async move { #call_body }
             }
