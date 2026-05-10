@@ -27,6 +27,34 @@ pub struct ChatRequest {
     pub additional_params: Option<Value>,
 }
 
+impl Default for ChatRequest {
+    fn default() -> Self {
+        Self {
+            messages: Vec::new(),
+            system_prompt: None,
+            tools: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: Vec::new(),
+            max_tokens: 4096,
+            tool_choice: None,
+            disable_parallel_tool_use: None,
+            additional_params: None,
+        }
+    }
+}
+
+impl ChatRequest {
+    pub fn new(messages: Vec<Message>, max_tokens: u32) -> Self {
+        Self {
+            messages,
+            max_tokens,
+            ..Default::default()
+        }
+    }
+}
+
 /// Constraint placed on the model's tool selection for a single
 /// request. Variant naming follows Anthropic's wire vocabulary; the
 /// Chat Completions adapter translates `Any` → `"required"` and

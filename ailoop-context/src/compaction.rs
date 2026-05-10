@@ -22,6 +22,12 @@ pub struct CompactionOutput {
     pub pinned: Vec<bool>,
 }
 
+impl CompactionOutput {
+    pub fn new(messages: Vec<Message>, pinned: Vec<bool>) -> Self {
+        Self { messages, pinned }
+    }
+}
+
 #[async_trait]
 pub trait CompactionStrategy: Send + Sync {
     /// Stable, machine-readable name of the strategy. Used by
