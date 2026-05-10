@@ -45,12 +45,7 @@ impl ChatMiddleware for TracingMiddleware {
         HookAction::Continue
     }
 
-    async fn on_chat_request(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        req: &mut ChatRequest,
-    ) {
+    async fn on_chat_request(&self, run_id: &RunId, step_id: &StepId, req: &mut ChatRequest) {
         tracing::debug!(
             target: "ailoop.step",
             run_id = %run_id,
@@ -164,11 +159,7 @@ impl ChatMiddleware for TracingMiddleware {
         );
     }
 
-    async fn on_run_error(
-        &self,
-        run_id: &RunId,
-        err: &(dyn std::error::Error + Send + Sync),
-    ) {
+    async fn on_run_error(&self, run_id: &RunId, err: &(dyn std::error::Error + Send + Sync)) {
         tracing::error!(
             target: "ailoop.run",
             run_id = %run_id,
@@ -266,13 +257,8 @@ mod tests {
                 mw.on_run_start(&run_id, &[], &RunConfig::default()).await;
                 mw.on_before_tool_call(&run_id, &step_id, "get_weather", &serde_json::Value::Null)
                     .await;
-                mw.on_run_finished(
-                    &run_id,
-                    &FinishReason::EndTurn,
-                    &Usage::default(),
-                    &[],
-                )
-                .await;
+                mw.on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
+                    .await;
                 mw.on_chunk(&StreamChunk::HistoryCompacted {
                     run_id: run_id.clone(),
                     before_count: 12,
@@ -290,10 +276,22 @@ mod tests {
             "expected log to contain run_id `{run_id_str}`, got:\n{log}"
         );
         assert!(log.contains("run started"), "missing on_run_start event");
-        assert!(log.contains("tool call starting"), "missing on_before_tool_call event");
-        assert!(log.contains("run finished"), "missing on_run_finished event");
-        assert!(log.contains("history compacted"), "missing HistoryCompacted event");
-        assert!(log.contains("strategy=\"truncate\""), "missing strategy field");
+        assert!(
+            log.contains("tool call starting"),
+            "missing on_before_tool_call event"
+        );
+        assert!(
+            log.contains("run finished"),
+            "missing on_run_finished event"
+        );
+        assert!(
+            log.contains("history compacted"),
+            "missing HistoryCompacted event"
+        );
+        assert!(
+            log.contains("strategy=\"truncate\""),
+            "missing strategy field"
+        );
     }
 
     /// Drives a real `run_chat` with `TracingMiddleware` registered and a

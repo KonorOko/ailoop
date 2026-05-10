@@ -101,9 +101,7 @@ mod tests {
 
     fn one_text_turn(text: &str) -> Vec<StreamChunk> {
         vec![
-            StreamChunk::TextDelta {
-                delta: text.into(),
-            },
+            StreamChunk::TextDelta { delta: text.into() },
             StreamChunk::TurnFinished {
                 reason: FinishReason::EndTurn,
                 usage: Usage::default(),
@@ -206,12 +204,7 @@ mod tests {
         struct AbortMw;
         #[async_trait::async_trait]
         impl ChatMiddleware for AbortMw {
-            async fn on_run_start(
-                &self,
-                _: &RunId,
-                _: &[Message],
-                _: &RunConfig,
-            ) -> HookAction {
+            async fn on_run_start(&self, _: &RunId, _: &[Message], _: &RunConfig) -> HookAction {
                 HookAction::Terminate {
                     reason: "policy".into(),
                 }

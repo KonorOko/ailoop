@@ -577,21 +577,25 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
     // description in as an extra key. Per-parameter Values are inserted
     // into a `Map` so the final `serde_json::json!` call sees a complete,
     // ordered properties object.
-    let property_inserts = param_names.iter().zip(json_types.iter()).zip(param_descriptions.iter()).map(|((name, json_type), desc)| {
-        let name_str = name.to_string();
-        quote! {
-            {
-                let mut __schema: ::serde_json::Value = #json_type;
-                if let ::serde_json::Value::Object(ref mut __obj) = __schema {
-                    __obj.insert(
-                        ::std::string::String::from("description"),
-                        ::serde_json::Value::String(::std::string::String::from(#desc)),
-                    );
+    let property_inserts = param_names
+        .iter()
+        .zip(json_types.iter())
+        .zip(param_descriptions.iter())
+        .map(|((name, json_type), desc)| {
+            let name_str = name.to_string();
+            quote! {
+                {
+                    let mut __schema: ::serde_json::Value = #json_type;
+                    if let ::serde_json::Value::Object(ref mut __obj) = __schema {
+                        __obj.insert(
+                            ::std::string::String::from("description"),
+                            ::serde_json::Value::String(::std::string::String::from(#desc)),
+                        );
+                    }
+                    __properties.insert(::std::string::String::from(#name_str), __schema);
                 }
-                __properties.insert(::std::string::String::from(#name_str), __schema);
             }
-        }
-    });
+        });
 
     let expanded = quote! {
         #[derive(serde::Deserialize)]

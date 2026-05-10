@@ -4,7 +4,7 @@ use ailoop_core::{
     AssistantBlock, CacheControl, ChatRequest, Message, SystemBlock, SystemPrompt, ToolChoice,
     ToolDefinition, ToolResultContent, UserBlock,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
     let mut body = serde_json::Map::new();
@@ -98,10 +98,12 @@ fn to_anthropic_system(prompt: &SystemPrompt) -> Value {
         // existing fixtures and zero-cache-control callers see no diff.
         SystemPrompt::Plain(s) => json!(s),
         SystemPrompt::Blocks(blocks) => {
-            json!(blocks
-                .iter()
-                .map(to_anthropic_system_block)
-                .collect::<Vec<_>>())
+            json!(
+                blocks
+                    .iter()
+                    .map(to_anthropic_system_block)
+                    .collect::<Vec<_>>()
+            )
         }
         // SystemPrompt is `#[non_exhaustive]`; future variants degrade
         // to an empty system on the wire rather than failing the build.
@@ -506,13 +508,15 @@ mod tests {
     #[test]
     fn tool_definition_emits_cache_control_when_set() {
         let req = ChatRequest {
-            tools: Some(vec![ToolDefinition::new(
-                "get_weather",
-                "Look up the weather",
-                json!({ "type": "object", "properties": {} }),
-                vec![],
-            )
-            .with_cache_control(CacheControl::Ephemeral)]),
+            tools: Some(vec![
+                ToolDefinition::new(
+                    "get_weather",
+                    "Look up the weather",
+                    json!({ "type": "object", "properties": {} }),
+                    vec![],
+                )
+                .with_cache_control(CacheControl::Ephemeral),
+            ]),
             ..base_req()
         };
         let body = build_body("claude", &req);

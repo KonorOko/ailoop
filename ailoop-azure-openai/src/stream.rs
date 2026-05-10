@@ -171,9 +171,7 @@ mod tests {
         Ok(serde_json::from_str(s).unwrap())
     }
 
-    async fn run(
-        events: Vec<Result<ChatCompletionsChunk, AzureOpenAIError>>,
-    ) -> Vec<StreamChunk> {
+    async fn run(events: Vec<Result<ChatCompletionsChunk, AzureOpenAIError>>) -> Vec<StreamChunk> {
         let mut out = Vec::new();
         let mut s = process_events(stream::iter(events));
         while let Some(chunk) = s.next().await {
@@ -302,7 +300,10 @@ mod tests {
                 other => panic!("unexpected chunk {other:?}"),
             }
         }
-        assert_eq!(starts, vec![("a".into(), "f1".into()), ("b".into(), "f2".into())]);
+        assert_eq!(
+            starts,
+            vec![("a".into(), "f1".into()), ("b".into(), "f2".into())]
+        );
         assert_eq!(
             args,
             vec![

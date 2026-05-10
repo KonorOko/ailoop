@@ -18,9 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use ailoop::{Conversation, Message, ToolDefinition, ToolResultContent, run_chat};
 use ailoop_core::testing::ScriptedModel;
-use ailoop_core::{
-    ChatMiddleware, FinishReason, RunConfig, RunId, StepId, StreamChunk, Usage,
-};
+use ailoop_core::{ChatMiddleware, FinishReason, RunConfig, RunId, StepId, StreamChunk, Usage};
 use ailoop_tools::{ToolRegistry, registry::ToolDyn};
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -86,7 +84,12 @@ async fn on_chunk_mut_mutation_visible_to_subsequent_on_chunk() {
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await
         .expect("run_chat should start");
-    let chunks: Vec<_> = stream.collect::<Vec<_>>().await.into_iter().filter_map(|c| c.ok()).collect();
+    let chunks: Vec<_> = stream
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|c| c.ok())
+        .collect();
 
     // Observer captured the mutated values.
     let seen = observer.seen.lock().unwrap().clone();
@@ -205,13 +208,7 @@ async fn on_before_tool_call_mut_mutation_visible_to_tool_and_observer() {
     struct RedactArgs;
     #[async_trait::async_trait]
     impl ChatMiddleware for RedactArgs {
-        async fn on_before_tool_call_mut(
-            &self,
-            _: &RunId,
-            _: &StepId,
-            _: &str,
-            args: &mut Value,
-        ) {
+        async fn on_before_tool_call_mut(&self, _: &RunId, _: &StepId, _: &str, args: &mut Value) {
             if let Some(obj) = args.as_object_mut() {
                 obj.insert("redacted".into(), Value::Bool(true));
             }
@@ -256,10 +253,20 @@ async fn on_before_tool_call_mut_mutation_visible_to_tool_and_observer() {
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await
         .expect("run_chat should start");
-    let chunks: Vec<_> = stream.collect::<Vec<_>>().await.into_iter().filter_map(|c| c.ok()).collect();
+    let chunks: Vec<_> = stream
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|c| c.ok())
+        .collect();
 
     // (a) Observer saw the mutated args.
-    let seen = observer.seen.lock().unwrap().clone().expect("args observed");
+    let seen = observer
+        .seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("args observed");
     assert_eq!(seen, json!({"secret": "abc", "redacted": true}));
 
     // (b) Tool received the mutated args (echoed back into ToolResult).
@@ -360,7 +367,12 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
     let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
         .await
         .expect("run_chat should start");
-    let chunks: Vec<_> = stream.collect::<Vec<_>>().await.into_iter().filter_map(|c| c.ok()).collect();
+    let chunks: Vec<_> = stream
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|c| c.ok())
+        .collect();
 
     // Observer saw the mutated result.
     match observer.seen.lock().unwrap().clone().expect("observed") {

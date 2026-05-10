@@ -51,12 +51,7 @@ impl ChatMiddleware for RecordingMiddleware {
         HookAction::Continue
     }
 
-    async fn on_chat_request(
-        &self,
-        _run_id: &RunId,
-        _step_id: &StepId,
-        _req: &mut ChatRequest,
-    ) {
+    async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, _req: &mut ChatRequest) {
         self.push("on_chat_request");
     }
 
@@ -113,11 +108,7 @@ impl ChatMiddleware for RecordingMiddleware {
         self.push("on_run_finished");
     }
 
-    async fn on_run_error(
-        &self,
-        _run_id: &RunId,
-        _err: &(dyn std::error::Error + Send + Sync),
-    ) {
+    async fn on_run_error(&self, _run_id: &RunId, _err: &(dyn std::error::Error + Send + Sync)) {
         self.push("on_run_error");
     }
 }

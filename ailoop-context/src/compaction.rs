@@ -284,7 +284,9 @@ fn flatten_for_summary(msg: &Message) -> Message {
                 .iter()
                 .map(|b| match b {
                     UserBlock::Text { text, .. } => UserBlock::text(text.clone()),
-                    UserBlock::ToolResult { call_id, content, .. } => {
+                    UserBlock::ToolResult {
+                        call_id, content, ..
+                    } => {
                         let body = match content {
                             ToolResultContent::Text(t) => t.clone(),
                             ToolResultContent::Error(e) => format!("[error] {e}"),

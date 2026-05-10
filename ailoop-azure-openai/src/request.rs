@@ -10,10 +10,7 @@ pub fn build_body(deployment: &str, req: &ChatRequest) -> Value {
     let mut body = serde_json::Map::new();
     body.insert("model".into(), json!(deployment));
     body.insert("stream".into(), json!(true));
-    body.insert(
-        "stream_options".into(),
-        json!({ "include_usage": true }),
-    );
+    body.insert("stream_options".into(), json!({ "include_usage": true }));
     body.insert("max_tokens".into(), json!(req.max_tokens));
     let system_text = req.system_prompt.as_ref().map(|s| s.as_text());
     body.insert(
@@ -120,9 +117,7 @@ fn append_assistant_blocks(out: &mut Vec<Value>, blocks: &[AssistantBlock]) {
     for block in blocks {
         match block {
             AssistantBlock::Text { text, .. } => text_parts.push(text.as_str()),
-            AssistantBlock::ToolCall {
-                id, name, args, ..
-            } => {
+            AssistantBlock::ToolCall { id, name, args, .. } => {
                 // Chat Completions requires `arguments` as a JSON-encoded
                 // string, not an object.
                 let arguments = serde_json::to_string(args).unwrap_or_else(|_| "{}".into());
@@ -328,7 +323,10 @@ mod tests {
         let tool = &body["tools"][0];
         assert_eq!(tool["type"], json!("function"));
         assert_eq!(tool["function"]["name"], json!("get_weather"));
-        assert_eq!(tool["function"]["description"], json!("Look up the weather"));
+        assert_eq!(
+            tool["function"]["description"],
+            json!("Look up the weather")
+        );
         assert_eq!(
             tool["function"]["parameters"],
             json!({ "type": "object", "properties": {} })

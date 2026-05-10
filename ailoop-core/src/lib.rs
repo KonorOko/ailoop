@@ -15,7 +15,7 @@ pub use message::{
 };
 pub use middleware::{ChatMiddleware, HookAction, ToolDecision};
 pub use request::{ChatRequest, ToolChoice, ToolDefinition, ToolTag};
-pub use retry::{RetryClassification, RetryConfig, RetryingModel, Retryable};
+pub use retry::{RetryClassification, RetryConfig, Retryable, RetryingModel};
 pub use stream::{FinishReason, StreamChunk, Usage};
 pub use traits::{CompletionClient, CompletionModel};
 

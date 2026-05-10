@@ -165,7 +165,11 @@ fn apply_jitter(d: Duration) -> Duration {
         .unwrap_or_default()
         .subsec_nanos() as u128;
     let jitter_max = nanos / 10;
-    let offset = if jitter_max == 0 { 0 } else { now_ns % jitter_max };
+    let offset = if jitter_max == 0 {
+        0
+    } else {
+        now_ns % jitter_max
+    };
     let total = nanos.saturating_add(offset);
     Duration::from_nanos(u64::try_from(total).unwrap_or(u64::MAX))
 }
@@ -372,10 +376,22 @@ mod tests {
             max_delay: Duration::from_millis(40),
             jitter: false,
         };
-        assert_eq!(exponential(cfg.base_delay, cfg.max_delay, 1), Duration::from_millis(10));
-        assert_eq!(exponential(cfg.base_delay, cfg.max_delay, 2), Duration::from_millis(20));
-        assert_eq!(exponential(cfg.base_delay, cfg.max_delay, 3), Duration::from_millis(40));
-        assert_eq!(exponential(cfg.base_delay, cfg.max_delay, 4), Duration::from_millis(40));
+        assert_eq!(
+            exponential(cfg.base_delay, cfg.max_delay, 1),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            exponential(cfg.base_delay, cfg.max_delay, 2),
+            Duration::from_millis(20)
+        );
+        assert_eq!(
+            exponential(cfg.base_delay, cfg.max_delay, 3),
+            Duration::from_millis(40)
+        );
+        assert_eq!(
+            exponential(cfg.base_delay, cfg.max_delay, 4),
+            Duration::from_millis(40)
+        );
     }
 
     /// Sanity check that `BoxStream` from `stream::iter` still conforms

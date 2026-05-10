@@ -1,4 +1,6 @@
-use crate::{ChatRequest, FinishReason, Message, RunId, StepId, StreamChunk, ToolResultContent, Usage};
+use crate::{
+    ChatRequest, FinishReason, Message, RunId, StepId, StreamChunk, ToolResultContent, Usage,
+};
 use serde_json::Value;
 
 use crate::RunConfig;
@@ -15,13 +17,7 @@ pub trait ChatMiddleware: Send + Sync {
     ) -> HookAction {
         HookAction::Continue
     }
-    async fn on_chat_request(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        req: &mut ChatRequest,
-    ) {
-    }
+    async fn on_chat_request(&self, run_id: &RunId, step_id: &StepId, req: &mut ChatRequest) {}
     async fn on_chunk(&self, chunk: &StreamChunk) {}
     /// Mutating counterpart to [`on_chunk`]. Engines invoke every
     /// middleware's `on_chunk_mut` (in registration order) **before** any
@@ -38,12 +34,7 @@ pub trait ChatMiddleware: Send + Sync {
         new_messages: &[Message],
     ) {
     }
-    async fn on_run_error(
-        &self,
-        run_id: &RunId,
-        err: &(dyn std::error::Error + Send + Sync),
-    ) {
-    }
+    async fn on_run_error(&self, run_id: &RunId, err: &(dyn std::error::Error + Send + Sync)) {}
 
     // tools
     async fn on_before_tool_call(

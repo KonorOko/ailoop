@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::stream::{BoxStream, self};
+use futures::stream::{self, BoxStream};
 
 use crate::request::ChatRequest;
 use crate::retry::{RetryClassification, Retryable};

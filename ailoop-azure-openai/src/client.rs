@@ -104,10 +104,7 @@ impl AzureOpenAIClient {
         endpoint: impl Into<String>,
         provider: P,
     ) -> Self {
-        Self::new(
-            endpoint,
-            AzureOpenAIAuth::Provider(Arc::new(provider)),
-        )
+        Self::new(endpoint, AzureOpenAIAuth::Provider(Arc::new(provider)))
     }
 
     /// Build a client from environment variables. Reads:
@@ -202,8 +199,10 @@ mod tests {
         // Smoke test: confirm the generic bound on with_provider accepts a
         // concrete TokenProvider impl and that the resulting client carries
         // the Provider auth variant.
-        let client =
-            AzureOpenAIClient::with_provider("https://x.openai.azure.com", StaticProvider("t".into()));
+        let client = AzureOpenAIClient::with_provider(
+            "https://x.openai.azure.com",
+            StaticProvider("t".into()),
+        );
         assert!(matches!(client.auth, AzureOpenAIAuth::Provider(_)));
     }
 

@@ -172,9 +172,7 @@ async fn cancellation_aborts_run_externally() {
 #[tokio::test]
 async fn no_timeout_or_cancellation_leaves_run_unaffected() {
     let model = ScriptedModel::new([vec![
-        StreamChunk::TextDelta {
-            delta: "hi".into(),
-        },
+        StreamChunk::TextDelta { delta: "hi".into() },
         StreamChunk::TurnFinished {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
@@ -183,9 +181,14 @@ async fn no_timeout_or_cancellation_leaves_run_unaffected() {
     ]]);
     let registry = ToolRegistry::new();
 
-    let stream = run_chat(&model, vec![Message::user("hi")], &registry, RunConfig::default())
-        .await
-        .expect("run_chat should start");
+    let stream = run_chat(
+        &model,
+        vec![Message::user("hi")],
+        &registry,
+        RunConfig::default(),
+    )
+    .await
+    .expect("run_chat should start");
     let chunks: Vec<_> = stream.collect().await;
 
     match run_finished(&chunks) {

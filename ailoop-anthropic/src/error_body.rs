@@ -52,8 +52,8 @@ pub(crate) fn classify_http_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::header::{HeaderMap, HeaderValue};
     use reqwest::StatusCode;
+    use reqwest::header::{HeaderMap, HeaderValue};
 
     #[test]
     fn parses_retry_after_seconds() {

@@ -82,13 +82,19 @@ impl ContextManager {
     /// Pin the message at `idx`. Panics on out-of-bounds, matching the
     /// convention of `Vec::index`.
     pub fn pin_at(&mut self, idx: usize) {
-        assert!(idx < self.messages.len(), "pin_at: index {idx} out of bounds");
+        assert!(
+            idx < self.messages.len(),
+            "pin_at: index {idx} out of bounds"
+        );
         self.pinned[idx] = true;
     }
 
     /// Clear the pin on the message at `idx`. Panics on out-of-bounds.
     pub fn unpin_at(&mut self, idx: usize) {
-        assert!(idx < self.messages.len(), "unpin_at: index {idx} out of bounds");
+        assert!(
+            idx < self.messages.len(),
+            "unpin_at: index {idx} out of bounds"
+        );
         self.pinned[idx] = false;
     }
 
@@ -158,9 +164,7 @@ impl ContextManager {
         }
     }
 
-    pub async fn compact_if_needed(
-        &mut self,
-    ) -> Result<Option<CompactionReport>, CompactionError> {
+    pub async fn compact_if_needed(&mut self) -> Result<Option<CompactionReport>, CompactionError> {
         if self.estimated_tokens() < self.max_tokens {
             return Ok(None);
         }
@@ -325,7 +329,10 @@ mod tests {
             },
             other => panic!("expected pinned user message, got {other:?}"),
         }
-        assert!(mgr.is_pinned(0), "pinned mask must be preserved across compaction");
+        assert!(
+            mgr.is_pinned(0),
+            "pinned mask must be preserved across compaction"
+        );
     }
 
     #[tokio::test]
@@ -375,7 +382,10 @@ mod tests {
                 }
             }
         }
-        assert!(saw_call && saw_result, "pinned pair must survive compaction");
+        assert!(
+            saw_call && saw_result,
+            "pinned pair must survive compaction"
+        );
     }
 
     #[tokio::test]

@@ -450,7 +450,10 @@ mod tests {
         ];
 
         let chunks = run(events).await;
-        let last = chunks.into_iter().last().expect("stream emits at least TurnFinished");
+        let last = chunks
+            .into_iter()
+            .last()
+            .expect("stream emits at least TurnFinished");
         match last {
             StreamChunk::TurnFinished {
                 reason,
@@ -499,7 +502,10 @@ mod tests {
         ];
 
         let chunks = run(events).await;
-        let last = chunks.into_iter().last().expect("stream emits at least TurnFinished");
+        let last = chunks
+            .into_iter()
+            .last()
+            .expect("stream emits at least TurnFinished");
         match last {
             StreamChunk::TurnFinished {
                 usage,

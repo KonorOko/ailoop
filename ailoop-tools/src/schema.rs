@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub trait ToolJsonType {
     /// Return a JSON Schema fragment describing this type.

@@ -643,9 +643,7 @@ mod tests {
             other => panic!("expected Reasoning first, got {other:?}"),
         }
         match &assistant_blocks[1] {
-            AssistantBlock::ToolCall {
-                id, name, args, ..
-            } => {
+            AssistantBlock::ToolCall { id, name, args, .. } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(name, "get_weather");
                 assert_eq!(args, &json!({"location": "SF"}));
@@ -697,7 +695,12 @@ mod tests {
         .await
         .expect("run_chat should start");
 
-        let chunks: Vec<StreamChunk> = stream.collect::<Vec<_>>().await.into_iter().map(|c| c.unwrap()).collect();
+        let chunks: Vec<StreamChunk> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|c| c.unwrap())
+            .collect();
 
         let run_ids: Vec<&RunId> = chunks
             .iter()
@@ -720,9 +723,16 @@ mod tests {
             std::collections::HashMap::new();
         for c in &chunks {
             match c {
-                StreamChunk::StepStarted { step_id, iteration, .. }
-                | StreamChunk::StepFinished { step_id, iteration, .. } => {
-                    step_ids_by_iter.entry(*iteration).or_default().push(step_id);
+                StreamChunk::StepStarted {
+                    step_id, iteration, ..
+                }
+                | StreamChunk::StepFinished {
+                    step_id, iteration, ..
+                } => {
+                    step_ids_by_iter
+                        .entry(*iteration)
+                        .or_default()
+                        .push(step_id);
                 }
                 StreamChunk::ToolResult { step_id, .. } => {
                     step_ids_by_iter.entry(0).or_default().push(step_id);

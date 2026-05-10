@@ -113,8 +113,8 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
             }
         }
 
-        let (run_id, finish_reason, usage, new_messages) = finished
-            .expect("engine guarantees a RunFinished chunk before the stream terminates");
+        let (run_id, finish_reason, usage, new_messages) =
+            finished.expect("engine guarantees a RunFinished chunk before the stream terminates");
 
         let final_text = new_messages
             .iter()
@@ -580,10 +580,7 @@ mod tests {
         let run_id = ailoop_core::RunId::new();
         let step_id = ailoop_core::StepId::new();
         for mw in &chat.middlewares {
-            match mw
-                .on_before_tool_call(&run_id, &step_id, name, args)
-                .await
-            {
+            match mw.on_before_tool_call(&run_id, &step_id, name, args).await {
                 ToolDecision::Continue => continue,
                 other => return other,
             }
@@ -839,12 +836,16 @@ mod tests {
         let big = "x".repeat(200);
         for _ in 0..15 {
             chat.history.add_message(Message::user(big.clone()));
-            chat.history.add_message(Message::assistant_text(big.clone()));
+            chat.history
+                .add_message(Message::assistant_text(big.clone()));
         }
 
         tracing::subscriber::with_default(subscriber, || {
             futures::executor::block_on(async {
-                let mut stream = chat.stream("trigger run").await.expect("stream should start");
+                let mut stream = chat
+                    .stream("trigger run")
+                    .await
+                    .expect("stream should start");
                 while (stream.next().await).is_some() {}
             });
         });
@@ -879,9 +880,16 @@ mod tests {
                 .add_message(Message::assistant_text(big.clone()));
         }
 
-        let mut stream = chat.stream("trigger run").await.expect("stream should start");
+        let mut stream = chat
+            .stream("trigger run")
+            .await
+            .expect("stream should start");
 
-        let first = stream.next().await.expect("expected at least one chunk").unwrap();
+        let first = stream
+            .next()
+            .await
+            .expect("expected at least one chunk")
+            .unwrap();
         let compacted_run_id = match first {
             StreamChunk::HistoryCompacted {
                 run_id,
@@ -905,7 +913,10 @@ mod tests {
                 | StreamChunk::StepFinished { run_id, .. }
                 | StreamChunk::ToolResult { run_id, .. }
                 | StreamChunk::RunFinished { run_id, .. } => {
-                    assert_eq!(*run_id, compacted_run_id, "engine RunId must match HistoryCompacted RunId");
+                    assert_eq!(
+                        *run_id, compacted_run_id,
+                        "engine RunId must match HistoryCompacted RunId"
+                    );
                 }
                 _ => {}
             }
@@ -945,12 +956,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ChatMiddleware for RecordingMiddleware {
-        async fn on_chat_request(
-            &self,
-            _run_id: &RunId,
-            _step_id: &StepId,
-            req: &mut ChatRequest,
-        ) {
+        async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
             *self.out.lock().unwrap() = Some(Recorded {
                 temperature: req.temperature,
                 top_p: req.top_p,
@@ -1042,12 +1048,7 @@ mod tests {
         struct Override;
         #[async_trait::async_trait]
         impl ChatMiddleware for Override {
-            async fn on_chat_request(
-                &self,
-                _: &RunId,
-                _: &StepId,
-                req: &mut ChatRequest,
-            ) {
+            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
                 req.temperature = Some(1.0);
             }
         }

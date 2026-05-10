@@ -79,10 +79,7 @@ impl McpConnection {
                 let name_for_engine = naming::compose(&self.server_label, &name_at_server);
                 let definition = ToolDefinition {
                     name: name_for_engine.clone(),
-                    description: t
-                        .description
-                        .map(|d| d.to_string())
-                        .unwrap_or_default(),
+                    description: t.description.map(|d| d.to_string()).unwrap_or_default(),
                     input_schema: serde_json::Value::Object((*t.input_schema).clone()),
                     tags: default_tags.clone(),
                     cache_control: None,
@@ -154,10 +151,7 @@ impl McpConnectionBuilder {
         let transport = TokioChildProcess::new(command)
             .map_err(|e| McpError::TransportCreation(e.to_string()))?;
 
-        let inner = ()
-            .serve(transport)
-            .await
-            .map_err(|e| McpError::Service(e.to_string()))?;
+        let inner = ().serve(transport).await.map_err(|e| McpError::Service(e.to_string()))?;
 
         Ok(McpConnection {
             server_label: self.server_label,
