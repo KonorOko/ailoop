@@ -10,8 +10,7 @@
 //!
 //! Implementations fall in two families:
 //! - Offline tokenizers ship a model-specific BPE table and produce
-//!   exact counts (e.g. tiktoken for OpenAI/Azure). Out of scope for
-//!   the MVP — left to a follow-up.
+//!   exact counts (e.g. tiktoken for OpenAI/Azure).
 //! - Online-calibrated tokenizers maintain an EMA over the
 //!   tokens-per-char ratio observed in real provider responses
 //!   (e.g. `ailoop_anthropic::OnlineCalibratedTokenizer`). Cheap and
@@ -131,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn char_tokenizer_matches_legacy_len_div_four() {
+    fn char_tokenizer_uses_len_div_four() {
         let t = CharTokenizer;
         assert_eq!(t.count_text(""), 0);
         assert_eq!(t.count_text("abcd"), 1);

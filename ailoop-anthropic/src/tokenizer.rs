@@ -1,11 +1,10 @@
 //! Online-calibrated [`Tokenizer`] for Anthropic providers.
 //!
 //! Anthropic does not publish an official open tokenizer for the
-//! Claude family today, so an exact offline count is out of reach
-//! without shipping a heavyweight BPE table per model. What the
-//! provider *does* surface, on every response, is the real input and
-//! output token count — see `Usage` (`message_start` /
-//! `message_delta`).
+//! Claude family, so an exact offline count would require shipping a
+//! heavyweight BPE table per model. What the provider *does* surface,
+//! on every response, is the real input and output token count — see
+//! `Usage` (`message_start` / `message_delta`).
 //!
 //! [`OnlineCalibratedTokenizer`] turns those measurements into a
 //! cheap, self-tuning approximation: it tracks an exponential moving
@@ -17,12 +16,12 @@
 //! ## Bootstrapping
 //!
 //! With no observations the ratio defaults to `0.25` (the rule-of-
-//! thumb "4 chars per token" guidance every provider gives), which
-//! matches the pre-Train-B `CharTokenizer` fallback. As real `Usage`
-//! reports come back the ratio drifts toward whatever the deployed
-//! model actually charges — for English text on Sonnet/Haiku this is
-//! typically a touch lower than 0.25; on languages with many short
-//! tokens or heavy punctuation it can be markedly higher.
+//! thumb "4 chars per token" guidance every provider gives), matching
+//! the [`CharTokenizer`] fallback. As real `Usage` reports come back
+//! the ratio drifts toward whatever the deployed model actually
+//! charges — for English text on Sonnet/Haiku this is typically a
+//! touch lower than 0.25; on languages with many short tokens or
+//! heavy punctuation it can be markedly higher.
 //!
 //! ## Wiring it up
 //!
@@ -41,6 +40,7 @@
 //! EMA. See the crate-level docs for a worked example.
 //!
 //! [`Tokenizer`]: ailoop_core::Tokenizer
+//! [`CharTokenizer`]: ailoop_core::CharTokenizer
 //! [`ContextManagerBuilder::tokenizer`]: https://docs.rs/ailoop-context
 
 use std::sync::{Arc, RwLock};
@@ -48,8 +48,9 @@ use std::sync::{Arc, RwLock};
 use ailoop_core::Tokenizer;
 
 /// Default initial ratio: 4 chars per token, matching the
-/// `CharTokenizer` fallback so an un-calibrated `OnlineCalibratedTokenizer`
-/// behaves identically to the pre-Train-B estimator.
+/// `CharTokenizer` fallback so an un-calibrated
+/// `OnlineCalibratedTokenizer` behaves identically to it until real
+/// observations arrive.
 const DEFAULT_INITIAL_RATIO: f32 = 0.25;
 
 /// Default EMA smoothing factor. With `alpha = 0.2` each new
@@ -226,8 +227,7 @@ mod tests {
     /// End-to-end shape used by a calibration middleware: pretend a
     /// stream of `Usage` reports comes back from the provider for
     /// requests of known character length, and confirm that
-    /// `count_text` shifts in the right direction. This is the
-    /// "integration test" called out in the train spec; we drive the
+    /// `count_text` shifts in the right direction. We drive the
     /// sampling shape directly because the wiring middleware (request
     /// chars in / `Usage` out) is per-application.
     #[test]

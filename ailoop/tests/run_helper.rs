@@ -230,7 +230,7 @@ async fn run_drains_history_compacted_prelude_without_clobbering_outcome() {
 
     let mut chat = Conversation::builder(model).build().expect("build");
 
-    // The default `max_tokens` is 460 (CharEstimator = len()/4). Stuff
+    // The default `max_tokens` is 460 (CharTokenizer = len()/4). Stuff
     // enough text to overshoot.
     let big = "x".repeat(200);
     for _ in 0..15 {

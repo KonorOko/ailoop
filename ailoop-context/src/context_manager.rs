@@ -417,11 +417,11 @@ mod tests {
         assert!(mgr.is_pinned(1));
     }
 
-    /// Train B contract: `compact_if_needed` measures the budget in
-    /// real tokens via the configured [`Tokenizer`], not in characters.
-    /// A tokenizer that bills every message at a fixed cost lets us
-    /// drive compaction by message count alone, independently of the
-    /// underlying `text.len()`.
+    /// `compact_if_needed` measures the budget in real tokens via the
+    /// configured [`Tokenizer`], not in characters. A tokenizer that
+    /// bills every message at a fixed cost lets us drive compaction by
+    /// message count alone, independently of the underlying
+    /// `text.len()`.
     #[tokio::test]
     async fn compact_uses_tokenizer_budget_not_character_count() {
         struct PerMessageTokenizer;
@@ -432,10 +432,10 @@ mod tests {
         }
 
         // Budget: 35 tokens. Five 1-text-block messages cost 50 tokens
-        // (5 * 10), so compaction must run. Under the legacy
-        // CharTokenizer fallback the same content (under ~50 chars
-        // total) would fit comfortably under 35 — proving the budget
-        // is sourced from the supplied tokenizer.
+        // (5 * 10), so compaction must run. Under the `CharTokenizer`
+        // fallback the same content (under ~50 chars total) would fit
+        // comfortably under 35 — proving the budget is sourced from
+        // the supplied tokenizer.
         let mut mgr = ContextManager::builder(35)
             .tokenizer(Box::new(PerMessageTokenizer))
             .preserve_n_last(2)

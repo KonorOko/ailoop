@@ -831,8 +831,9 @@ mod tests {
             .build()
             .expect("builder should succeed");
 
-        // Pre-seed enough history to overflow `max_tokens=460` (CharEstimator
-        // = len()/4) so `compact_if_needed` fires on `stream`.
+        // Pre-seed enough history to overflow `max_tokens=460`
+        // (CharTokenizer = len()/4) so `compact_if_needed` fires on
+        // `stream`.
         let big = "x".repeat(200);
         for _ in 0..15 {
             chat.history.add_message(Message::user(big.clone()));
@@ -868,7 +869,7 @@ mod tests {
             .build()
             .expect("builder should succeed");
 
-        // Default `max_tokens` for the builder is 460 (CharEstimator =
+        // Default `max_tokens` for the builder is 460 (CharTokenizer =
         // len()/4). Stuff enough text to overshoot the budget so the
         // call to `stream` triggers compaction. Pre-seed messages
         // directly into the private history field; we want compaction
