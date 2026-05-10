@@ -57,8 +57,10 @@ impl McpConnection {
     ///
     /// Tools are exposed to the engine as
     /// `mcp__<server_label>__<tool_name>` (Claude-Desktop convention).
-    /// Names that exceed 64 characters or contain disallowed
-    /// characters are sanitized — see [`crate::naming`] for details.
+    /// Characters outside `[A-Za-z0-9_-]` are replaced with `_`; if the
+    /// composed name still exceeds 64 chars it is truncated and a short
+    /// deterministic hash suffix is appended so distinct long names do
+    /// not collide.
     ///
     /// Every tool is tagged with `[Network, Custom("mcp")]`. Use the
     /// `Custom("mcp")` tag with `with_approval_for_tags` if you want

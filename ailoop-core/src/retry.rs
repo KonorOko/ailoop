@@ -3,7 +3,7 @@
 //! `Retry-After` hints surfaced by the adapter.
 //!
 //! Each adapter classifies its own error type via the [`Retryable`] trait
-//! ([`AnthropicError`] in `ailoop-anthropic`, [`AzureOpenAIError`] in
+//! (`AnthropicError` in `ailoop-anthropic`, `AzureOpenAIError` in
 //! `ailoop-azure-openai`); the decorator only needs to know whether an
 //! error is `Permanent` or `Transient { retry_after }`.
 //!

@@ -19,7 +19,7 @@ pub trait ChatMiddleware: Send + Sync {
     }
     async fn on_chat_request(&self, run_id: &RunId, step_id: &StepId, req: &mut ChatRequest) {}
     async fn on_chunk(&self, chunk: &StreamChunk) {}
-    /// Mutating counterpart to [`on_chunk`]. Engines invoke every
+    /// Mutating counterpart to [`Self::on_chunk`]. Engines invoke every
     /// middleware's `on_chunk_mut` (in registration order) **before** any
     /// `on_chunk`, so transformers run as a phase ahead of observers and
     /// every observer sees the same fully-mutated chunk. The mutated
@@ -46,7 +46,7 @@ pub trait ChatMiddleware: Send + Sync {
     ) -> ToolDecision {
         ToolDecision::Continue
     }
-    /// Mutating counterpart to [`on_before_tool_call`]. Engines invoke
+    /// Mutating counterpart to [`Self::on_before_tool_call`]. Engines invoke
     /// every middleware's `on_before_tool_call_mut` (in registration
     /// order) **before** any `on_before_tool_call`, so input transforms
     /// (sanitization, redaction, defaulting) run as a phase ahead of
@@ -69,7 +69,7 @@ pub trait ChatMiddleware: Send + Sync {
         result: &ToolResultContent,
     ) {
     }
-    /// Mutating counterpart to [`on_after_tool_call`]. Engines invoke
+    /// Mutating counterpart to [`Self::on_after_tool_call`]. Engines invoke
     /// every middleware's `on_after_tool_call_mut` (in registration
     /// order) **before** any `on_after_tool_call`, so output transforms
     /// (PII scrubbing, truncation-with-marker) run as a phase ahead of
