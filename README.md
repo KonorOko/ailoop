@@ -7,9 +7,6 @@ system prompts, and conversation history. The engine is a thin layer over an
 open trait-based provider abstraction — provider adapters keep your application
 decoupled from any single vendor.
 
-> **Status: early development.** APIs will change without notice. Not
-> recommended for production use.
-
 ## Features
 
 - Token-level streaming with a unified `StreamChunk` event model
@@ -70,21 +67,23 @@ instead.
 
 ## Examples
 
-The repository ships with three runnable examples. All three require an
+The repository ships with four runnable examples. All four require an
 `ANTHROPIC_API_KEY` in your environment (a `.env` file at the repo root also
 works).
 
-| Example                                                | Demonstrates                                              |
-| ------------------------------------------------------ | --------------------------------------------------------- |
-| [`basic-chat`](examples/basic-chat/src/main.rs)        | Minimal one-shot chat with no tools                       |
-| [`tool-use`](examples/tool-use/src/main.rs)            | A typed `#[ailoop_tool]` that the model calls when needed |
-| [`mcp-time`](examples/mcp-time/src/main.rs)            | Tools discovered from a real MCP server (`mcp-server-time`) |
+| Example                                                  | Demonstrates                                                |
+| -------------------------------------------------------- | ----------------------------------------------------------- |
+| [`basic-chat`](examples/basic-chat/src/main.rs)          | Minimal one-shot chat with no tools                         |
+| [`tool-use`](examples/tool-use/src/main.rs)              | A typed `#[ailoop_tool]` that the model calls when needed   |
+| [`mcp-time`](examples/mcp-time/src/main.rs)              | Tools discovered from a real MCP server (`mcp-server-time`) |
+| [`persistent-chat`](examples/persistent-chat/src/main.rs) | Snapshot / restore a `Conversation` across process restarts |
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
 cargo run -p basic-chat
 cargo run -p tool-use
-cargo run -p mcp-time   # also requires `uvx` on PATH (`pip install uv`)
+cargo run -p mcp-time         # also requires `uvx` on PATH (`pip install uv`)
+cargo run -p persistent-chat
 ```
 
 ## Adding a provider
@@ -98,6 +97,11 @@ from `ailoop-core`. Currently shipped:
 
 Other providers (OpenAI public, Bedrock, local models, etc.) are not yet
 implemented.
+
+## Documentation
+
+- API reference: [docs.rs/ailoop](https://docs.rs/ailoop)
+- Release notes: [`CHANGELOG.md`](CHANGELOG.md)
 
 ## License
 
