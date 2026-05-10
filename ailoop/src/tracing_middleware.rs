@@ -24,6 +24,9 @@ use serde_json::Value;
 pub struct TracingMiddleware;
 
 impl TracingMiddleware {
+    /// Construct a new middleware. The struct is unit-shaped; this is
+    /// equivalent to [`TracingMiddleware::default`] and either spelling
+    /// works at registration sites.
     pub fn new() -> Self {
         Self
     }

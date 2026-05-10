@@ -70,6 +70,13 @@ pub struct Sanitize {
 }
 
 impl Sanitize {
+    /// Build an empty middleware. Chain
+    /// [`on_user_text`](Self::on_user_text),
+    /// [`on_assistant_text`](Self::on_assistant_text) +
+    /// [`enable_assistant_text`](Self::enable_assistant_text),
+    /// [`on_tool_args`](Self::on_tool_args), and
+    /// [`on_tool_result`](Self::on_tool_result) onto the result to
+    /// register rewriters. Equivalent to [`Sanitize::default`].
     pub fn new() -> Self {
         Self {
             user_text: Vec::new(),

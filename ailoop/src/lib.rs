@@ -1,3 +1,54 @@
+//! High-level façade for building an LLM agent loop. Most application
+//! code only depends on this crate — it re-exports the vocabulary from
+//! [`ailoop_core`] (messages, stream chunks, hooks) and from the side
+//! crates (`ailoop-context`, `ailoop-tools`, `ailoop-prompts`) you need
+//! to wire a [`Conversation`] together.
+//!
+//! ## Happy path
+//!
+//! ```no_run
+//! # async fn run<M: ailoop::CompletionModel + Send + Sync>(model: M)
+//! # -> Result<(), Box<dyn std::error::Error>> {
+//! let mut chat = ailoop::Conversation::builder(model)
+//!     .system_prompt("You are a helpful assistant.")
+//!     .build()?;
+//!
+//! let outcome = chat.run("What is the speed of light?").await?;
+//! println!("{}", outcome.final_text.unwrap_or_default());
+//! # Ok(()) }
+//! ```
+//!
+//! [`Conversation::run`] is the one-shot helper for CLI flows and
+//! notebooks; [`Conversation::stream`] yields one [`StreamChunk`] at a
+//! time when you want to render tokens, observe tool calls, or thread
+//! events through middleware as they happen.
+//!
+//! ## Mini-index
+//!
+//! - [`Conversation`] — the agent loop. Construct via
+//!   [`Conversation::builder`].
+//! - [`ConversationBuilder`] — builder pattern. Register tools with
+//!   [`tool`](ConversationBuilder::tool) /
+//!   [`tool_dyn`](ConversationBuilder::tool_dyn), gate them with
+//!   [`with_capabilities`](ConversationBuilder::with_capabilities) /
+//!   [`with_approval`](ConversationBuilder::with_approval), and layer
+//!   per-request defaults with [`temperature`](ConversationBuilder::temperature),
+//!   [`max_tokens`](ConversationBuilder::max_tokens), and friends.
+//! - [`RunOutcome`] — what [`Conversation::run`] returns. Aborts surface
+//!   here as [`FinishReason::Aborted`], not as `Err`.
+//! - Built-in middlewares: [`AntiLoop`] (loop-detection abort),
+//!   [`Sanitize`] (caller-supplied text rewrites at the model
+//!   boundary), [`ApprovalMiddleware`] (human-in-the-loop gating),
+//!   [`JsonTracer`] (NDJSON event sink). With the `tracing` feature,
+//!   `TracingMiddleware` routes the same events through the
+//!   `tracing` crate.
+//! - [`SubAgentTool`] — wrap a [`Conversation`] as a [`ToolDyn`] so a
+//!   parent agent can delegate to it.
+//! - [`advanced::run_chat`] — escape hatch for engine-level access
+//!   without a [`ContextManager`] in the loop.
+
+#![deny(missing_docs)]
+
 mod anti_loop;
 mod conversation;
 mod engine;
@@ -22,6 +73,10 @@ pub use ailoop_core::{
 };
 pub use ailoop_derive::{ToolJsonType, ailoop_tool};
 pub use ailoop_prompts::{Prompt, PromptBuilder, PromptSection};
+// Note: `ToolJsonType` is also re-exported above from `ailoop_derive` as
+// the derive macro of the same name. The two live in different
+// namespaces (one is a trait, one is a macro), so both can be brought
+// into scope by `use ailoop::*;` without conflict.
 pub use ailoop_tools::{Tool, ToolDyn, ToolJsonType, ToolRegistry, errors::ToolRegistryError};
 pub use anti_loop::{AntiLoop, TextPredicate};
 pub use conversation::{Conversation, ConversationBuilder, RunOutcome, RunStream};

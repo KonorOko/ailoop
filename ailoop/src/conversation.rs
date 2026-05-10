@@ -23,6 +23,22 @@ use crate::{
     },
 };
 
+/// An agent loop bound to a single [`CompletionModel`], with history,
+/// tool registry, and middleware chain configured up front. Construct
+/// via [`Conversation::builder`].
+///
+/// Two entry points drive a turn: [`Conversation::run`] for one-shot
+/// flows that materialise a [`RunOutcome`], and [`Conversation::stream`]
+/// for code that wants to consume each [`StreamChunk`] as it lands.
+/// Both extend the conversation's history with the run's `new_messages`
+/// exactly once.
+///
+/// **Aborts are not errors.** [`RunConfig::cancellation`] firing,
+/// [`RunConfig::timeout`] elapsing, and middleware/tool returning
+/// `Terminate` all surface as `Ok(_)` carrying
+/// [`FinishReason::Aborted`] — never as `Err(EngineError::_)`. Only
+/// model / tool-registry / context errors produce an `Err`. See
+/// [`EngineError`] for the failure surface.
 pub struct Conversation<M: CompletionModel> {
     model: M,
     history: ContextManager,
@@ -41,14 +57,37 @@ pub struct Conversation<M: CompletionModel> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct RunOutcome {
+    /// Identifier shared by every [`StreamChunk`] emitted during the
+    /// run. Useful for cross-referencing logs from middlewares like
+    /// [`JsonTracer`](crate::JsonTracer) (or `TracingMiddleware` when
+    /// the `tracing` feature is on) with the outcome.
     pub run_id: RunId,
+    /// How the run ended. Aborts (cancellation, timeout,
+    /// hook/tool `Terminate`) surface as
+    /// [`FinishReason::Aborted`](ailoop_core::FinishReason::Aborted) —
+    /// they do **not** become `Err`.
     pub finish_reason: FinishReason,
+    /// Token-level accounting summed across every step in the run,
+    /// including provider cache fields when reported.
     pub usage: Usage,
+    /// Every [`Message`] the run added to history (assistant turns,
+    /// `User { ToolResult }` user-role turns synthesised from tool
+    /// replies, and any in-flight blocks preserved across an abort).
     pub new_messages: Vec<Message>,
+    /// Concatenation of every [`AssistantBlock::Text`] in the last
+    /// assistant message of `new_messages` — what most callers think
+    /// of as "the answer". `None` when the run aborted before the
+    /// assistant produced any text, or when the last assistant
+    /// message contains only non-text blocks (`ToolCall`,
+    /// `Reasoning`, `RedactedReasoning`).
     pub final_text: Option<String>,
 }
 
 impl<M: CompletionModel + Send + Sync> Conversation<M> {
+    /// Start a [`ConversationBuilder`] for `model`. Equivalent to
+    /// [`ConversationBuilder::new(model)`](ConversationBuilder::new) and
+    /// is the canonical entry point — most code should never call
+    /// `ConversationBuilder::new` directly.
     pub fn builder(model: M) -> ConversationBuilder<M> {
         ConversationBuilder::new(model)
     }
@@ -156,6 +195,28 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
         })
     }
 
+    /// Drive a turn and yield each [`StreamChunk`] as it lands — for
+    /// callers that want to render tokens, observe tool calls, or
+    /// thread events through their own UI as the run unfolds.
+    ///
+    /// The returned [`RunStream`] always terminates with a
+    /// [`StreamChunk::RunFinished`], whether the run completed
+    /// normally or aborted (cancellation, timeout, or hook/tool
+    /// `Terminate`). Aborts surface as `RunFinished` carrying
+    /// [`FinishReason::Aborted`] — they are never `Err`. The same
+    /// failure surface as [`Conversation::run`] applies otherwise:
+    /// model, tool-registry, and context errors yield
+    /// `Err(EngineError)`.
+    ///
+    /// History is extended with the run's `new_messages` exactly once,
+    /// keyed off the terminal `RunFinished` chunk — pair this with
+    /// [`Conversation::history_messages`] only after the stream has
+    /// fully drained.
+    ///
+    /// If [`ContextManager::compact_if_needed`] fires before the
+    /// engine starts a [`StreamChunk::HistoryCompacted`] is yielded as
+    /// the first chunk, carrying the same [`RunId`] every subsequent
+    /// engine chunk uses.
     pub async fn stream(
         &mut self,
         user_msg: impl Into<String>,
@@ -203,6 +264,24 @@ struct ApprovalSpec {
     tags: Option<Vec<ToolTag>>,
 }
 
+/// Configuration builder for a [`Conversation`]. Returned by
+/// [`Conversation::builder`].
+///
+/// Each method consumes `self` and returns the builder so calls chain.
+/// Errors encountered during configuration (a tool that fails to
+/// register, a prompt file that fails to load) are accumulated and
+/// surfaced when [`build`](Self::build) is called.
+///
+/// Tools register via [`tool`](Self::tool) (compile-time-known type)
+/// or [`tool_dyn`](Self::tool_dyn) (runtime-discovered). Gating
+/// happens via [`with_capabilities`](Self::with_capabilities) (tag
+/// allow-list) and [`with_approval`](Self::with_approval) /
+/// [`with_approval_for_tags`](Self::with_approval_for_tags) /
+/// [`with_approval_for_all`](Self::with_approval_for_all)
+/// (per-call human-in-the-loop). Per-request controls (
+/// [`temperature`](Self::temperature), [`max_tokens`](Self::max_tokens),
+/// etc.) are applied as floors — see [`build`](Self::build) for the
+/// middleware-insertion-order contract.
 pub struct ConversationBuilder<M: CompletionModel> {
     model: M,
     prompt: Prompt,
@@ -217,6 +296,9 @@ pub struct ConversationBuilder<M: CompletionModel> {
 }
 
 impl<M: CompletionModel> ConversationBuilder<M> {
+    /// Construct a fresh builder for `model`. Equivalent to
+    /// [`Conversation::builder(model)`](Conversation::builder); prefer
+    /// the latter as the canonical entry point.
     pub fn new(model: M) -> Self {
         let history = ContextManager::builder(460).build();
         let tools = ToolRegistry::new();
@@ -258,6 +340,14 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         builder
     }
 
+    /// Register a tool whose type is known at compile time. The
+    /// `#[ailoop_tool]` macro lowers a plain Rust function into a
+    /// `T: Tool` that is also `T: ToolDyn` and slots in here.
+    /// For runtime-discovered tools (MCP servers, plugin loaders),
+    /// use [`tool_dyn`](Self::tool_dyn) instead.
+    ///
+    /// A failing registration (duplicate tool name) is captured and
+    /// surfaced from [`build`](Self::build).
     pub fn tool<T>(mut self, tool: T) -> Self
     where
         T: ToolDyn + 'static,
@@ -281,6 +371,18 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
+    /// Register a tool plus a [`PromptSection`] read from disk that is
+    /// appended to the system prompt only when the tool is included in
+    /// a given [`ChatRequest`]. Useful for tool-specific usage hints
+    /// that should not leak into runs that don't expose the tool.
+    ///
+    /// **Sync I/O at builder time.** The file is read with
+    /// [`std::fs::read_to_string`] when this method is called (not
+    /// when [`build`](Self::build) runs); failures land in the same
+    /// error queue as registration failures and surface from
+    /// [`build`](Self::build). Run the builder off the async runtime
+    /// (e.g. inside `tokio::task::spawn_blocking`) if your prompt
+    /// files are large or live on a slow filesystem.
     pub fn tool_with_prompt_file<T>(mut self, tool: T, prompt_path: impl AsRef<Path>) -> Self
     where
         T: ToolDyn + 'static,
@@ -303,6 +405,12 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
+    /// Append a [`ChatMiddleware`] to the chain. Middlewares run in
+    /// registration order at every hook point; user-supplied
+    /// middlewares run *after* the internal request-defaults
+    /// middleware inserted by [`build`](Self::build), so a user
+    /// override of a per-request control unconditionally wins over a
+    /// builder default.
     pub fn middleware(mut self, middleware: Arc<dyn ChatMiddleware>) -> Self {
         self.middlewares.push(middleware);
         self
@@ -369,11 +477,20 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
+    /// Append `prompt` as an unnamed [`PromptSection`] to the system
+    /// prompt. Successive calls accumulate — sections render in
+    /// registration order, separated by blank lines.
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.prompt.add_section(PromptSection::new(prompt));
         self
     }
 
+    /// Append a [`PromptSection`] read from `path` to the system
+    /// prompt. **Sync I/O at builder time:** the file is read with
+    /// [`std::fs::read_to_string`] when this method is called; a
+    /// failure lands in the builder's error queue and surfaces from
+    /// [`build`](Self::build). See [`tool_with_prompt_file`](Self::tool_with_prompt_file)
+    /// for the same caveat applied to per-tool prompts.
     pub fn system_prompt_file(mut self, path: impl AsRef<Path>) -> Self {
         match PromptSection::from_file(path) {
             Ok(section) => self.prompt.add_section(section),
@@ -466,6 +583,41 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
+    /// Finalise the builder into a [`Conversation`].
+    ///
+    /// Returns the first accumulated [`BuildError`] if any tool /
+    /// prompt-file registration failed. (Multiple errors are not
+    /// surfaced together at this stage — the first one wins.)
+    ///
+    /// **Internal middleware insertion order** is load-bearing and
+    /// stable:
+    ///
+    /// 1. The internal `RequestDefaultsMiddleware` is prepended *only*
+    ///    when at least one per-request default was set on the
+    ///    builder ([`temperature`](Self::temperature),
+    ///    [`max_tokens`](Self::max_tokens),
+    ///    [`request_defaults`](Self::request_defaults), …). It runs
+    ///    first, so user middlewares see the defaults already applied
+    ///    and can override unconditionally — defaults are a *floor*,
+    ///    not a *ceiling*.
+    /// 2. Every middleware registered via
+    ///    [`middleware`](Self::middleware) is appended next, in
+    ///    registration order.
+    /// 3. The system-prompt assembly middleware is appended last on
+    ///    the request side so it sees the request after every other
+    ///    middleware has touched it.
+    /// 4. If any [`with_approval*`](Self::with_approval) variant was
+    ///    called, an internal `ApprovalMiddleware` is appended after
+    ///    the system-prompt one. Tool-name resolution for the
+    ///    capability-tag form happens here, *after* the capability
+    ///    filter has shrunk the active tool set, so untagged or
+    ///    filtered-out tools never trigger the gate.
+    ///
+    /// Within the `RequestDefaultsMiddleware` itself, per-field
+    /// defaults are applied first and the
+    /// [`request_defaults`](Self::request_defaults) closure runs
+    /// *after* them — so the closure can layer on top of typed
+    /// defaults and still lose to user middlewares.
     pub fn build(self) -> Result<Conversation<M>, BuildError> {
         if let Some(first) = self.errors.into_iter().next() {
             return Err(first);
@@ -526,6 +678,19 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     }
 }
 
+/// [`Stream`] of [`StreamChunk`]s for a single in-flight run, returned
+/// by [`Conversation::stream`].
+///
+/// The lifetime `'a` ties the stream to the parent [`Conversation`]'s
+/// history so the caller cannot start a second turn while the first is
+/// still draining. Dropping the stream early stops emission and
+/// releases the borrow — any tools already spawned by the engine
+/// continue to completion via tokio's normal drop-cancellation rules.
+///
+/// History extension happens on the terminal
+/// [`StreamChunk::RunFinished`]: the run's `new_messages` are appended
+/// to the conversation exactly once, atomically with delivery of that
+/// chunk to the consumer.
 pub struct RunStream<'a, M: CompletionModel> {
     inner: BoxStream<'a, Result<StreamChunk, EngineError<M::Error>>>,
     history: &'a mut ContextManager,

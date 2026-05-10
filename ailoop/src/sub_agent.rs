@@ -13,6 +13,44 @@ use tokio::sync::Mutex;
 
 use crate::Conversation;
 
+/// Wraps a [`Conversation`] so a parent agent can delegate to it as a
+/// regular tool. Pure composition: nothing in the engine or registry
+/// changes — the child runs on its own [`CompletionModel`], history,
+/// and middleware chain.
+///
+/// The child's history persists across calls (each invocation sees
+/// prior turns); rebuild the `SubAgentTool` per call if you need
+/// stateless behavior. Child errors and aborts are surfaced as
+/// [`ToolResultContent::Text`] (with an `"sub-agent error: …"` /
+/// `"sub-agent aborted: …"` prefix) — never as
+/// [`ToolResultContent::Error`] and never as a tool-registry error
+/// — so the parent's loop continues and the model can react.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use std::sync::Arc;
+/// # async fn build<M>(researcher_model: M, parent_model: M)
+/// # -> Result<(), Box<dyn std::error::Error>>
+/// # where M: ailoop::CompletionModel + Send + Sync + 'static {
+/// // 1. Build the child conversation (its own model, history, prompt).
+/// let researcher = ailoop::Conversation::builder(researcher_model)
+///     .system_prompt("You are a focused research sub-agent.")
+///     .build()?;
+///
+/// // 2. Wrap it as a tool so the parent can dispatch to it by name.
+/// let tool = ailoop::SubAgentTool::new(
+///     "researcher",
+///     "Delegate a research question to the focused sub-agent.",
+///     researcher,
+/// );
+///
+/// // 3. Register on the parent like any other dynamic tool.
+/// let _parent = ailoop::Conversation::builder(parent_model)
+///     .tool_dyn(Arc::new(tool))
+///     .build()?;
+/// # Ok(()) }
+/// ```
 pub struct SubAgentTool<M: CompletionModel> {
     name: String,
     description: String,
@@ -23,6 +61,10 @@ impl<M> SubAgentTool<M>
 where
     M: CompletionModel + Send + Sync + 'static,
 {
+    /// Wrap `conversation` as a tool exposing `name` /
+    /// `description` to the parent's [`CompletionModel`]. Use
+    /// [`Arc::new`](std::sync::Arc::new) when registering through
+    /// [`tool_dyn`](crate::ConversationBuilder::tool_dyn).
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
