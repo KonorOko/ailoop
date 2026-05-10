@@ -1,4 +1,4 @@
-use ailoop::{Conversation, StreamChunk, ailoop_tool};
+use ailoop::{Conversation, RetryingModel, StreamChunk, ailoop_tool};
 use ailoop_anthropic::AnthropicClient;
 use futures::StreamExt;
 use std::io::{self, Write};
@@ -10,7 +10,10 @@ async fn add(a: i32, b: i32) -> i32 {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model = AnthropicClient::from_env()?.model("claude-sonnet-4-6");
+    // `RetryingModel` retries setup-time failures (5xx, 429, transport
+    // hiccups) with exponential backoff that honours `Retry-After`.
+    // It is opt-in — wrap whichever provider model you use.
+    let model = RetryingModel::new(AnthropicClient::from_env()?.model("claude-sonnet-4-6"));
     let mut chat = Conversation::builder(model)
         .system_prompt("You are a helpful math assistant.")
         .tool(Add)

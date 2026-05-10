@@ -1,11 +1,14 @@
-use ailoop::{Conversation, StreamChunk};
+use ailoop::{Conversation, RetryingModel, StreamChunk};
 use ailoop_anthropic::AnthropicClient;
 use futures::StreamExt;
 use std::io::{self, Write};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model = AnthropicClient::from_env()?.model("claude-sonnet-4-6");
+    // `RetryingModel` retries setup-time failures (5xx, 429, transport
+    // hiccups) with exponential backoff that honours `Retry-After`.
+    // It is opt-in — wrap whichever provider model you use.
+    let model = RetryingModel::new(AnthropicClient::from_env()?.model("claude-sonnet-4-6"));
     let mut chat = Conversation::builder(model).build()?;
 
     println!("Type a message and press Enter. Type 'exit' or send EOF to quit.");
