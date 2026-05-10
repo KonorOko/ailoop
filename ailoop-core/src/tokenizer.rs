@@ -2,10 +2,11 @@
 //!
 //! `Tokenizer` is the single contract every ailoop crate measures
 //! against when it needs to know how many tokens a piece of text or a
-//! conversation is worth. It lives in `ailoop-prompts` because the
-//! types that get tokenized most often — [`crate::Prompt`],
-//! [`crate::PromptSection`], and [`ailoop_core::Message`] — are
-//! reachable from here without pulling in higher-level crates.
+//! conversation is worth. It lives in `ailoop-core` because the types
+//! that get tokenized — [`Message`], its blocks, and the `Usage`
+//! reports providers send back — already live here, so neither
+//! `ailoop-context` (history compaction) nor `ailoop-prompts` (system
+//! prompt assembly) has to depend on the other to share a counter.
 //!
 //! Implementations fall in two families:
 //! - Offline tokenizers ship a model-specific BPE table and produce
@@ -21,7 +22,7 @@
 //! It is documented as a fallback rather than a recommended default:
 //! production callers should plug in a provider-specific implementation.
 
-use ailoop_core::{AssistantBlock, Message, ToolResultContent, UserBlock};
+use crate::{AssistantBlock, Message, ToolResultContent, UserBlock};
 
 /// Counts tokens in text and full messages.
 ///
@@ -59,7 +60,6 @@ pub trait Tokenizer: Send + Sync {
                                 ToolResultContent::Error(text) => total += self.count_text(text),
                             }
                         }
-                        _ => {}
                     }
                 }
             }
@@ -81,7 +81,6 @@ pub trait Tokenizer: Send + Sync {
                         AssistantBlock::RedactedReasoning { data } => {
                             total += self.count_text(data);
                         }
-                        _ => {}
                     }
                 }
             }
@@ -118,7 +117,6 @@ impl Tokenizer for CharTokenizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ailoop_core::{AssistantBlock, ToolResultContent, UserBlock};
     use serde_json::json;
 
     /// Test tokenizer that counts whitespace-delimited words. Useful for

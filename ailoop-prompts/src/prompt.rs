@@ -1,6 +1,8 @@
 use std::{fmt::Display, path::Path};
 
-use crate::{errors::PromptError, tokenizer::Tokenizer};
+use ailoop_core::Tokenizer;
+
+use crate::errors::PromptError;
 
 #[derive(Debug, Clone)]
 pub struct Prompt {
@@ -209,7 +211,7 @@ mod tests {
     #[test]
     fn prompt_token_count_matches_rendered_text_under_word_tokenizer() {
         struct WordTokenizer;
-        impl crate::Tokenizer for WordTokenizer {
+        impl ailoop_core::Tokenizer for WordTokenizer {
             fn count_text(&self, text: &str) -> usize {
                 text.split_whitespace().count()
             }

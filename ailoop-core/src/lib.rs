@@ -6,6 +6,7 @@ pub mod request;
 pub mod retry;
 pub mod stream;
 pub mod testing;
+mod tokenizer;
 mod traits;
 
 pub use config::RunConfig;
@@ -17,6 +18,7 @@ pub use middleware::{ChatMiddleware, HookAction, ToolDecision};
 pub use request::{ChatRequest, ToolChoice, ToolDefinition, ToolTag};
 pub use retry::{RetryClassification, RetryConfig, Retryable, RetryingModel};
 pub use stream::{FinishReason, StreamChunk, Usage};
+pub use tokenizer::{CharTokenizer, Tokenizer};
 pub use traits::{CompletionClient, CompletionModel};
 
 pub use tokio_util::sync::CancellationToken;

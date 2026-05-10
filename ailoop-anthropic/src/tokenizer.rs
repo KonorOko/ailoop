@@ -40,12 +40,12 @@
 //! the conversation builder, so both views read and write the same
 //! EMA. See the crate-level docs for a worked example.
 //!
-//! [`Tokenizer`]: ailoop_prompts::Tokenizer
+//! [`Tokenizer`]: ailoop_core::Tokenizer
 //! [`ContextManagerBuilder::tokenizer`]: https://docs.rs/ailoop-context
 
 use std::sync::{Arc, RwLock};
 
-use ailoop_prompts::Tokenizer;
+use ailoop_core::Tokenizer;
 
 /// Default initial ratio: 4 chars per token, matching the
 /// `CharTokenizer` fallback so an un-calibrated `OnlineCalibratedTokenizer`
