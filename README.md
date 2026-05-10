@@ -26,7 +26,7 @@ decoupled from any single vendor.
 
 | Crate                 | Purpose                                            |
 | --------------------- | -------------------------------------------------- |
-| `ailoop`              | High-level API (`Conversation`, `run_chat`)        |
+| `ailoop`              | High-level API (`Conversation`, `advanced::run_chat`) |
 | `ailoop-core`         | Message, stream, and provider trait definitions    |
 | `ailoop-anthropic`    | Anthropic Messages API adapter                     |
 | `ailoop-azure-openai` | Azure OpenAI v1 API adapter (Chat Completions)     |

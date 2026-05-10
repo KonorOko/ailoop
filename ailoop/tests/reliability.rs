@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use ailoop::{Message, ToolDefinition, ToolResultContent, run_chat};
+use ailoop::{Message, ToolDefinition, ToolResultContent, advanced::run_chat};
 use ailoop_core::testing::{ScriptedError, ScriptedModel};
 use ailoop_core::{
     CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, HookAction,

@@ -25,8 +25,18 @@ pub use ailoop_prompts::{Prompt, PromptBuilder, PromptSection};
 pub use ailoop_tools::{Tool, ToolDyn, ToolJsonType, ToolRegistry, errors::ToolRegistryError};
 pub use anti_loop::{AntiLoop, TextPredicate};
 pub use conversation::{Conversation, ConversationBuilder, RunOutcome, RunStream};
-pub use engine::run_chat;
 pub use errors::{BuildError, EngineError};
+
+/// Lower-level entry points outside the [`Conversation`] happy path.
+///
+/// Most callers should use [`Conversation::builder`] — it wires history
+/// management, system-prompt assembly, and per-request defaults. Reach
+/// into this module only when you need to drive the engine without a
+/// [`ContextManager`] in the loop (e.g. one-shot calls with a fixed
+/// message slice and a pre-built [`ToolRegistry`]).
+pub mod advanced {
+    pub use crate::engine::run_chat;
+}
 pub use json_tracer::JsonTracer;
 pub use middleware::ApprovalMiddleware;
 pub use sanitize::{Sanitize, TextRewriter, ToolArgsRewriter, ToolResultRewriter};

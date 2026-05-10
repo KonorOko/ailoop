@@ -15,12 +15,12 @@ use std::{
 };
 
 use crate::{
+    engine::run_chat,
     errors::{BuildError, EngineError},
     middleware::{
         ApprovalCallback, ApprovalMiddleware, RequestDefaults, RequestDefaultsMiddleware,
         SystemPromptMiddleware, wrap_callback,
     },
-    run_chat,
 };
 
 pub struct Conversation<M: CompletionModel> {

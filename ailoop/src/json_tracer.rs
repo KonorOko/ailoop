@@ -567,7 +567,7 @@ mod tests {
         config.middlewares = vec![Arc::clone(&tracer)];
         config.run_id = Some(run_id.clone());
 
-        let stream = crate::run_chat(&model, vec![Message::user("hi")], &registry, config)
+        let stream = crate::engine::run_chat(&model, vec![Message::user("hi")], &registry, config)
             .await
             .expect("run_chat should start");
         let _: Vec<_> = stream.collect().await;

@@ -301,7 +301,7 @@ mod tests {
     /// hook covers it) and the middleware logs it.
     #[tokio::test]
     async fn run_chat_emits_step_finished_through_subscriber() {
-        use crate::run_chat;
+        use crate::engine::run_chat;
         use ailoop_core::testing::ScriptedModel;
         use ailoop_tools::ToolRegistry;
         use futures::StreamExt;

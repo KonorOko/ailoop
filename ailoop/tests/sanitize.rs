@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
-use ailoop::{Conversation, Message, Sanitize, ToolDefinition, ToolResultContent, run_chat};
+use ailoop::{Conversation, Message, Sanitize, ToolDefinition, ToolResultContent, advanced::run_chat};
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{
     AssistantBlock, ChatMiddleware, ChatRequest, FinishReason, RunConfig, RunId, StepId,

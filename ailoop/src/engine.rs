@@ -113,6 +113,18 @@ macro_rules! bail_with_hooks {
     };
 }
 
+/// Drives the agent loop end-to-end against a fixed `messages` slice and
+/// the supplied [`ToolRegistry`], yielding a stream of [`StreamChunk`]s
+/// that always terminates with a [`StreamChunk::RunFinished`].
+///
+/// Most callers should reach the engine through [`Conversation::run`] /
+/// [`Conversation::stream`] instead — those wire history management,
+/// system-prompt assembly, and per-request defaults that this entry
+/// point leaves to the caller. Use this directly only when you need
+/// engine-level access without a `ContextManager` in the loop.
+///
+/// [`Conversation::run`]: crate::Conversation::run
+/// [`Conversation::stream`]: crate::Conversation::stream
 pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
     model: &'a M,
     messages: Vec<Message>,

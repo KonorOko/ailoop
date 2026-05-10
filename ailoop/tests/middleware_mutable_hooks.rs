@@ -16,7 +16,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ailoop::{Conversation, Message, ToolDefinition, ToolResultContent, run_chat};
+use ailoop::{Conversation, Message, ToolDefinition, ToolResultContent, advanced::run_chat};
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{ChatMiddleware, FinishReason, RunConfig, RunId, StepId, StreamChunk, Usage};
 use ailoop_tools::{ToolRegistry, registry::ToolDyn};
