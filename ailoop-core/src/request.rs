@@ -54,6 +54,14 @@ pub struct ChatRequest {
     /// `parallel_tool_calls` (negated) for Chat Completions.
     pub disable_parallel_tool_use: Option<bool>,
 
+    /// How hard the model should think before answering. `None` keeps
+    /// the provider default (no thinking on Anthropic; the deployment's
+    /// configured default on OpenAI). Adapters translate to their
+    /// native shape — see [`ReasoningEffort`] for the per-variant
+    /// mapping. Providers that do not surface a reasoning control
+    /// ignore the field.
+    pub reasoning_effort: Option<ReasoningEffort>,
+
     /// Free-form JSON merged into the provider's request body.
     /// Escape hatch for provider-specific knobs not yet typed in the
     /// shared shape (Anthropic `thinking`, OpenAI `reasoning_effort`,
@@ -75,6 +83,7 @@ impl Default for ChatRequest {
             max_tokens: 4096,
             tool_choice: None,
             disable_parallel_tool_use: None,
+            reasoning_effort: None,
             additional_params: None,
         }
     }
@@ -167,6 +176,53 @@ impl ToolDefinition {
         self.cache_control = Some(cache_control);
         self
     }
+}
+
+/// Cross-provider knob for how hard the model should think before
+/// answering.
+///
+/// OpenAI/Azure exposes this as a categorical `reasoning_effort` string
+/// (`"minimal" | "low" | "medium" | "high"`); Anthropic exposes a
+/// `thinking.budget_tokens` integer. The variants below cover both
+/// shapes, with the per-adapter mapping documented inline so the
+/// translation is predictable rather than magic:
+///
+/// | Variant       | OpenAI / Azure          | Anthropic (`budget_tokens`) |
+/// |---------------|-------------------------|------------------------------|
+/// | `Minimal`     | `"minimal"`             | `thinking.type = "disabled"` |
+/// | `Low`         | `"low"`                 | `1024` (Anthropic minimum)   |
+/// | `Medium`      | `"medium"`              | `4096`                       |
+/// | `High`        | `"high"`                | `16384`                      |
+/// | `Budget(n)`   | `< 2048 → "low"`,<br/>`< 8192 → "medium"`,<br/>`≥ 8192 → "high"` | `n` (verbatim) |
+///
+/// Use `Budget(n)` when you want exact control over Anthropic's
+/// `budget_tokens`. The OpenAI side then bucketises into the closest
+/// categorical effort — a deliberately opinionated mapping so the same
+/// `ChatRequest` works against either adapter without falling back to
+/// [`ChatRequest::additional_params`]. If you need a budget outside
+/// the bucketing, the escape hatch is still available.
+///
+/// Providers that do not surface a reasoning control ignore the field
+/// entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReasoningEffort {
+    /// OpenAI: `"minimal"`. Anthropic: explicit `thinking.type =
+    /// "disabled"` on the wire.
+    Minimal,
+    /// OpenAI: `"low"`. Anthropic: `budget_tokens = 1024` (the API
+    /// minimum for enabled thinking).
+    Low,
+    /// OpenAI: `"medium"`. Anthropic: `budget_tokens = 4096`.
+    Medium,
+    /// OpenAI: `"high"`. Anthropic: `budget_tokens = 16384`.
+    High,
+    /// Anthropic-native exact budget. OpenAI bucketises: values below
+    /// `2048` map to `"low"`, below `8192` to `"medium"`, otherwise to
+    /// `"high"`. Anthropic requires at least `1024`; values below that
+    /// are still forwarded verbatim so the API returns a
+    /// caller-actionable error rather than silently rounding.
+    Budget(u32),
 }
 
 /// Capability tag attached to a [`ToolDefinition`].

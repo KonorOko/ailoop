@@ -1,6 +1,6 @@
 use ailoop_core::{
-    AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, Message, RunConfig,
-    RunId, StreamChunk, ToolChoice, ToolTag, Usage,
+    AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, Message,
+    ReasoningEffort, RunConfig, RunId, StreamChunk, ToolChoice, ToolTag, Usage,
 };
 use ailoop_history::{ConversationSnapshot, History, HistoryBuilder};
 use ailoop_prompts::{Prompt, PromptSection};
@@ -621,6 +621,16 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
+    /// Default `reasoning_effort` applied to every [`ChatRequest`]. The
+    /// adapter translates this to its native shape — `thinking` budget
+    /// on Anthropic, `reasoning_effort` string on Chat Completions; see
+    /// the variant docs on [`ReasoningEffort`] for the per-variant
+    /// mapping. See [`Self::temperature`] for precedence rules.
+    pub fn reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.request_defaults.reasoning_effort = Some(effort);
+        self
+    }
+
     /// Default `max_tokens` applied to every [`ChatRequest`]. Unlike
     /// the `Option`-typed controls, this clobbers the engine's
     /// `RunConfig::max_tokens` because `ChatRequest::max_tokens` is a
@@ -1235,6 +1245,7 @@ mod tests {
         stop_sequences: Vec<String>,
         tool_choice: Option<ToolChoice>,
         disable_parallel_tool_use: Option<bool>,
+        reasoning_effort: Option<ReasoningEffort>,
         max_tokens: u32,
         additional_params: Option<serde_json::Value>,
     }
@@ -1253,6 +1264,7 @@ mod tests {
                 stop_sequences: req.stop_sequences.clone(),
                 tool_choice: req.tool_choice.clone(),
                 disable_parallel_tool_use: req.disable_parallel_tool_use,
+                reasoning_effort: req.reasoning_effort,
                 max_tokens: req.max_tokens,
                 additional_params: req.additional_params.clone(),
             });
@@ -1278,6 +1290,7 @@ mod tests {
             .stop_sequences(["STOP", "END"])
             .tool_choice(ToolChoice::Any)
             .disable_parallel_tool_use(true)
+            .reasoning_effort(ReasoningEffort::Medium)
             .max_tokens(1234)
             .additional_params(json!({"thinking": {"type": "enabled"}}))
             .middleware(Arc::new(RecordingMiddleware {
@@ -1295,6 +1308,7 @@ mod tests {
         assert_eq!(rec.stop_sequences, vec!["STOP".to_string(), "END".into()]);
         assert_eq!(rec.tool_choice, Some(ToolChoice::Any));
         assert_eq!(rec.disable_parallel_tool_use, Some(true));
+        assert_eq!(rec.reasoning_effort, Some(ReasoningEffort::Medium));
         assert_eq!(rec.max_tokens, 1234);
         assert_eq!(
             rec.additional_params,
@@ -1325,6 +1339,7 @@ mod tests {
         assert!(rec.stop_sequences.is_empty());
         assert_eq!(rec.tool_choice, None);
         assert_eq!(rec.disable_parallel_tool_use, None);
+        assert_eq!(rec.reasoning_effort, None);
         assert_eq!(rec.max_tokens, 4096); // RunConfig::default().max_tokens
         assert_eq!(rec.additional_params, None);
     }

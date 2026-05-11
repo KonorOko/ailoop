@@ -10,6 +10,15 @@ and this project adheres to
 
 ### Added
 
+- `ReasoningEffort` typed knob on `ChatRequest`, surfaced through
+  `ConversationBuilder::reasoning_effort(...)`. Variants
+  `Minimal | Low | Medium | High` map cross-provider; `Budget(u32)`
+  gives exact control over Anthropic's `thinking.budget_tokens` and
+  bucketises into the closest Chat Completions string. Mapping table
+  documented inline on the enum. Adapters that don't surface a
+  reasoning control ignore the field. `ChatRequest` is
+  `#[non_exhaustive]`, so the addition is non-breaking; the previous
+  `additional_params` escape hatch keeps working.
 - `MaxToolCalls` middleware (`ailoop::MaxToolCalls`): flat cap on the
   *total* number of tool invocations across an entire run.
   `RunConfig::max_iterations` only counts steps, so a turn with 30

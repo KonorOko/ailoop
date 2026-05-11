@@ -1,6 +1,6 @@
 use ailoop_core::{
-    AssistantBlock, ChatRequest, Message, Source, ToolChoice, ToolDefinition, ToolResultBlock,
-    UserBlock,
+    AssistantBlock, ChatRequest, Message, ReasoningEffort, Source, ToolChoice, ToolDefinition,
+    ToolResultBlock, UserBlock,
 };
 use serde_json::{Value, json};
 
@@ -52,6 +52,12 @@ pub fn build_body(deployment: &str, req: &ChatRequest) -> Result<Value, AzureOpe
     // Chat Completions exposes the inverse: `parallel_tool_calls` (default true).
     if let Some(disable) = req.disable_parallel_tool_use {
         body.insert("parallel_tool_calls".into(), json!(!disable));
+    }
+
+    if let Some(effort) = req.reasoning_effort
+        && let Some(s) = reasoning_effort_str(effort)
+    {
+        body.insert("reasoning_effort".into(), json!(s));
     }
 
     if let Some(extra) = &req.additional_params
@@ -238,6 +244,28 @@ fn to_chat_tool_choice(choice: &ToolChoice) -> Value {
     }
 }
 
+/// Lower a [`ReasoningEffort`] into Chat Completions'
+/// `reasoning_effort` string. `Budget(n)` bucketises into the closest
+/// categorical value using the thresholds documented on
+/// [`ReasoningEffort`]. Returns `None` for unknown future variants so
+/// the field is dropped from the body.
+fn reasoning_effort_str(effort: ReasoningEffort) -> Option<&'static str> {
+    match effort {
+        ReasoningEffort::Minimal => Some("minimal"),
+        ReasoningEffort::Low => Some("low"),
+        ReasoningEffort::Medium => Some("medium"),
+        ReasoningEffort::High => Some("high"),
+        ReasoningEffort::Budget(n) => Some(if n < 2048 {
+            "low"
+        } else if n < 8192 {
+            "medium"
+        } else {
+            "high"
+        }),
+        _ => None,
+    }
+}
+
 fn to_tools(tools: &[ToolDefinition]) -> Vec<Value> {
     tools
         .iter()
@@ -261,6 +289,59 @@ mod tests {
 
     fn base_req() -> ChatRequest {
         ChatRequest::new(Vec::new(), 1024)
+    }
+
+    /// Categorical variants map to the matching Chat Completions
+    /// `reasoning_effort` string verbatim.
+    #[test]
+    fn reasoning_effort_categorical_variants_map_to_strings() {
+        for (variant, expected) in [
+            (ReasoningEffort::Minimal, "minimal"),
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+        ] {
+            let mut req = base_req();
+            req.reasoning_effort = Some(variant);
+            let body = build_body("dep", &req).unwrap();
+            assert_eq!(
+                body["reasoning_effort"],
+                json!(expected),
+                "{variant:?} should map to {expected:?}"
+            );
+        }
+    }
+
+    /// `Budget(n)` bucketises into the closest categorical value using
+    /// the thresholds documented on `ReasoningEffort`. Boundaries are
+    /// inclusive on the lower side.
+    #[test]
+    fn reasoning_effort_budget_bucketises_into_strings() {
+        for (budget, expected) in [
+            (0u32, "low"),
+            (2047, "low"),
+            (2048, "medium"),
+            (8191, "medium"),
+            (8192, "high"),
+            (50000, "high"),
+        ] {
+            let mut req = base_req();
+            req.reasoning_effort = Some(ReasoningEffort::Budget(budget));
+            let body = build_body("dep", &req).unwrap();
+            assert_eq!(
+                body["reasoning_effort"],
+                json!(expected),
+                "Budget({budget}) should bucket as {expected:?}"
+            );
+        }
+    }
+
+    /// `None` (the default) omits the field entirely so the wire stays
+    /// compatible with non-reasoning deployments.
+    #[test]
+    fn reasoning_effort_none_omits_field() {
+        let body = build_body("dep", &base_req()).unwrap();
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]
