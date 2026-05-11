@@ -67,6 +67,9 @@ where
                 if let Some(details) = u.prompt_tokens_details {
                     usage.cached_input_tokens = details.cached_tokens;
                 }
+                if let Some(details) = u.completion_tokens_details {
+                    usage.reasoning_tokens = details.reasoning_tokens;
+                }
                 // Azure does not report cache writes (Anthropic-only concept).
             }
 
@@ -341,6 +344,29 @@ mod tests {
                 assert_eq!(usage.output_tokens, 50);
                 assert_eq!(usage.cached_input_tokens, 80);
                 assert_eq!(usage.cache_creation_input_tokens, 0);
+            }
+            other => panic!("expected TurnFinished, got {other:?}"),
+        }
+    }
+
+    /// Reasoning-capable deployments report a `completion_tokens_details`
+    /// breakdown. The state machine must surface it on `Usage.reasoning_tokens`
+    /// so observers can attribute the cost of hidden reasoning separately
+    /// from visible output.
+    #[tokio::test]
+    async fn usage_reasoning_tokens_reach_turn_finished() {
+        let events = vec![
+            parse(r#"{"choices":[{"index":0,"delta":{"content":"answer"}}]}"#),
+            parse(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#),
+            parse(
+                r#"{"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":150,"completion_tokens_details":{"reasoning_tokens":120}}}"#,
+            ),
+        ];
+        let chunks = run(events).await;
+        match chunks.last().unwrap() {
+            StreamChunk::TurnFinished { usage, .. } => {
+                assert_eq!(usage.output_tokens, 150);
+                assert_eq!(usage.reasoning_tokens, 120);
             }
             other => panic!("expected TurnFinished, got {other:?}"),
         }

@@ -8,6 +8,16 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- `Usage.reasoning_tokens`: subset of `output_tokens` consumed by
+  hidden reasoning steps. Populated by Azure OpenAI when the deployment
+  reports a `completion_tokens_details.reasoning_tokens` breakdown
+  (o-series, gpt-5). Anthropic folds reasoning into `output_tokens`
+  today, so the field stays at `0` there until the API surfaces a
+  separate counter. `Usage` is `#[non_exhaustive]`, so the addition is
+  non-breaking.
+
 ## [1.0.0-rc.3] — 2026-05-11
 
 ### Added

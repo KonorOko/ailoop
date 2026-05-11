@@ -71,12 +71,24 @@ pub(crate) struct Usage {
     pub completion_tokens: u32,
     #[serde(default)]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PromptTokensDetails {
     #[serde(default)]
     pub cached_tokens: u32,
+}
+
+/// o-series / gpt-5 reasoning token breakdown nested under `usage`. Zero
+/// or absent on non-reasoning deployments; surfaced separately from
+/// `completion_tokens` so callers can attribute the reasoning slice for
+/// billing and telemetry.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CompletionTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: u32,
 }
 
 #[cfg(test)]
@@ -132,6 +144,22 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 20);
         assert_eq!(usage.prompt_tokens_details.unwrap().cached_tokens, 5);
+        assert!(usage.completion_tokens_details.is_none());
+    }
+
+    /// o-series / gpt-5 deployments add a `completion_tokens_details` object
+    /// nested under `usage`. The state machine attributes `reasoning_tokens`
+    /// to the new `Usage.reasoning_tokens` counter for billing/telemetry.
+    #[test]
+    fn parses_usage_with_reasoning_tokens_breakdown() {
+        let json = r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":120,"completion_tokens_details":{"reasoning_tokens":80}}}"#;
+        let chunk: ChatCompletionsChunk = serde_json::from_str(json).unwrap();
+        let usage = chunk.usage.unwrap();
+        assert_eq!(usage.completion_tokens, 120);
+        assert_eq!(
+            usage.completion_tokens_details.unwrap().reasoning_tokens,
+            80
+        );
     }
 
     #[test]
