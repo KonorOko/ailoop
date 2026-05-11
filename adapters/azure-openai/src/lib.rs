@@ -32,6 +32,9 @@
 //! - [`TokenProvider`] — async source of bearer tokens (you implement
 //!   this around `azure_identity` / `msal` / your own credential
 //!   pipeline).
+//! - [`CachingTokenProvider`] — TTL-bounded cache wrapping any
+//!   [`TokenProvider`], so the credential pipeline is only hit once
+//!   per refresh window.
 //! - [`AzureOpenAIChatModel`] — the [`CompletionModel`]
 //!   implementation built by [`AzureOpenAIClient::model`] /
 //!   [`CompletionClient::completion_model`](ailoop_core::CompletionClient::completion_model).
@@ -47,6 +50,7 @@
 
 #![deny(missing_docs)]
 
+mod caching_provider;
 mod client;
 mod error_body;
 mod errors;
@@ -55,6 +59,7 @@ mod model;
 mod request;
 mod stream;
 
+pub use caching_provider::CachingTokenProvider;
 pub use client::{AzureOpenAIAuth, AzureOpenAIClient, TokenProvider};
 pub use errors::{AzureOpenAIApiErrorKind, AzureOpenAIError};
 pub use model::AzureOpenAIChatModel;
