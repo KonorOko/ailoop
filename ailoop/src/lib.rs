@@ -82,7 +82,9 @@ pub use ailoop_tools::{
     errors::ToolRegistryError,
 };
 pub use anti_loop::{AntiLoop, TextPredicate};
-pub use conversation::{Conversation, ConversationBuilder, RunOutcome, RunStream};
+pub use conversation::{
+    Conversation, ConversationBuilder, DEFAULT_HISTORY_MAX_TOKENS, RunOutcome, RunStream,
+};
 pub use errors::{BuildError, EngineError};
 
 /// Lower-level entry points outside the [`Conversation`] happy path.

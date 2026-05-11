@@ -1,4 +1,4 @@
-use ailoop_history::{History, ConversationSnapshot};
+use ailoop_history::{ConversationSnapshot, History, HistoryBuilder};
 use ailoop_core::{
     AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, Message, RunConfig,
     RunId, StreamChunk, ToolChoice, ToolTag, Usage,
@@ -22,6 +22,21 @@ use crate::{
         SystemPromptMiddleware, wrap_callback,
     },
 };
+
+/// Default token budget the internal [`History`] is configured
+/// with when [`ConversationBuilder::with_history`] is **not** called.
+///
+/// Sized for a typical 200K-context Claude model with a real tokenizer
+/// wired in (leaves ample headroom for tool definitions, system prompt
+/// and the response). With the fallback
+/// [`ailoop_core::CharTokenizer`] this corresponds to roughly 400 KB of
+/// transcript before compaction kicks in.
+///
+/// Override via
+/// [`ConversationBuilder::with_history`](ConversationBuilder::with_history)
+/// when your model has a smaller window, when you want compaction to
+/// fire earlier, or when you wire a non-default tokenizer / strategy.
+pub const DEFAULT_HISTORY_MAX_TOKENS: usize = 100_000;
 
 /// An agent loop bound to a single [`CompletionModel`], with history,
 /// tool registry, and middleware chain configured up front. Construct
@@ -285,7 +300,8 @@ struct ApprovalSpec {
 pub struct ConversationBuilder<M: CompletionModel> {
     model: M,
     prompt: Prompt,
-    history: History,
+    history: HistoryBuilder,
+    seeded_history: Option<(Vec<Message>, Vec<bool>)>,
     tools: ToolRegistry,
     tool_prompts: HashMap<String, PromptSection>,
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
@@ -301,7 +317,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// [`Conversation::builder(model)`](Conversation::builder); prefer
     /// the latter as the canonical entry point.
     pub fn new(model: M) -> Self {
-        let history = History::builder(460).build();
+        let history = History::builder(DEFAULT_HISTORY_MAX_TOKENS);
         let tools = ToolRegistry::new();
         let tool_prompts = HashMap::new();
         let prompt = Prompt::new();
@@ -311,6 +327,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             prompt,
             tool_prompts,
             history,
+            seeded_history: None,
             tools,
             middlewares: vec![],
             capabilities: None,
@@ -330,15 +347,14 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// The snapshot's invariants (length match, supported version)
     /// are enforced when the snapshot is constructed or deserialized,
     /// so this constructor is infallible.
+    ///
+    /// Compose with [`with_history`](Self::with_history) if you want
+    /// the resumed conversation to use a different budget, tokenizer
+    /// or strategy than the default — the seeded messages and pin mask
+    /// are preserved regardless of call order.
     pub fn from_snapshot(model: M, snapshot: ConversationSnapshot) -> Self {
         let mut builder = Self::new(model);
-        let history = History::from_messages(
-            History::builder(460),
-            snapshot.messages,
-            snapshot.pinned,
-        )
-        .expect("snapshot guarantees messages.len() == pinned.len()");
-        builder.history = history;
+        builder.seeded_history = Some((snapshot.messages, snapshot.pinned));
         builder
     }
 
@@ -415,6 +431,34 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// builder default.
     pub fn middleware(mut self, middleware: Arc<dyn ChatMiddleware>) -> Self {
         self.middlewares.push(middleware);
+        self
+    }
+
+    /// Configure the internal [`History`] that owns the
+    /// conversation's message vector and drives compaction. Replaces
+    /// the [default][DEFAULT_HISTORY_MAX_TOKENS] (`100_000` tokens with
+    /// the fallback [`ailoop_core::CharTokenizer`]) — call this whenever you need a
+    /// different budget, a real tokenizer for accurate sizing, a custom
+    /// [`CompactionStrategy`](ailoop_history::CompactionStrategy)
+    /// (e.g. [`SummarizeStrategy`](ailoop_history::SummarizeStrategy)),
+    /// or a non-default `preserve_n_last`.
+    ///
+    /// ```ignore
+    /// Conversation::builder(model)
+    ///     .with_history(
+    ///         History::builder(150_000)
+    ///             .tokenizer(Box::new(my_tokenizer)),
+    ///     )
+    ///     .build()?;
+    /// ```
+    ///
+    /// Composes with [`from_snapshot`](Self::from_snapshot): the
+    /// seeded message vector and pin mask are preserved regardless of
+    /// call order, only the budget / tokenizer / strategy /
+    /// `preserve_n_last` come from this builder. Successive calls
+    /// overwrite each other.
+    pub fn with_history(mut self, history: HistoryBuilder) -> Self {
+        self.history = history;
         self
     }
 
@@ -706,9 +750,17 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             middlewares.push(Arc::new(approval_mw));
         }
 
+        let history = match self.seeded_history {
+            Some((messages, pinned)) => {
+                History::from_messages(self.history, messages, pinned)
+                    .expect("snapshot guarantees messages.len() == pinned.len()")
+            }
+            None => self.history.build(),
+        };
+
         Ok(Conversation {
             model: self.model,
-            history: self.history,
+            history,
             tools,
             middlewares,
         })
@@ -1061,13 +1113,16 @@ mod tests {
         }]]);
 
         let mut chat = Conversation::builder(model)
+            .with_history(History::builder(460))
             .middleware(Arc::new(TracingMiddleware::new()))
             .build()
             .expect("builder should succeed");
 
         // Pre-seed enough history to overflow `max_tokens=460`
         // (CharTokenizer = len()/4) so `compact_if_needed` fires on
-        // `stream`.
+        // `stream`. The 460 budget is explicitly low so this test runs
+        // quickly; production defaults are much higher (see
+        // `DEFAULT_HISTORY_MAX_TOKENS`).
         let big = "x".repeat(200);
         for _ in 0..15 {
             chat.history.add_message(Message::user(big.clone()));
@@ -1100,14 +1155,15 @@ mod tests {
     #[tokio::test]
     async fn stream_emits_history_compacted_with_matching_run_id() {
         let mut chat = Conversation::builder(MockModel)
+            .with_history(History::builder(460))
             .build()
             .expect("builder should succeed");
 
-        // Default `max_tokens` for the builder is 460 (CharTokenizer =
-        // len()/4). Stuff enough text to overshoot the budget so the
-        // call to `stream` triggers compaction. Pre-seed messages
-        // directly into the private history field; we want compaction
-        // to fire on the call we observe, not on `add_message`.
+        // 460 (CharTokenizer = len()/4) is a deliberately low budget
+        // for this test. Stuff enough text to overshoot it so the call
+        // to `stream` triggers compaction. Pre-seed messages directly
+        // into the private history field; we want compaction to fire
+        // on the call we observe, not on `add_message`.
         let big = "x".repeat(200);
         for _ in 0..15 {
             chat.history.add_message(Message::user(big.clone()));

@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ailoop::{Conversation, Message, ToolDefinition, ToolResultContent};
+use ailoop::{Conversation, History, Message, ToolDefinition, ToolResultContent};
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{
     AssistantBlock, CancellationToken, FinishReason, RunConfig, StreamChunk, ToolTag, Usage,
@@ -228,10 +228,13 @@ async fn run_drains_history_compacted_prelude_without_clobbering_outcome() {
         },
     ]]);
 
-    let mut chat = Conversation::builder(model).build().expect("build");
+    let mut chat = Conversation::builder(model)
+        .with_history(History::builder(460))
+        .build()
+        .expect("build");
 
-    // The default `max_tokens` is 460 (CharTokenizer = len()/4). Stuff
-    // enough text to overshoot.
+    // 460 (CharTokenizer = len()/4) is a deliberately low budget for
+    // this test. Stuff enough text to overshoot it.
     let big = "x".repeat(200);
     for _ in 0..15 {
         chat.history_push(Message::user(big.clone()));
