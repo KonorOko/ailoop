@@ -10,6 +10,14 @@ and this project adheres to
 
 ### Added
 
+- `TimeoutTool<T: ToolDyn>` in `ailoop-tools` (re-exported as
+  `ailoop::TimeoutTool`): per-tool wall-clock cap that wraps any
+  `ToolDyn`. When the wrapped call exceeds its budget the wrapper
+  returns an `is_error: true` `ToolResultContent` and the engine
+  feeds the error back to the model — the run keeps going. Distinct
+  tools (e.g. `get_weather` vs `run_terraform_apply`) deserve
+  distinct caps; the run-wide `RunConfig::timeout` stays the right
+  knob for the overall run.
 - `Usage.reasoning_tokens`: subset of `output_tokens` consumed by
   hidden reasoning steps. Populated by Azure OpenAI when the deployment
   reports a `completion_tokens_details.reasoning_tokens` breakdown

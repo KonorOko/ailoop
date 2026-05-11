@@ -45,8 +45,10 @@ pub mod context;
 pub mod errors;
 pub mod registry;
 pub mod schema;
+pub mod timeout;
 
 pub use context::{ToolActivation, ToolActivationError, ToolContext};
 pub use errors::ToolRegistryError;
 pub use registry::{Tool, ToolDyn, ToolRegistry};
 pub use schema::ToolJsonType;
+pub use timeout::TimeoutTool;

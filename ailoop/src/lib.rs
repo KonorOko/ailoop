@@ -78,8 +78,8 @@ pub use ailoop_prompts::{Prompt, PromptBuilder, PromptSection};
 // namespaces (one is a trait, one is a macro), so both can be brought
 // into scope by `use ailoop::*;` without conflict.
 pub use ailoop_tools::{
-    Tool, ToolActivation, ToolActivationError, ToolContext, ToolDyn, ToolJsonType, ToolRegistry,
-    errors::ToolRegistryError,
+    TimeoutTool, Tool, ToolActivation, ToolActivationError, ToolContext, ToolDyn, ToolJsonType,
+    ToolRegistry, errors::ToolRegistryError,
 };
 pub use anti_loop::{AntiLoop, TextPredicate};
 pub use conversation::{
