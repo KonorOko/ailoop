@@ -86,7 +86,8 @@ pub use ailoop_tools::{
 };
 pub use anti_loop::{AntiLoop, TextPredicate};
 pub use conversation::{
-    Conversation, ConversationBuilder, DEFAULT_HISTORY_MAX_TOKENS, RunOutcome, RunStream,
+    Conversation, ConversationBuilder, DEFAULT_HISTORY_MAX_TOKENS, RunOptions, RunOutcome,
+    RunStream,
 };
 pub use errors::{BuildError, EngineError};
 pub use max_tool_calls::MaxToolCalls;

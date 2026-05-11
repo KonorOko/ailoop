@@ -10,6 +10,20 @@ and this project adheres to
 
 ### Added
 
+- `Conversation::stream_with_options` / `run_with_options` plus
+  `RunOptions` (`ailoop::RunOptions`): per-call overrides for
+  `timeout`, `cancellation`, `max_iterations`, `max_tokens`, and a
+  caller-minted `RunId`. Previously the only way to attach a timeout
+  or a `CancellationToken` to a `Conversation` run was to drop into
+  `advanced::run_chat` and bypass the façade's middleware composition
+  entirely. The new options are deliberately narrower than
+  `RunConfig`: `middlewares` and `system_prompt` are owned by the
+  builder and stay there; the escape hatch for engine-level control
+  remains `advanced::run_chat`. Cancellation interrupts every await
+  (HTTP setup, SSE chunks, tool execution, retry backoff) under the
+  engine's `select!`, so a run can be aborted mid-backoff.
+  `stream()` / `run()` keep their signatures and delegate to the new
+  methods with `RunOptions::default()` for a no-op overlay.
 - `ReasoningEffort` typed knob on `ChatRequest`, surfaced through
   `ConversationBuilder::reasoning_effort(...)`. Variants
   `Minimal | Low | Medium | High` map cross-provider; `Budget(u32)`
