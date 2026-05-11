@@ -8,6 +8,69 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] — 2026-05-11
+
+### Added
+
+- `Conversation::builder().with_history(HistoryBuilder)`: configure
+  the internal `History` (token budget, tokenizer, compaction
+  strategy, `preserve_n_last`) at build time. Composes with
+  `from_snapshot` in any call order — seeded messages and pin mask are
+  preserved.
+- `DEFAULT_HISTORY_MAX_TOKENS = 100_000`: public constant used when
+  `with_history` is not called. Sized for a 200K-context Claude with a
+  real tokenizer; ≈ 400 KB of transcript under the `CharTokenizer`
+  fallback. Previously the budget was hardcoded to `460` (a test-only
+  value) with no way to override it.
+
+### Changed (BREAKING)
+
+- Crate `ailoop-context` renamed to `ailoop-history`. The previous
+  name is yanked on crates.io and republished as a `#[deprecated]`
+  re-export shim.
+- Type `ContextManager` renamed to `History`; `ContextManagerBuilder`
+  renamed to `HistoryBuilder`. The crate already used "history" as
+  the vocabulary for persistence (`HistoryStore`, `HistoryStore`
+  implementations, `ConversationSnapshot`) — the rename aligns the
+  in-memory container with that.
+- `ConversationBuilder::from_snapshot` no longer eagerly builds the
+  internal `History`: it stores the seeded messages until `build()`
+  runs, so it composes with `with_history`. Public surface unchanged;
+  callers should not observe the difference.
+
+### Migration
+
+```toml
+# before
+ailoop-context = "1.0.0-rc.2"
+
+# after
+ailoop-history = "1.0.0-rc.3"
+```
+
+```rust
+// before
+use ailoop_context::{ContextManager, ContextManagerBuilder};
+
+// after
+use ailoop_history::{History, HistoryBuilder};
+```
+
+To raise the history budget (recommended for any conversation that
+will live beyond a handful of turns under a real tokenizer):
+
+```rust
+use ailoop::{Conversation, History};
+
+let chat = Conversation::builder(model)
+    .with_history(History::builder(150_000))
+    .build()?;
+```
+
+The deprecated `ailoop-context` crate keeps re-exporting everything
+from `ailoop-history`, so existing code compiles with a
+`#[deprecated]` warning until you migrate.
+
 ## [1.0.0-rc.2] — 2026-05-10
 
 ### Added
@@ -155,5 +218,7 @@ workspace-wide API audit (closed 2026-05-10).
 - Other providers (OpenAI public, Bedrock, Vertex, local engines)
   are not implemented.
 
-[Unreleased]: https://github.com/KonorOko/ailoop/compare/v1.0.0-rc.1...HEAD
+[Unreleased]: https://github.com/KonorOko/ailoop/compare/v1.0.0-rc.3...HEAD
+[1.0.0-rc.3]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.3
+[1.0.0-rc.2]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.1

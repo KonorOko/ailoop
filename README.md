@@ -39,8 +39,8 @@ decoupled from any single vendor.
 
 ```toml
 [dependencies]
-ailoop = "1.0.0-rc.2"
-ailoop-anthropic = "1.0.0-rc.2"
+ailoop = "1.0.0-rc.3"
+ailoop-anthropic = "1.0.0-rc.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
