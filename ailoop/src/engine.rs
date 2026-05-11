@@ -121,7 +121,7 @@ macro_rules! bail_with_hooks {
 /// [`Conversation::stream`] instead — those wire history management,
 /// system-prompt assembly, and per-request defaults that this entry
 /// point leaves to the caller. Use this directly only when you need
-/// engine-level access without a `ContextManager` in the loop.
+/// engine-level access without a `History` in the loop.
 ///
 /// [`Conversation::run`]: crate::Conversation::run
 /// [`Conversation::stream`]: crate::Conversation::stream

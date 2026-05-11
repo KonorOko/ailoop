@@ -17,7 +17,7 @@ use crate::errors::CompactionError;
 /// `messages` and `pinned` are parallel: `pinned[i]` describes the
 /// pin state of `messages[i]` in the post-compaction history. The
 /// strategy is responsible for forwarding the pin state of every
-/// message it preserves so the [`crate::ContextManager`] can keep its
+/// message it preserves so the [`crate::History`] can keep its
 /// internal mask consistent across compactions.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -35,16 +35,16 @@ pub struct CompactionOutput {
 impl CompactionOutput {
     /// Bundle a freshly compacted history with its parallel pin mask.
     /// `messages.len()` and `pinned.len()` must match — the
-    /// [`ContextManager`] asserts this in debug builds.
+    /// [`History`] asserts this in debug builds.
     ///
-    /// [`ContextManager`]: crate::ContextManager
+    /// [`History`]: crate::History
     pub fn new(messages: Vec<Message>, pinned: Vec<bool>) -> Self {
         Self { messages, pinned }
     }
 }
 
-/// User-implementable strategy for shrinking a [`ContextManager`]'s
-/// history when [`ContextManager::compact_if_needed`] runs.
+/// User-implementable strategy for shrinking a [`History`]'s
+/// history when [`History::compact_if_needed`] runs.
 ///
 /// Ships with two built-in implementations: [`TruncateStrategy`] drops
 /// the oldest unpinned messages until the budget fits;
@@ -54,8 +54,8 @@ impl CompactionOutput {
 /// implement the trait yourself for domain-specific reductions
 /// (sliding window, importance scoring, RAG-style summarization, …).
 ///
-/// [`ContextManager`]: crate::ContextManager
-/// [`ContextManager::compact_if_needed`]: crate::ContextManager::compact_if_needed
+/// [`History`]: crate::History
+/// [`History::compact_if_needed`]: crate::History::compact_if_needed
 #[async_trait]
 pub trait CompactionStrategy: Send + Sync {
     /// Stable, machine-readable name of the strategy. Used by
@@ -124,7 +124,7 @@ impl CompactionStrategy for TruncateStrategy {
         // Pinned messages from the dropped prefix survive at their
         // original relative position. The caller is responsible for
         // pinning ToolCall/ToolResult pairs together — see
-        // `ContextManager::pin_with_tool_result`.
+        // `History::pin_with_tool_result`.
         for (i, msg) in messages.iter().enumerate().take(start) {
             if pinned[i] {
                 out_messages.push(msg.clone());

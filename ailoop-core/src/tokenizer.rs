@@ -5,7 +5,7 @@
 //! conversation is worth. It lives in `ailoop-core` because the types
 //! that get tokenized — [`Message`], its blocks, and the `Usage`
 //! reports providers send back — already live here, so neither
-//! `ailoop-context` (history compaction) nor `ailoop-prompts` (system
+//! `ailoop-history` (history compaction) nor `ailoop-prompts` (system
 //! prompt assembly) has to depend on the other to share a counter.
 //!
 //! Implementations fall in two families:
@@ -17,7 +17,7 @@
 //!   "good enough" for compaction budgets.
 //!
 //! [`CharTokenizer`] is a deliberately rough fallback (`len() / 4`)
-//! used by `ailoop-context` when no real tokenizer has been wired up.
+//! used by `ailoop-history` when no real tokenizer has been wired up.
 //! It is documented as a fallback rather than a recommended default:
 //! production callers should plug in a provider-specific implementation.
 
@@ -100,7 +100,7 @@ pub trait Tokenizer: Send + Sync {
     }
 
     /// Count tokens in a slice of messages — the budget unit
-    /// `ContextManager::compact_if_needed` measures against.
+    /// `History::compact_if_needed` measures against.
     fn count_messages(&self, messages: &[Message]) -> usize {
         messages.iter().map(|m| self.count_message(m)).sum()
     }
@@ -112,11 +112,11 @@ pub trait Tokenizer: Send + Sync {
 /// for back-of-envelope sizing — accurate enough to spot the difference
 /// between "10 tokens" and "10k tokens", but **not** a substitute for
 /// a real tokenizer when budgets are tight. It is the silent default
-/// in `ailoop-context::ContextManagerBuilder` so dev/test code does not
+/// in `ailoop-history::HistoryBuilder` so dev/test code does not
 /// have to wire one up; production callers should pass an explicit
 /// provider-specific tokenizer
 /// (e.g. `ailoop_anthropic::OnlineCalibratedTokenizer`) via
-/// `ContextManagerBuilder::tokenizer`.
+/// `HistoryBuilder::tokenizer`.
 pub struct CharTokenizer;
 
 impl Tokenizer for CharTokenizer {

@@ -1,5 +1,5 @@
 [package]
-name = "ailoop-context"
+name = "ailoop-history"
 description = "Conversation history management and compaction for ailoop"
 version.workspace = true
 edition.workspace = true
@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
-keywords = ["llm", "ai", "agent", "context"]
+keywords = ["llm", "ai", "agent", "history"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]

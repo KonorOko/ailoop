@@ -4,7 +4,7 @@ High-level façade for building LLM agent loops in Rust.
 
 Most application code only depends on this crate — it re-exports the
 vocabulary from `ailoop-core` (messages, stream chunks, hooks) and
-from the side crates (`ailoop-context`, `ailoop-tools`,
+from the side crates (`ailoop-history`, `ailoop-tools`,
 `ailoop-prompts`) you need to wire a `Conversation` together.
 
 ```toml

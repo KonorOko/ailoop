@@ -1,5 +1,5 @@
-//! [`ContextManager`] + [`ContextManagerBuilder`] + the report type
-//! [`compact_if_needed`](ContextManager::compact_if_needed) returns.
+//! [`History`] + [`HistoryBuilder`] + the report type
+//! [`compact_if_needed`](History::compact_if_needed) returns.
 
 use ailoop_core::{AssistantBlock, CharTokenizer, Message, Tokenizer, UserBlock};
 
@@ -8,7 +8,7 @@ use crate::{
     errors::{CompactionError, FromMessagesError},
 };
 
-/// Reports what [`ContextManager::compact_if_needed`] did when it ran.
+/// Reports what [`History::compact_if_needed`] did when it ran.
 /// Returned wrapped in `Option`: `None` means compaction was not needed
 /// (history fits within `max_tokens`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +47,7 @@ pub struct CompactionReport {
 ///
 /// [`ChatRequest`]: ailoop_core::ChatRequest
 /// [`ConversationSnapshot`]: crate::ConversationSnapshot
-pub struct ContextManager {
+pub struct History {
     messages: Vec<Message>,
     /// Parallel to `messages`: `pinned[i] == true` marks `messages[i]`
     /// as "must survive compaction". The two vectors are kept the same
@@ -68,7 +68,7 @@ pub struct ContextManager {
     tokenizer: Box<dyn Tokenizer>,
 }
 
-impl ContextManager {
+impl History {
     /// Begin configuring a new manager with `max_tokens` as the
     /// budget [`compact_if_needed`](Self::compact_if_needed) will
     /// hold the history under. Defaults: [`TruncateStrategy`] for
@@ -76,11 +76,11 @@ impl ContextManager {
     /// preserved tail messages.
     ///
     /// [`TruncateStrategy`]: crate::TruncateStrategy
-    pub fn builder(max_tokens: usize) -> ContextManagerBuilder {
-        ContextManagerBuilder::new(max_tokens)
+    pub fn builder(max_tokens: usize) -> HistoryBuilder {
+        HistoryBuilder::new(max_tokens)
     }
 
-    /// Restore a `ContextManager` whose history is `messages` and whose
+    /// Restore a `History` whose history is `messages` and whose
     /// pin mask is `pinned`. The two vectors must have the same length;
     /// otherwise a [`FromMessagesError::LengthMismatch`] is returned.
     /// All other configuration (budget, strategy, tokenizer, preserved
@@ -88,7 +88,7 @@ impl ContextManager {
     /// the original conversation used so compaction behaves
     /// consistently across resumes.
     pub fn from_messages(
-        builder: ContextManagerBuilder,
+        builder: HistoryBuilder,
         messages: Vec<Message>,
         pinned: Vec<bool>,
     ) -> Result<Self, FromMessagesError> {
@@ -105,7 +105,7 @@ impl ContextManager {
     }
 }
 
-impl ContextManager {
+impl History {
     /// Append `message` to the history with `pinned = false`. Use
     /// [`pin_last`](Self::pin_last) immediately after the call to mark
     /// it as a survivor.
@@ -295,23 +295,23 @@ impl ContextManager {
     }
 }
 
-/// Configuration for a [`ContextManager`].
+/// Configuration for a [`History`].
 ///
-/// Construct via [`ContextManager::builder`]. Setters return
+/// Construct via [`History::builder`]. Setters return
 /// `Self` so calls chain; [`build`](Self::build) is infallible.
-pub struct ContextManagerBuilder {
+pub struct HistoryBuilder {
     max_tokens: usize,
     preserve_n_last: usize,
     tokenizer: Box<dyn Tokenizer>,
     strategy: Box<dyn CompactionStrategy>,
 }
 
-impl ContextManagerBuilder {
+impl HistoryBuilder {
     fn new(max_tokens: usize) -> Self {
         Self {
             max_tokens,
             preserve_n_last: 4,
-            // Fallback default — see the doc on `ContextManager::tokenizer`.
+            // Fallback default — see the doc on `History::tokenizer`.
             // Production code should override via `Self::tokenizer`.
             tokenizer: Box::new(CharTokenizer),
             strategy: Box::new(TruncateStrategy),
@@ -319,7 +319,7 @@ impl ContextManagerBuilder {
     }
 }
 
-impl ContextManagerBuilder {
+impl HistoryBuilder {
     /// Number of trailing messages the strategy must preserve verbatim
     /// (after walking back to a safe `User`-without-`ToolResult`
     /// boundary). Default: 4. Lowering it lets compaction reclaim more
@@ -331,10 +331,10 @@ impl ContextManagerBuilder {
     }
 
     /// Wire a [`Tokenizer`] into the manager. Replaces the default
-    /// [`CharTokenizer`] fallback so [`ContextManager::compact_if_needed`]
+    /// [`CharTokenizer`] fallback so [`History::compact_if_needed`]
     /// measures the budget in real tokens rather than `len() / 4`.
-    pub fn tokenizer(self, tokenizer: Box<dyn Tokenizer>) -> ContextManagerBuilder {
-        ContextManagerBuilder {
+    pub fn tokenizer(self, tokenizer: Box<dyn Tokenizer>) -> HistoryBuilder {
+        HistoryBuilder {
             max_tokens: self.max_tokens,
             preserve_n_last: self.preserve_n_last,
             tokenizer,
@@ -349,8 +349,8 @@ impl ContextManagerBuilder {
     ///
     /// [`CompactionStrategy`]: crate::CompactionStrategy
     /// [`TruncateStrategy`]: crate::TruncateStrategy
-    pub fn strategy(self, strategy: Box<dyn CompactionStrategy>) -> ContextManagerBuilder {
-        ContextManagerBuilder {
+    pub fn strategy(self, strategy: Box<dyn CompactionStrategy>) -> HistoryBuilder {
+        HistoryBuilder {
             max_tokens: self.max_tokens,
             preserve_n_last: self.preserve_n_last,
             tokenizer: self.tokenizer,
@@ -358,10 +358,10 @@ impl ContextManagerBuilder {
         }
     }
 
-    /// Finalize the configuration and build the [`ContextManager`].
+    /// Finalize the configuration and build the [`History`].
     /// Infallible — every error case is caught by the typed setters.
-    pub fn build(self) -> ContextManager {
-        ContextManager {
+    pub fn build(self) -> History {
+        History {
             messages: Vec::new(),
             pinned: Vec::new(),
             max_tokens: self.max_tokens,
@@ -395,7 +395,7 @@ mod tests {
 
     #[tokio::test]
     async fn compact_if_needed_returns_none_when_under_budget() {
-        let mut mgr = ContextManager::builder(10_000).build();
+        let mut mgr = History::builder(10_000).build();
         mgr.add_message(Message::user("hi"));
         mgr.add_message(Message::assistant_text("hello"));
 
@@ -410,7 +410,7 @@ mod tests {
     async fn compact_if_needed_returns_report_when_over_budget() {
         // CharTokenizer fallback is len()/4. Use a tiny budget so a
         // couple of small messages already trip the limit.
-        let mut mgr = ContextManager::builder(10).preserve_n_last(2).build();
+        let mut mgr = History::builder(10).preserve_n_last(2).build();
         mgr.add_message(Message::user("first turn"));
         mgr.add_message(Message::assistant_text("first reply"));
         mgr.add_message(Message::user("second turn"));
@@ -432,7 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn pin_last_survives_compaction() {
-        let mut mgr = ContextManager::builder(10).preserve_n_last(2).build();
+        let mut mgr = History::builder(10).preserve_n_last(2).build();
         mgr.add_message(Message::user("pinned anchor"));
         mgr.pin_last();
         for i in 0..5 {
@@ -464,7 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn pin_with_tool_result_keeps_pair_intact() {
-        let mut mgr = ContextManager::builder(10).preserve_n_last(2).build();
+        let mut mgr = History::builder(10).preserve_n_last(2).build();
         mgr.add_message(Message::user("task"));
         mgr.add_message(tool_call_msg("c1"));
         mgr.add_message(tool_result_msg("c1"));
@@ -518,7 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn pin_with_tool_result_on_result_pins_the_call() {
-        let mut mgr = ContextManager::builder(10).preserve_n_last(1).build();
+        let mut mgr = History::builder(10).preserve_n_last(1).build();
         mgr.add_message(tool_call_msg("c1"));
         mgr.add_message(tool_result_msg("c1"));
         mgr.add_message(Message::user("later"));
@@ -547,7 +547,7 @@ mod tests {
         // fallback the same content (under ~50 chars total) would fit
         // comfortably under 35 — proving the budget is sourced from
         // the supplied tokenizer.
-        let mut mgr = ContextManager::builder(35)
+        let mut mgr = History::builder(35)
             .tokenizer(Box::new(PerMessageTokenizer))
             .preserve_n_last(2)
             .build();
@@ -575,7 +575,7 @@ mod tests {
             Message::user("second"),
         ];
         let pinned = vec![true, false, true];
-        let mgr = ContextManager::from_messages(ContextManager::builder(10_000), messages, pinned)
+        let mgr = History::from_messages(History::builder(10_000), messages, pinned)
             .expect("equal lengths");
         assert_eq!(mgr.messages().len(), 3);
         assert!(mgr.is_pinned(0));
@@ -585,8 +585,8 @@ mod tests {
 
     #[test]
     fn from_messages_rejects_length_mismatch() {
-        let result = ContextManager::from_messages(
-            ContextManager::builder(10_000),
+        let result = History::from_messages(
+            History::builder(10_000),
             vec![Message::user("solo")],
             vec![],
         );

@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 /// Failure surface of [`CompactionStrategy::compact`] (and therefore of
-/// [`ContextManager::compact_if_needed`]).
+/// [`History::compact_if_needed`]).
 ///
 /// The façade [`Conversation::run`](https://docs.rs/ailoop) /
 /// [`Conversation::stream`](https://docs.rs/ailoop) wraps this in
@@ -11,16 +11,16 @@ use thiserror::Error;
 /// fails mid-run.
 ///
 /// [`CompactionStrategy::compact`]: crate::CompactionStrategy::compact
-/// [`ContextManager::compact_if_needed`]: crate::ContextManager::compact_if_needed
+/// [`History::compact_if_needed`]: crate::History::compact_if_needed
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CompactionError {
     /// History has fewer messages than `preserve_n_last`, so there is
     /// nothing the strategy can drop. Indicates a configuration bug
     /// rather than a transient failure: raise the budget or lower
-    /// [`ContextManagerBuilder::preserve_n_last`].
+    /// [`HistoryBuilder::preserve_n_last`].
     ///
-    /// [`ContextManagerBuilder::preserve_n_last`]: crate::ContextManagerBuilder::preserve_n_last
+    /// [`HistoryBuilder::preserve_n_last`]: crate::HistoryBuilder::preserve_n_last
     #[error("Not enough history to compact")]
     NotEnoughHistory,
 
@@ -34,12 +34,12 @@ pub enum CompactionError {
 }
 
 /// Returned by [`ConversationSnapshot::new`] and
-/// [`ContextManager::from_messages`] when the supplied parallel
+/// [`History::from_messages`] when the supplied parallel
 /// vectors are inconsistent. Surfaces at restore time so a malformed
 /// snapshot fails loudly instead of corrupting state silently.
 ///
 /// [`ConversationSnapshot::new`]: crate::ConversationSnapshot::new
-/// [`ContextManager::from_messages`]: crate::ContextManager::from_messages
+/// [`History::from_messages`]: crate::History::from_messages
 #[derive(Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FromMessagesError {

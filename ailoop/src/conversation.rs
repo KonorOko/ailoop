@@ -1,4 +1,4 @@
-use ailoop_context::{ContextManager, ConversationSnapshot};
+use ailoop_history::{History, ConversationSnapshot};
 use ailoop_core::{
     AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, Message, RunConfig,
     RunId, StreamChunk, ToolChoice, ToolTag, Usage,
@@ -41,7 +41,7 @@ use crate::{
 /// [`EngineError`] for the failure surface.
 pub struct Conversation<M: CompletionModel> {
     model: M,
-    history: ContextManager,
+    history: History,
     tools: ToolRegistry,
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
 }
@@ -213,7 +213,7 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
     /// [`Conversation::history_messages`] only after the stream has
     /// fully drained.
     ///
-    /// If [`ContextManager::compact_if_needed`] fires before the
+    /// If [`History::compact_if_needed`] fires before the
     /// engine starts a [`StreamChunk::HistoryCompacted`] is yielded as
     /// the first chunk, carrying the same [`RunId`] every subsequent
     /// engine chunk uses.
@@ -285,7 +285,7 @@ struct ApprovalSpec {
 pub struct ConversationBuilder<M: CompletionModel> {
     model: M,
     prompt: Prompt,
-    history: ContextManager,
+    history: History,
     tools: ToolRegistry,
     tool_prompts: HashMap<String, PromptSection>,
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
@@ -301,7 +301,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// [`Conversation::builder(model)`](Conversation::builder); prefer
     /// the latter as the canonical entry point.
     pub fn new(model: M) -> Self {
-        let history = ContextManager::builder(460).build();
+        let history = History::builder(460).build();
         let tools = ToolRegistry::new();
         let tool_prompts = HashMap::new();
         let prompt = Prompt::new();
@@ -332,8 +332,8 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// so this constructor is infallible.
     pub fn from_snapshot(model: M, snapshot: ConversationSnapshot) -> Self {
         let mut builder = Self::new(model);
-        let history = ContextManager::from_messages(
-            ContextManager::builder(460),
+        let history = History::from_messages(
+            History::builder(460),
             snapshot.messages,
             snapshot.pinned,
         )
@@ -730,7 +730,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
 /// chunk to the consumer.
 pub struct RunStream<'a, M: CompletionModel> {
     inner: BoxStream<'a, Result<StreamChunk, EngineError<M::Error>>>,
-    history: &'a mut ContextManager,
+    history: &'a mut History,
 }
 
 impl<'a, M: CompletionModel> Stream for RunStream<'a, M> {

@@ -9,7 +9,7 @@
 //! [`OnlineCalibratedTokenizer`] turns those measurements into a
 //! cheap, self-tuning approximation: it tracks an exponential moving
 //! average of the *tokens-per-char* ratio and applies it whenever a
-//! caller (typically `ailoop-context::ContextManager::compact_if_needed`)
+//! caller (typically `ailoop-history::History::compact_if_needed`)
 //! asks how many tokens a piece of text or a message is worth before
 //! sending it to the API.
 //!
@@ -35,13 +35,13 @@
 //!    char count and `usage.input_tokens` (and / or `output_tokens`).
 //!
 //! The `Arc<OnlineCalibratedTokenizer>` is shared between the
-//! middleware and the [`ContextManagerBuilder::tokenizer`] passed to
+//! middleware and the [`HistoryBuilder::tokenizer`] passed to
 //! the conversation builder, so both views read and write the same
 //! EMA. See the crate-level docs for a worked example.
 //!
 //! [`Tokenizer`]: ailoop_core::Tokenizer
 //! [`CharTokenizer`]: ailoop_core::CharTokenizer
-//! [`ContextManagerBuilder::tokenizer`]: https://docs.rs/ailoop-context
+//! [`HistoryBuilder::tokenizer`]: https://docs.rs/ailoop-history
 
 use std::sync::{Arc, RwLock};
 

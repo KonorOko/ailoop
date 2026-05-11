@@ -13,7 +13,7 @@ categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 ailoop-core.workspace = true
-ailoop-context.workspace = true
+ailoop-history.workspace = true
 ailoop-tools.workspace = true
 ailoop-prompts.workspace = true
 ailoop-derive.workspace = true

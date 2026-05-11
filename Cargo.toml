@@ -1,8 +1,8 @@
 [workspace]
 members = [
     "ailoop",
-    "ailoop-context",
     "ailoop-core",
+    "ailoop-history",
     "ailoop-derive",
     "ailoop-prompts",
     "ailoop-tools",
@@ -29,7 +29,7 @@ homepage = "https://github.com/KonorOko/ailoop"
 ailoop = { path = "ailoop", version = "1.0.0-rc.2" }
 ailoop-core = { path = "ailoop-core", version = "1.0.0-rc.2" }
 ailoop-prompts = { path = "ailoop-prompts", version = "1.0.0-rc.2" }
-ailoop-context = { path = "ailoop-context", version = "1.0.0-rc.2" }
+ailoop-history = { path = "ailoop-history", version = "1.0.0-rc.2" }
 ailoop-tools = { path = "ailoop-tools", version = "1.0.0-rc.2" }
 ailoop-anthropic = { path = "adapters/anthropic", version = "1.0.0-rc.2" }
 ailoop-azure-openai = { path = "adapters/azure-openai", version = "1.0.0-rc.2" }

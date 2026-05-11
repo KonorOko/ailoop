@@ -6,9 +6,9 @@ version = 4
 name = "ailoop"
 version = "1.0.0-rc.2"
 dependencies = [
- "ailoop-context",
  "ailoop-core",
  "ailoop-derive",
+ "ailoop-history",
  "ailoop-prompts",
  "ailoop-tools",
  "async-stream",
@@ -59,21 +59,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ailoop-context"
-version = "1.0.0-rc.2"
-dependencies = [
- "ailoop-core",
- "async-trait",
- "futures",
- "indexmap",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "ailoop-core"
 version = "1.0.0-rc.2"
 dependencies = [
@@ -95,6 +80,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "ailoop-history"
+version = "1.0.0-rc.2"
+dependencies = [
+ "ailoop-core",
+ "async-trait",
+ "futures",
+ "indexmap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

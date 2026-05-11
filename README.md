@@ -29,7 +29,7 @@ decoupled from any single vendor.
 | `ailoop-core`         | Message, stream, and provider trait definitions    |
 | `ailoop-anthropic`    | Anthropic Messages API adapter                     |
 | `ailoop-azure-openai` | Azure OpenAI v1 API adapter (Chat Completions)     |
-| `ailoop-context`      | Conversation history and context management        |
+| `ailoop-history`      | Conversation history and compaction (formerly `ailoop-context`) |
 | `ailoop-mcp`          | MCP (Model Context Protocol) adapter (stdio MVP)   |
 | `ailoop-prompts`      | Composable system prompt utilities                 |
 | `ailoop-tools`        | Tool registry and tool calling primitives          |

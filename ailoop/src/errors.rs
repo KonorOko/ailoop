@@ -44,10 +44,10 @@ pub enum EngineError<E: std::error::Error> {
     /// [`CompactionStrategy`] could not satisfy the token budget — see
     /// [`CompactionError`] for the concrete cases.
     ///
-    /// [`CompactionStrategy`]: ailoop_context::CompactionStrategy
-    /// [`CompactionError`]: ailoop_context::CompactionError
+    /// [`CompactionStrategy`]: ailoop_history::CompactionStrategy
+    /// [`CompactionError`]: ailoop_history::CompactionError
     #[error("context error: {0}")]
-    Context(#[from] ailoop_context::CompactionError),
+    Context(#[from] ailoop_history::CompactionError),
 
     /// The agent loop broke out because the iteration counter reached
     /// [`RunConfig::max_iterations`]. The wrapped value is the

@@ -1,7 +1,7 @@
 //! High-level façade for building an LLM agent loop. Most application
 //! code only depends on this crate — it re-exports the vocabulary from
 //! [`ailoop_core`] (messages, stream chunks, hooks) and from the side
-//! crates (`ailoop-context`, `ailoop-tools`, `ailoop-prompts`) you need
+//! crates (`ailoop-history`, `ailoop-tools`, `ailoop-prompts`) you need
 //! to wire a [`Conversation`] together.
 //!
 //! ## Happy path
@@ -45,7 +45,7 @@
 //! - [`SubAgentTool`] — wrap a [`Conversation`] as a [`ToolDyn`] so a
 //!   parent agent can delegate to it.
 //! - [`advanced::run_chat`] — escape hatch for engine-level access
-//!   without a [`ContextManager`] in the loop.
+//!   without a [`History`] in the loop.
 
 #![deny(missing_docs)]
 
@@ -60,10 +60,10 @@ mod sub_agent;
 #[cfg(feature = "tracing")]
 mod tracing_middleware;
 
-pub use ailoop_context::{
-    CompactionError, CompactionStrategy, ContextManager, ContextManagerBuilder,
-    ConversationSnapshot, FromMessagesError, HistoryStore, InMemoryHistoryStore,
-    JsonFileHistoryStore, JsonFileHistoryStoreError, SummarizeStrategy, TruncateStrategy,
+pub use ailoop_history::{
+    CompactionError, CompactionStrategy, ConversationSnapshot, FromMessagesError, History,
+    HistoryBuilder, HistoryStore, InMemoryHistoryStore, JsonFileHistoryStore,
+    JsonFileHistoryStoreError, SummarizeStrategy, TruncateStrategy,
 };
 pub use ailoop_core::{
     AssistantBlock, CancellationToken, CharTokenizer, ChatMiddleware, ChatRequest,
@@ -90,7 +90,7 @@ pub use errors::{BuildError, EngineError};
 /// Most callers should use [`Conversation::builder`] — it wires history
 /// management, system-prompt assembly, and per-request defaults. Reach
 /// into this module only when you need to drive the engine without a
-/// [`ContextManager`] in the loop (e.g. one-shot calls with a fixed
+/// [`History`] in the loop (e.g. one-shot calls with a fixed
 /// message slice and a pre-built [`ToolRegistry`]).
 pub mod advanced {
     pub use crate::engine::run_chat;
