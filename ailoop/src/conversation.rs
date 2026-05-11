@@ -1,8 +1,8 @@
-use ailoop_history::{ConversationSnapshot, History, HistoryBuilder};
 use ailoop_core::{
     AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, Message, RunConfig,
     RunId, StreamChunk, ToolChoice, ToolTag, Usage,
 };
+use ailoop_history::{ConversationSnapshot, History, HistoryBuilder};
 use ailoop_prompts::{Prompt, PromptSection};
 use ailoop_tools::{ToolDyn, ToolRegistry};
 use futures::{Stream, StreamExt, stream::BoxStream};
@@ -751,10 +751,8 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         }
 
         let history = match self.seeded_history {
-            Some((messages, pinned)) => {
-                History::from_messages(self.history, messages, pinned)
-                    .expect("snapshot guarantees messages.len() == pinned.len()")
-            }
+            Some((messages, pinned)) => History::from_messages(self.history, messages, pinned)
+                .expect("snapshot guarantees messages.len() == pinned.len()"),
             None => self.history.build(),
         };
 

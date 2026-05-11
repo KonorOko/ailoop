@@ -50,8 +50,8 @@ pub use compaction::{
     CompactionOutput, CompactionStrategy, DEFAULT_SUMMARIZER_PROMPT, SummarizeStrategy,
     TruncateStrategy,
 };
-pub use history::{CompactionReport, History, HistoryBuilder};
 pub use errors::{CompactionError, FromMessagesError};
+pub use history::{CompactionReport, History, HistoryBuilder};
 pub use history_store::{
     HistoryStore, InMemoryHistoryStore, JsonFileHistoryStore, JsonFileHistoryStoreError,
 };

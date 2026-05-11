@@ -60,11 +60,6 @@ mod sub_agent;
 #[cfg(feature = "tracing")]
 mod tracing_middleware;
 
-pub use ailoop_history::{
-    CompactionError, CompactionStrategy, ConversationSnapshot, FromMessagesError, History,
-    HistoryBuilder, HistoryStore, InMemoryHistoryStore, JsonFileHistoryStore,
-    JsonFileHistoryStoreError, SummarizeStrategy, TruncateStrategy,
-};
 pub use ailoop_core::{
     AssistantBlock, CancellationToken, CharTokenizer, ChatMiddleware, ChatRequest,
     CompletionClient, CompletionModel, FinishReason, HookAction, Message, RetryClassification,
@@ -72,6 +67,11 @@ pub use ailoop_core::{
     ToolChoice, ToolDecision, ToolDefinition, ToolResultContent, ToolTag, Usage, UserBlock,
 };
 pub use ailoop_derive::{ToolJsonType, ailoop_tool};
+pub use ailoop_history::{
+    CompactionError, CompactionStrategy, ConversationSnapshot, FromMessagesError, History,
+    HistoryBuilder, HistoryStore, InMemoryHistoryStore, JsonFileHistoryStore,
+    JsonFileHistoryStoreError, SummarizeStrategy, TruncateStrategy,
+};
 pub use ailoop_prompts::{Prompt, PromptBuilder, PromptSection};
 // Note: `ToolJsonType` is also re-exported above from `ailoop_derive` as
 // the derive macro of the same name. The two live in different
