@@ -248,6 +248,13 @@ pub struct Usage {
     /// Cache writes with a 1-hour TTL (Anthropic explicit ttl="1h").
     /// Zero when the provider does not surface a TTL breakdown.
     pub cache_creation_1h_tokens: u32,
+    /// Subset of `output_tokens` consumed by hidden reasoning steps.
+    /// Populated by providers that itemise reasoning separately from
+    /// visible output (OpenAI o-series / gpt-5 via
+    /// `completion_tokens_details.reasoning_tokens`). Zero when the
+    /// provider folds reasoning into `output_tokens` without a
+    /// breakdown (current Anthropic behaviour for extended thinking).
+    pub reasoning_tokens: u32,
 }
 
 impl Add for Usage {
@@ -264,6 +271,7 @@ impl Add for Usage {
                 + other.cache_creation_5m_tokens,
             cache_creation_1h_tokens: self.cache_creation_1h_tokens
                 + other.cache_creation_1h_tokens,
+            reasoning_tokens: self.reasoning_tokens + other.reasoning_tokens,
         }
     }
 }
@@ -276,5 +284,6 @@ impl std::ops::AddAssign for Usage {
         self.cache_creation_input_tokens += other.cache_creation_input_tokens;
         self.cache_creation_5m_tokens += other.cache_creation_5m_tokens;
         self.cache_creation_1h_tokens += other.cache_creation_1h_tokens;
+        self.reasoning_tokens += other.reasoning_tokens;
     }
 }

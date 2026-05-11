@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use ailoop_core::{
-    AssistantBlock, CacheControl, ChatRequest, Message, Source, SystemBlock, SystemPrompt,
-    ToolChoice, ToolDefinition, ToolResultBlock, UserBlock,
+    AssistantBlock, CacheControl, ChatRequest, Message, ReasoningEffort, Source, SystemBlock,
+    SystemPrompt, ToolChoice, ToolDefinition, ToolResultBlock, UserBlock,
 };
 use serde_json::{Value, json};
 
@@ -47,6 +47,12 @@ pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
             "tool_choice".into(),
             to_anthropic_tool_choice(req.tool_choice.as_ref(), req.disable_parallel_tool_use),
         );
+    }
+
+    if let Some(effort) = req.reasoning_effort
+        && let Some(thinking) = to_anthropic_thinking(effort)
+    {
+        body.insert("thinking".into(), thinking);
     }
 
     if let Some(extra) = &req.additional_params {
@@ -319,6 +325,25 @@ fn to_anthropic_tool_choice(
         obj.insert("disable_parallel_tool_use".into(), json!(flag));
     }
     serde_json::Value::Object(obj)
+}
+
+/// Lower a [`ReasoningEffort`] into Anthropic's `thinking` object.
+/// `Minimal` emits explicit `{"type":"disabled"}` so the wire is
+/// unambiguous; the other variants map to `{"type":"enabled","budget_tokens":N}`
+/// using the budgets documented on [`ReasoningEffort`]. Returns `None`
+/// for unknown future variants so the field is dropped from the body
+/// rather than emitted as `null`.
+fn to_anthropic_thinking(effort: ReasoningEffort) -> Option<Value> {
+    match effort {
+        ReasoningEffort::Minimal => Some(json!({ "type": "disabled" })),
+        ReasoningEffort::Low => Some(json!({ "type": "enabled", "budget_tokens": 1024 })),
+        ReasoningEffort::Medium => Some(json!({ "type": "enabled", "budget_tokens": 4096 })),
+        ReasoningEffort::High => Some(json!({ "type": "enabled", "budget_tokens": 16384 })),
+        ReasoningEffort::Budget(n) => Some(json!({ "type": "enabled", "budget_tokens": n })),
+        // Future variants degrade to no `thinking` field on the wire so
+        // the request still validates instead of failing the build.
+        _ => None,
+    }
 }
 
 fn to_anthropic_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
@@ -709,6 +734,58 @@ mod tests {
         let body = build_body("claude", &req);
         let tool = &body["tools"][0];
         assert_eq!(tool["cache_control"], json!({ "type": "ephemeral" }));
+    }
+
+    /// Categorical variants map to `thinking.budget_tokens` using the
+    /// budgets documented on `ReasoningEffort`.
+    #[test]
+    fn reasoning_effort_low_medium_high_emit_documented_budgets() {
+        for (variant, expected_budget) in [
+            (ReasoningEffort::Low, 1024),
+            (ReasoningEffort::Medium, 4096),
+            (ReasoningEffort::High, 16384),
+        ] {
+            let mut req = base_req();
+            req.reasoning_effort = Some(variant);
+            let body = build_body("claude", &req);
+            assert_eq!(
+                body["thinking"],
+                json!({ "type": "enabled", "budget_tokens": expected_budget }),
+                "{variant:?} should map to budget {expected_budget}"
+            );
+        }
+    }
+
+    /// `Minimal` emits explicit `{"type":"disabled"}` so the model is
+    /// told *not* to think — distinct from `None` which omits the field.
+    #[test]
+    fn reasoning_effort_minimal_emits_disabled() {
+        let mut req = base_req();
+        req.reasoning_effort = Some(ReasoningEffort::Minimal);
+        let body = build_body("claude", &req);
+        assert_eq!(body["thinking"], json!({ "type": "disabled" }));
+    }
+
+    /// `Budget(n)` forwards the exact budget verbatim — including
+    /// out-of-spec values, so the API returns a caller-actionable error
+    /// rather than the adapter silently rounding.
+    #[test]
+    fn reasoning_effort_budget_forwards_verbatim() {
+        let mut req = base_req();
+        req.reasoning_effort = Some(ReasoningEffort::Budget(7777));
+        let body = build_body("claude", &req);
+        assert_eq!(
+            body["thinking"],
+            json!({ "type": "enabled", "budget_tokens": 7777 })
+        );
+    }
+
+    /// `None` (the default) omits the `thinking` field entirely so the
+    /// wire stays compatible with non-thinking deployments.
+    #[test]
+    fn reasoning_effort_none_omits_thinking_field() {
+        let body = build_body("claude", &base_req());
+        assert!(body.get("thinking").is_none());
     }
 
     #[test]

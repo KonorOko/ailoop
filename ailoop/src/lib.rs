@@ -37,6 +37,7 @@
 //! - [`RunOutcome`] — what [`Conversation::run`] returns. Aborts surface
 //!   here as [`FinishReason::Aborted`], not as `Err`.
 //! - Built-in middlewares: [`AntiLoop`] (loop-detection abort),
+//!   [`MaxToolCalls`] (flat cap on total tool invocations per run),
 //!   [`Sanitize`] (caller-supplied text rewrites at the model
 //!   boundary), [`ApprovalMiddleware`] (human-in-the-loop gating),
 //!   [`JsonTracer`] (NDJSON event sink). With the `tracing` feature,
@@ -54,6 +55,7 @@ mod conversation;
 mod engine;
 mod errors;
 mod json_tracer;
+mod max_tool_calls;
 mod middleware;
 mod sanitize;
 mod sub_agent;
@@ -62,9 +64,10 @@ mod tracing_middleware;
 
 pub use ailoop_core::{
     AssistantBlock, CancellationToken, CharTokenizer, ChatMiddleware, ChatRequest,
-    CompletionClient, CompletionModel, FinishReason, HookAction, Message, RetryClassification,
-    RetryConfig, Retryable, RetryingModel, RunConfig, RunId, StepId, StreamChunk, Tokenizer,
-    ToolChoice, ToolDecision, ToolDefinition, ToolResultContent, ToolTag, Usage, UserBlock,
+    CompletionClient, CompletionModel, FinishReason, HookAction, Message, ReasoningEffort,
+    RetryClassification, RetryConfig, Retryable, RetryingModel, RunConfig, RunId, StepId,
+    StreamChunk, Tokenizer, ToolChoice, ToolDecision, ToolDefinition, ToolResultContent, ToolTag,
+    Usage, UserBlock,
 };
 pub use ailoop_derive::{ToolJsonType, ailoop_tool};
 pub use ailoop_history::{
@@ -78,14 +81,16 @@ pub use ailoop_prompts::{Prompt, PromptBuilder, PromptSection};
 // namespaces (one is a trait, one is a macro), so both can be brought
 // into scope by `use ailoop::*;` without conflict.
 pub use ailoop_tools::{
-    Tool, ToolActivation, ToolActivationError, ToolContext, ToolDyn, ToolJsonType, ToolRegistry,
-    errors::ToolRegistryError,
+    TimeoutTool, Tool, ToolActivation, ToolActivationError, ToolContext, ToolDyn, ToolJsonType,
+    ToolRegistry, errors::ToolRegistryError,
 };
 pub use anti_loop::{AntiLoop, TextPredicate};
 pub use conversation::{
-    Conversation, ConversationBuilder, DEFAULT_HISTORY_MAX_TOKENS, RunOutcome, RunStream,
+    Conversation, ConversationBuilder, DEFAULT_HISTORY_MAX_TOKENS, RunOptions, RunOutcome,
+    RunStream,
 };
 pub use errors::{BuildError, EngineError};
+pub use max_tool_calls::MaxToolCalls;
 
 /// Lower-level entry points outside the [`Conversation`] happy path.
 ///

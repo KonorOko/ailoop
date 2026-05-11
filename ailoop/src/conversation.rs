@@ -1,6 +1,6 @@
 use ailoop_core::{
-    AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, Message, RunConfig,
-    RunId, StreamChunk, ToolChoice, ToolTag, Usage,
+    AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason,
+    Message, ReasoningEffort, RunConfig, RunId, StreamChunk, ToolChoice, ToolTag, Usage,
 };
 use ailoop_history::{ConversationSnapshot, History, HistoryBuilder};
 use ailoop_prompts::{Prompt, PromptSection};
@@ -12,6 +12,7 @@ use std::{
     path::Path,
     sync::Arc,
     task::Poll,
+    time::Duration,
 };
 
 use crate::{
@@ -98,6 +99,98 @@ pub struct RunOutcome {
     pub final_text: Option<String>,
 }
 
+/// Per-call overrides for a single [`Conversation::stream_with_options`]
+/// or [`Conversation::run_with_options`] invocation.
+///
+/// Every field is `Option<T>`; `None` (the default) means "fall back to
+/// the engine default for this run". `RunOptions::default()` is
+/// therefore behaviourally identical to calling [`Conversation::stream`]
+/// or [`Conversation::run`] directly.
+///
+/// `RunOptions` is deliberately narrower than [`ailoop_core::RunConfig`]:
+/// `middlewares` and `system_prompt` are not exposed because the
+/// [`Conversation`] composes them from the builder (RequestDefaults +
+/// user middlewares + SystemPromptMiddleware + ApprovalMiddleware) and
+/// allowing per-call overrides there would introduce ambiguous merge
+/// semantics. Drop down to [`crate::advanced::run_chat`] if you need
+/// engine-level control over the full [`ailoop_core::RunConfig`].
+#[derive(Default, Clone)]
+#[non_exhaustive]
+pub struct RunOptions {
+    /// Wall-clock deadline for this run. Same semantics as
+    /// [`ailoop_core::RunConfig::timeout`]: the engine checks the
+    /// deadline at every await boundary (HTTP setup, SSE chunks, tool
+    /// execution, retry backoff inside `RetryingModel`). On expiry the
+    /// run aborts with [`ailoop_core::FinishReason::Aborted`] —
+    /// **never** an `Err`.
+    pub timeout: Option<Duration>,
+    /// External cancellation handle for this run. Calling `cancel()`
+    /// from another task aborts the in-flight run at the next await
+    /// boundary with the same persistence discipline as `timeout`.
+    /// Pass `parent.child_token()` if you want to cancel one run
+    /// without affecting siblings sharing the parent.
+    pub cancellation: Option<CancellationToken>,
+    /// Maximum number of provider turns before the engine aborts with
+    /// [`EngineError::MaxIterationsExceeded`](crate::EngineError::MaxIterationsExceeded).
+    /// `None` keeps the engine default. Override per-run when a
+    /// particular agentic task is known to be longer-running than the
+    /// default would allow.
+    pub max_iterations: Option<usize>,
+    /// Per-run `max_tokens` cap layered on every `ChatRequest`. `None`
+    /// keeps the engine default (4096). Builder-level
+    /// [`ConversationBuilder::max_tokens`] still wins because it is
+    /// applied by `RequestDefaultsMiddleware`, which runs after the
+    /// internal default; this knob is the floor.
+    pub max_tokens: Option<u32>,
+    /// Caller-supplied id for the run. When `None`, the engine mints a
+    /// fresh UUID v4. Set this when an outer system needs to correlate
+    /// the run with its own trace id.
+    pub run_id: Option<RunId>,
+}
+
+impl RunOptions {
+    /// Fresh `RunOptions` with every field unset (equivalent to
+    /// [`Default::default`]).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the wall-clock deadline for this run. See
+    /// [`Self::timeout`] for semantics.
+    pub fn timeout(mut self, duration: Duration) -> Self {
+        self.timeout = Some(duration);
+        self
+    }
+
+    /// Wire an external cancellation token for this run. See
+    /// [`Self::cancellation`] for semantics.
+    pub fn cancellation(mut self, token: CancellationToken) -> Self {
+        self.cancellation = Some(token);
+        self
+    }
+
+    /// Override [`ailoop_core::RunConfig::max_iterations`] for this
+    /// run. See [`Self::max_iterations`] for semantics.
+    pub fn max_iterations(mut self, n: usize) -> Self {
+        self.max_iterations = Some(n);
+        self
+    }
+
+    /// Override [`ailoop_core::RunConfig::max_tokens`] for this run.
+    /// See [`Self::max_tokens`] for the precedence contract.
+    pub fn max_tokens(mut self, n: u32) -> Self {
+        self.max_tokens = Some(n);
+        self
+    }
+
+    /// Use `id` as the run identifier. See [`Self::run_id`] for
+    /// semantics.
+    pub fn run_id(mut self, id: RunId) -> Self {
+        self.run_id = Some(id);
+        self
+    }
+}
+
 impl<M: CompletionModel + Send + Sync> Conversation<M> {
     /// Start a [`ConversationBuilder`] for `model`. Equivalent to
     /// [`ConversationBuilder::new(model)`](ConversationBuilder::new) and
@@ -166,7 +259,22 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
         &mut self,
         user_input: impl Into<String>,
     ) -> Result<RunOutcome, EngineError<M::Error>> {
-        let mut stream = self.stream(user_input).await?;
+        self.run_with_options(user_input, RunOptions::default())
+            .await
+    }
+
+    /// Same as [`Self::run`] but parameterised by a [`RunOptions`] so
+    /// the caller can attach a per-run `timeout` / `cancellation`,
+    /// override `max_iterations` / `max_tokens`, or supply a
+    /// caller-minted [`RunId`] for cross-system correlation. The
+    /// per-call options layer on top of any builder defaults; see
+    /// [`RunOptions`] for the contract.
+    pub async fn run_with_options(
+        &mut self,
+        user_input: impl Into<String>,
+        options: RunOptions,
+    ) -> Result<RunOutcome, EngineError<M::Error>> {
+        let mut stream = self.stream_with_options(user_input, options).await?;
 
         let mut finished: Option<(RunId, FinishReason, Usage, Vec<Message>)> = None;
         while let Some(chunk) = stream.next().await {
@@ -236,15 +344,39 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
         &mut self,
         user_msg: impl Into<String>,
     ) -> Result<RunStream<'_, M>, EngineError<M::Error>> {
+        self.stream_with_options(user_msg, RunOptions::default())
+            .await
+    }
+
+    /// Same as [`Self::stream`] but parameterised by a [`RunOptions`]
+    /// so the caller can attach a per-run `timeout` / `cancellation`,
+    /// override `max_iterations` / `max_tokens`, or supply a
+    /// caller-minted [`RunId`]. The cancellation race lives inside the
+    /// engine's `select!`, so it interrupts every await — including the
+    /// backoff sleeps inside `RetryingModel`. See [`RunOptions`] for
+    /// the per-field contract.
+    pub async fn stream_with_options(
+        &mut self,
+        user_msg: impl Into<String>,
+        options: RunOptions,
+    ) -> Result<RunStream<'_, M>, EngineError<M::Error>> {
         self.history.add_message(Message::user(user_msg));
         let report = self.history.compact_if_needed().await?;
 
         let snapshot = self.history.messages().to_vec();
-        let run_id = RunId::new();
+        let run_id = options.run_id.unwrap_or_default();
 
         let mut config = RunConfig::default();
         config.middlewares = self.middlewares.clone();
         config.run_id = Some(run_id.clone());
+        config.timeout = options.timeout;
+        config.cancellation = options.cancellation;
+        if let Some(n) = options.max_iterations {
+            config.max_iterations = n;
+        }
+        if let Some(n) = options.max_tokens {
+            config.max_tokens = n;
+        }
 
         let inner = run_chat(&self.model, snapshot, &self.tools, config).await?;
 
@@ -618,6 +750,16 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// [`ChatRequest`]. See [`Self::temperature`] for precedence rules.
     pub fn disable_parallel_tool_use(mut self, v: bool) -> Self {
         self.request_defaults.disable_parallel_tool_use = Some(v);
+        self
+    }
+
+    /// Default `reasoning_effort` applied to every [`ChatRequest`]. The
+    /// adapter translates this to its native shape — `thinking` budget
+    /// on Anthropic, `reasoning_effort` string on Chat Completions; see
+    /// the variant docs on [`ReasoningEffort`] for the per-variant
+    /// mapping. See [`Self::temperature`] for precedence rules.
+    pub fn reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.request_defaults.reasoning_effort = Some(effort);
         self
     }
 
@@ -1235,6 +1377,7 @@ mod tests {
         stop_sequences: Vec<String>,
         tool_choice: Option<ToolChoice>,
         disable_parallel_tool_use: Option<bool>,
+        reasoning_effort: Option<ReasoningEffort>,
         max_tokens: u32,
         additional_params: Option<serde_json::Value>,
     }
@@ -1253,6 +1396,7 @@ mod tests {
                 stop_sequences: req.stop_sequences.clone(),
                 tool_choice: req.tool_choice.clone(),
                 disable_parallel_tool_use: req.disable_parallel_tool_use,
+                reasoning_effort: req.reasoning_effort,
                 max_tokens: req.max_tokens,
                 additional_params: req.additional_params.clone(),
             });
@@ -1278,6 +1422,7 @@ mod tests {
             .stop_sequences(["STOP", "END"])
             .tool_choice(ToolChoice::Any)
             .disable_parallel_tool_use(true)
+            .reasoning_effort(ReasoningEffort::Medium)
             .max_tokens(1234)
             .additional_params(json!({"thinking": {"type": "enabled"}}))
             .middleware(Arc::new(RecordingMiddleware {
@@ -1295,6 +1440,7 @@ mod tests {
         assert_eq!(rec.stop_sequences, vec!["STOP".to_string(), "END".into()]);
         assert_eq!(rec.tool_choice, Some(ToolChoice::Any));
         assert_eq!(rec.disable_parallel_tool_use, Some(true));
+        assert_eq!(rec.reasoning_effort, Some(ReasoningEffort::Medium));
         assert_eq!(rec.max_tokens, 1234);
         assert_eq!(
             rec.additional_params,
@@ -1325,6 +1471,7 @@ mod tests {
         assert!(rec.stop_sequences.is_empty());
         assert_eq!(rec.tool_choice, None);
         assert_eq!(rec.disable_parallel_tool_use, None);
+        assert_eq!(rec.reasoning_effort, None);
         assert_eq!(rec.max_tokens, 4096); // RunConfig::default().max_tokens
         assert_eq!(rec.additional_params, None);
     }
@@ -1482,6 +1629,109 @@ mod tests {
             },
             other => panic!("expected user message, got {other:?}"),
         }
+    }
+
+    // ---- RunOptions ----
+    //
+    // These exercise the per-call overrides exposed via
+    // `stream_with_options` / `run_with_options`: caller-supplied
+    // `RunId`, `max_iterations` reaching the engine, and an external
+    // `CancellationToken` aborting the run.
+
+    /// A caller-supplied `RunId` rides through to the outcome — useful
+    /// for correlating an ailoop run with an outer trace id.
+    #[tokio::test]
+    async fn run_options_run_id_threads_through_to_outcome() {
+        let mut chat = Conversation::builder(one_turn_model())
+            .build()
+            .expect("builder should succeed");
+        let caller_id = RunId::new();
+        let outcome = chat
+            .run_with_options("hi", RunOptions::new().run_id(caller_id.clone()))
+            .await
+            .expect("run should succeed");
+        assert_eq!(
+            outcome.run_id, caller_id,
+            "outcome must echo the caller-supplied RunId"
+        );
+    }
+
+    /// `max_iterations` set via `RunOptions` reaches the engine, where
+    /// middlewares see it through `on_run_started`'s `&RunConfig`.
+    #[tokio::test]
+    async fn run_options_max_iterations_reaches_run_config() {
+        struct ConfigSpy {
+            captured: Arc<Mutex<Option<usize>>>,
+        }
+        #[async_trait::async_trait]
+        impl ChatMiddleware for ConfigSpy {
+            async fn on_run_started(
+                &self,
+                _run_id: &RunId,
+                _messages: &[Message],
+                config: &RunConfig,
+            ) -> ailoop_core::HookAction {
+                *self.captured.lock().unwrap() = Some(config.max_iterations);
+                ailoop_core::HookAction::Continue
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(None));
+        let mut chat = Conversation::builder(one_turn_model())
+            .middleware(Arc::new(ConfigSpy {
+                captured: captured.clone(),
+            }))
+            .build()
+            .expect("builder should succeed");
+
+        chat.run_with_options("hi", RunOptions::new().max_iterations(42))
+            .await
+            .expect("run should succeed");
+
+        assert_eq!(*captured.lock().unwrap(), Some(42));
+    }
+
+    /// A token pre-cancelled before `stream_with_options` is awaited
+    /// aborts the run at the first await boundary. The outcome is
+    /// `FinishReason::Aborted("cancelled by caller")` — never `Err`.
+    #[tokio::test]
+    async fn run_options_cancellation_aborts_run() {
+        let mut chat = Conversation::builder(one_turn_model())
+            .build()
+            .expect("builder should succeed");
+
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let outcome = chat
+            .run_with_options("hi", RunOptions::new().cancellation(token))
+            .await
+            .expect("aborted runs must be Ok, never Err");
+
+        match outcome.finish_reason {
+            FinishReason::Aborted(ref reason) => {
+                assert!(
+                    reason.contains("cancelled by caller"),
+                    "unexpected abort reason: {reason}"
+                );
+            }
+            other => panic!("expected Aborted, got {other:?}"),
+        }
+    }
+
+    /// `stream()` and `stream_with_options(_, RunOptions::default())`
+    /// must produce equivalent runs — the convenience wrapper is the
+    /// no-options path.
+    #[tokio::test]
+    async fn stream_default_options_matches_bare_stream() {
+        let mut chat = Conversation::builder(one_turn_model())
+            .build()
+            .expect("builder should succeed");
+        let outcome = chat
+            .run_with_options("hi", RunOptions::default())
+            .await
+            .expect("run should succeed");
+        assert!(matches!(outcome.finish_reason, FinishReason::EndTurn));
     }
 
     /// Pin state survives the snapshot → resume round-trip.

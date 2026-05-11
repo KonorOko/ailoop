@@ -8,6 +8,55 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- `Conversation::stream_with_options` / `run_with_options` plus
+  `RunOptions` (`ailoop::RunOptions`): per-call overrides for
+  `timeout`, `cancellation`, `max_iterations`, `max_tokens`, and a
+  caller-minted `RunId`. Previously the only way to attach a timeout
+  or a `CancellationToken` to a `Conversation` run was to drop into
+  `advanced::run_chat` and bypass the façade's middleware composition
+  entirely. The new options are deliberately narrower than
+  `RunConfig`: `middlewares` and `system_prompt` are owned by the
+  builder and stay there; the escape hatch for engine-level control
+  remains `advanced::run_chat`. Cancellation interrupts every await
+  (HTTP setup, SSE chunks, tool execution, retry backoff) under the
+  engine's `select!`, so a run can be aborted mid-backoff.
+  `stream()` / `run()` keep their signatures and delegate to the new
+  methods with `RunOptions::default()` for a no-op overlay.
+- `ReasoningEffort` typed knob on `ChatRequest`, surfaced through
+  `ConversationBuilder::reasoning_effort(...)`. Variants
+  `Minimal | Low | Medium | High` map cross-provider; `Budget(u32)`
+  gives exact control over Anthropic's `thinking.budget_tokens` and
+  bucketises into the closest Chat Completions string. Mapping table
+  documented inline on the enum. Adapters that don't surface a
+  reasoning control ignore the field. `ChatRequest` is
+  `#[non_exhaustive]`, so the addition is non-breaking; the previous
+  `additional_params` escape hatch keeps working.
+- `MaxToolCalls` middleware (`ailoop::MaxToolCalls`): flat cap on the
+  *total* number of tool invocations across an entire run.
+  `RunConfig::max_iterations` only counts steps, so a turn with 30
+  parallel tool calls still burns one iteration — `MaxToolCalls`
+  closes that gap. On the (N+1)-th call the middleware returns
+  `ToolDecision::Terminate`, which the engine surfaces as
+  `FinishReason::Aborted` while preserving prior tool results.
+  Composes with `AntiLoop`.
+- `TimeoutTool<T: ToolDyn>` in `ailoop-tools` (re-exported as
+  `ailoop::TimeoutTool`): per-tool wall-clock cap that wraps any
+  `ToolDyn`. When the wrapped call exceeds its budget the wrapper
+  returns an `is_error: true` `ToolResultContent` and the engine
+  feeds the error back to the model — the run keeps going. Distinct
+  tools (e.g. `get_weather` vs `run_terraform_apply`) deserve
+  distinct caps; the run-wide `RunConfig::timeout` stays the right
+  knob for the overall run.
+- `Usage.reasoning_tokens`: subset of `output_tokens` consumed by
+  hidden reasoning steps. Populated by Azure OpenAI when the deployment
+  reports a `completion_tokens_details.reasoning_tokens` breakdown
+  (o-series, gpt-5). Anthropic folds reasoning into `output_tokens`
+  today, so the field stays at `0` there until the API surfaces a
+  separate counter. `Usage` is `#[non_exhaustive]`, so the addition is
+  non-breaking.
+
 ## [1.0.0-rc.3] — 2026-05-11
 
 ### Added

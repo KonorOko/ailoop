@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use ailoop_core::{ChatMiddleware, ChatRequest, RunId, StepId, ToolChoice, ToolDecision};
+use ailoop_core::{
+    ChatMiddleware, ChatRequest, ReasoningEffort, RunId, StepId, ToolChoice, ToolDecision,
+};
 use futures::future::BoxFuture;
 use serde_json::Value;
 
@@ -41,6 +43,7 @@ pub(crate) struct RequestDefaults {
     pub(crate) stop_sequences: Vec<String>,
     pub(crate) tool_choice: Option<ToolChoice>,
     pub(crate) disable_parallel_tool_use: Option<bool>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
     pub(crate) max_tokens: Option<u32>,
     pub(crate) additional_params: Option<Value>,
     pub(crate) overlay: Option<RequestOverlay>,
@@ -54,6 +57,7 @@ impl RequestDefaults {
             || !self.stop_sequences.is_empty()
             || self.tool_choice.is_some()
             || self.disable_parallel_tool_use.is_some()
+            || self.reasoning_effort.is_some()
             || self.max_tokens.is_some()
             || self.additional_params.is_some()
             || self.overlay.is_some()
@@ -89,6 +93,9 @@ impl ChatMiddleware for RequestDefaultsMiddleware {
         }
         if req.disable_parallel_tool_use.is_none() {
             req.disable_parallel_tool_use = self.defaults.disable_parallel_tool_use;
+        }
+        if req.reasoning_effort.is_none() {
+            req.reasoning_effort = self.defaults.reasoning_effort;
         }
         if let Some(mt) = self.defaults.max_tokens {
             req.max_tokens = mt;
