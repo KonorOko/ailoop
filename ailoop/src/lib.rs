@@ -37,6 +37,7 @@
 //! - [`RunOutcome`] — what [`Conversation::run`] returns. Aborts surface
 //!   here as [`FinishReason::Aborted`], not as `Err`.
 //! - Built-in middlewares: [`AntiLoop`] (loop-detection abort),
+//!   [`MaxToolCalls`] (flat cap on total tool invocations per run),
 //!   [`Sanitize`] (caller-supplied text rewrites at the model
 //!   boundary), [`ApprovalMiddleware`] (human-in-the-loop gating),
 //!   [`JsonTracer`] (NDJSON event sink). With the `tracing` feature,
@@ -54,6 +55,7 @@ mod conversation;
 mod engine;
 mod errors;
 mod json_tracer;
+mod max_tool_calls;
 mod middleware;
 mod sanitize;
 mod sub_agent;
@@ -86,6 +88,7 @@ pub use conversation::{
     Conversation, ConversationBuilder, DEFAULT_HISTORY_MAX_TOKENS, RunOutcome, RunStream,
 };
 pub use errors::{BuildError, EngineError};
+pub use max_tool_calls::MaxToolCalls;
 
 /// Lower-level entry points outside the [`Conversation`] happy path.
 ///

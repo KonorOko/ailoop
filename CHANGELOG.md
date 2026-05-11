@@ -10,6 +10,14 @@ and this project adheres to
 
 ### Added
 
+- `MaxToolCalls` middleware (`ailoop::MaxToolCalls`): flat cap on the
+  *total* number of tool invocations across an entire run.
+  `RunConfig::max_iterations` only counts steps, so a turn with 30
+  parallel tool calls still burns one iteration — `MaxToolCalls`
+  closes that gap. On the (N+1)-th call the middleware returns
+  `ToolDecision::Terminate`, which the engine surfaces as
+  `FinishReason::Aborted` while preserving prior tool results.
+  Composes with `AntiLoop`.
 - `TimeoutTool<T: ToolDyn>` in `ailoop-tools` (re-exported as
   `ailoop::TimeoutTool`): per-tool wall-clock cap that wraps any
   `ToolDyn`. When the wrapped call exceeds its budget the wrapper
