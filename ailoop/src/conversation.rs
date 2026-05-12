@@ -7,20 +7,14 @@ use ailoop_prompts::{Prompt, PromptSection};
 use ailoop_tools::{ToolDyn, ToolRegistry};
 use futures::{Stream, StreamExt, stream::BoxStream};
 use serde_json::Value;
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-    sync::Arc,
-    task::Poll,
-    time::Duration,
-};
+use std::{collections::HashSet, path::Path, sync::Arc, task::Poll, time::Duration};
 
 use crate::{
     engine::run_chat,
     errors::{BuildError, EngineError},
     middleware::{
         ApprovalCallback, ApprovalMiddleware, RequestDefaults, RequestDefaultsMiddleware,
-        SystemPromptMiddleware, wrap_callback,
+        SystemPromptMiddleware, ToolPromptGroup, wrap_callback,
     },
 };
 
@@ -435,7 +429,7 @@ pub struct ConversationBuilder<M: CompletionModel> {
     history: HistoryBuilder,
     seeded_history: Option<(Vec<Message>, Vec<bool>)>,
     tools: ToolRegistry,
-    tool_prompts: HashMap<String, PromptSection>,
+    tool_prompts: Vec<ToolPromptGroup>,
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
     capabilities: Option<Vec<ToolTag>>,
     initial_active: Option<Vec<String>>,
@@ -451,7 +445,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     pub fn new(model: M) -> Self {
         let history = History::builder(DEFAULT_HISTORY_MAX_TOKENS);
         let tools = ToolRegistry::new();
-        let tool_prompts = HashMap::new();
+        let tool_prompts: Vec<ToolPromptGroup> = Vec::new();
         let prompt = Prompt::new();
 
         Self {
@@ -533,6 +527,16 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// [`build`](Self::build). Run the builder off the async runtime
     /// (e.g. inside `tokio::task::spawn_blocking`) if your prompt
     /// files are large or live on a slow filesystem.
+    ///
+    /// **Sharing a guide across tools.** This method is the 1:1
+    /// sugar — one tool, one file. When several tools share the same
+    /// guide (e.g. an `excel_*` family pointing at one Excel cheat
+    /// sheet), use
+    /// [`tools_with_prompt_file`](Self::tools_with_prompt_file)
+    /// instead: it reads the file once and emits the section a single
+    /// time per turn no matter how many of the grouped tools are
+    /// active, whereas calling `tool_with_prompt_file` once per tool
+    /// duplicates the section in the system prompt.
     pub fn tool_with_prompt_file<T>(mut self, tool: T, prompt_path: impl AsRef<Path>) -> Self
     where
         T: ToolDyn + 'static,
@@ -542,7 +546,9 @@ impl<M: CompletionModel> ConversationBuilder<M> {
 
         match PromptSection::from_file(prompt_path) {
             Ok(section) => {
-                self.tool_prompts.insert(name, section);
+                let mut tools = HashSet::new();
+                tools.insert(name);
+                self.tool_prompts.push(ToolPromptGroup { tools, section });
             }
 
             Err(e) => self.errors.push(e.into()),
@@ -550,6 +556,57 @@ impl<M: CompletionModel> ConversationBuilder<M> {
 
         if let Err(e) = self.tools.register(arc_tool) {
             self.errors.push(e.into());
+        }
+
+        self
+    }
+
+    /// Associate a single [`PromptSection`] read from disk with a
+    /// *group* of tool names. The section is appended to the system
+    /// prompt at most once per turn when at least one tool in the
+    /// group is active in the request — solving the duplication that
+    /// arises if you call [`tool_with_prompt_file`](Self::tool_with_prompt_file)
+    /// once per tool with the same path.
+    ///
+    /// **Registration is separate.** Unlike `tool_with_prompt_file`,
+    /// this method does *not* register the tools — pair it with the
+    /// usual [`tool`](Self::tool) / [`tool_dyn`](Self::tool_dyn) calls.
+    /// The contract is "associate a guide with a group of tools you
+    /// are also registering", not "register them".
+    ///
+    /// **Render order** follows the order in which groups are added to
+    /// the builder, not the order of tools in the request. If you
+    /// register group `G1` before group `G2`, `G1`'s section appears
+    /// first in the rendered system prompt.
+    ///
+    /// **Sync I/O at builder time.** Same caveats as
+    /// [`tool_with_prompt_file`](Self::tool_with_prompt_file): the
+    /// file is read once with [`std::fs::read_to_string`] when this
+    /// method is called and any error is queued for
+    /// [`build`](Self::build).
+    ///
+    /// Passing an empty `names` iterator queues a
+    /// [`BuildError::EmptyToolGroup`](crate::BuildError::EmptyToolGroup)
+    /// — a group with no tools could never fire, so the builder
+    /// refuses it rather than silently dropping the section.
+    pub fn tools_with_prompt_file<I, S, P>(mut self, names: I, prompt_path: P) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+        P: AsRef<Path>,
+    {
+        let tools: HashSet<String> = names.into_iter().map(Into::into).collect();
+
+        if tools.is_empty() {
+            self.errors.push(BuildError::EmptyToolGroup);
+            return self;
+        }
+
+        match PromptSection::from_file(prompt_path) {
+            Ok(section) => {
+                self.tool_prompts.push(ToolPromptGroup { tools, section });
+            }
+            Err(e) => self.errors.push(e.into()),
         }
 
         self

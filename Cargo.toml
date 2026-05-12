@@ -13,6 +13,7 @@ members = [
     "examples/deferred-tools",
     "examples/mcp-time",
     "examples/persistent-chat",
+    "examples/tool-prompts",
     "examples/tool-use",
 ]
 resolver = "3"

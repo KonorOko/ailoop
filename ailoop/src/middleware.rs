@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use ailoop_core::{
@@ -9,9 +9,18 @@ use serde_json::Value;
 
 use crate::{Prompt, PromptSection};
 
+/// A `PromptSection` shared by a named set of tools. The section is
+/// appended to the system prompt at most once per turn when at least
+/// one of `tools` is active in the request — see
+/// [`SystemPromptMiddleware::on_chat_request`].
+pub(crate) struct ToolPromptGroup {
+    pub(crate) tools: HashSet<String>,
+    pub(crate) section: PromptSection,
+}
+
 pub(crate) struct SystemPromptMiddleware {
     pub(crate) base: Prompt,
-    pub(crate) tools_sections: HashMap<String, PromptSection>,
+    pub(crate) tools_sections: Vec<ToolPromptGroup>,
 }
 
 #[async_trait::async_trait]
@@ -20,9 +29,15 @@ impl ChatMiddleware for SystemPromptMiddleware {
         let mut prompt = self.base.clone();
 
         if let Some(tools) = &req.tools {
-            for tool in tools {
-                if let Some(tool_prompt) = self.tools_sections.get(&tool.name) {
-                    prompt.add_section(tool_prompt.clone());
+            // Walk groups in registration order. Each group whose tool
+            // set intersects the request's active tools contributes its
+            // section exactly once, regardless of how many of the
+            // group's tools are active — that's the whole point of the
+            // grouping API (no per-tool duplication of a shared guide).
+            for group in &self.tools_sections {
+                let active = tools.iter().any(|tool| group.tools.contains(&tool.name));
+                if active {
+                    prompt.add_section(group.section.clone());
                 }
             }
         }

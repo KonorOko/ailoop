@@ -78,4 +78,11 @@ pub enum BuildError {
     /// could not be read or parsed at builder time.
     #[error("prompt error: {0}")]
     Prompt(#[from] PromptError),
+
+    /// [`tools_with_prompt_file`](crate::ConversationBuilder::tools_with_prompt_file)
+    /// was called with an empty tool-name iterator — a group with no
+    /// tools could never fire, so the builder refuses it rather than
+    /// silently dropping the prompt section.
+    #[error("tools_with_prompt_file called with an empty tool-name list")]
+    EmptyToolGroup,
 }
