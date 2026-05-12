@@ -14,9 +14,26 @@ use tokio::sync::Mutex;
 /// some providers emit at the end of a turn.
 pub type TextPredicate = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
+/// Computes the equivalence key for a tool call. Receives the tool
+/// name and its arguments; the returned string is what the loop
+/// detector compares across consecutive invocations — two calls count
+/// as "the same call" iff their identity strings are byte-equal.
+///
+/// Plug a custom identity via [`AntiLoop::with_tool_call_identity`] to
+/// absorb cosmetic argument variation that the default structural
+/// `serde_json::Value` comparison treats as distinct (whitespace
+/// tweaks inside string fields, ignored auxiliary fields, etc.).
+pub type ToolCallIdentity = Arc<dyn Fn(&str, &Value) -> String + Send + Sync>;
+
 #[derive(Default)]
 struct RunState {
+    /// Tracks the previous call when no custom identity is configured.
     last_tool_call: Option<(String, Value)>,
+    /// Tracks the previous call's identity string when a custom
+    /// identity callback is configured. Only one of `last_tool_call`
+    /// and `last_tool_call_id` is ever populated per run, depending on
+    /// whether `AntiLoop::tool_call_identity` is set.
+    last_tool_call_id: Option<String>,
     tool_call_streak: usize,
     last_text: Option<String>,
     text_streak: usize,
@@ -39,7 +56,10 @@ struct Inner {
 /// - **Tool-call loop**: trips when the same tool is invoked
 ///   `max_repeated_tool_calls` times in a row with structurally equal
 ///   arguments (`serde_json::Value` `PartialEq`, so key ordering does
-///   not matter).
+///   not matter). Plug a custom equivalence with
+///   [`Self::with_tool_call_identity`] when callers re-issue calls
+///   with cosmetic argument variation that should still count as
+///   repeats.
 /// - **Looped text**: trips when the assistant's `Text` block is
 ///   considered identical (per the configured [`TextPredicate`]) across
 ///   `max_repeated_texts` consecutive turns.
@@ -64,17 +84,20 @@ pub struct AntiLoop {
     max_repeated_tool_calls: usize,
     max_repeated_texts: usize,
     text_predicate: TextPredicate,
+    tool_call_identity: Option<ToolCallIdentity>,
     inner: Mutex<Inner>,
 }
 
 impl AntiLoop {
-    /// Build with the default thresholds (`3` for both detectors) and
-    /// the default text predicate (trim + equality).
+    /// Build with the default thresholds (`3` for both detectors), the
+    /// default text predicate (trim + equality), and structural
+    /// `serde_json::Value` `PartialEq` for tool-call equivalence.
     pub fn new() -> Self {
         Self {
             max_repeated_tool_calls: 3,
             max_repeated_texts: 3,
             text_predicate: Arc::new(|a, b| a.trim() == b.trim()),
+            tool_call_identity: None,
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -103,6 +126,34 @@ impl AntiLoop {
         F: Fn(&str, &str) -> bool + Send + Sync + 'static,
     {
         self.text_predicate = Arc::new(predicate);
+        self
+    }
+
+    /// Replace the default tool-call equivalence with a custom
+    /// identity function. The callback maps `(name, args)` to a
+    /// string; the loop detector counts consecutive calls whose
+    /// identities are byte-equal.
+    ///
+    /// Use this to catch calls that the model is repeating with
+    /// cosmetic argument variation (string whitespace, ignored
+    /// auxiliary fields, key reordering inside an embedded JSON
+    /// string) which the default `serde_json::Value` `PartialEq` would
+    /// treat as distinct and thus reset the streak. When the detector
+    /// fires under a custom identity, the terminate reason includes
+    /// the identity string for diagnostics.
+    ///
+    /// Mirrors [`Self::with_text_predicate`] for the text detector,
+    /// with one intentional asymmetry: text takes a predicate,
+    /// tool-call takes an identity. Identity strictly subsumes
+    /// predicate (the predicate `id(a) == id(b)` is recoverable from
+    /// any identity), allows lighter per-run state (an
+    /// `Option<String>` instead of `Option<(String, Value)>`), and
+    /// gives a useful key in the terminate reason for free.
+    pub fn with_tool_call_identity<F>(mut self, identity: F) -> Self
+    where
+        F: Fn(&str, &Value) -> String + Send + Sync + 'static,
+    {
+        self.tool_call_identity = Some(Arc::new(identity));
         self
     }
 }
@@ -196,23 +247,45 @@ impl ChatMiddleware for AntiLoop {
         }
 
         if self.max_repeated_tool_calls > 0 {
-            let same = matches!(
-                &state.last_tool_call,
-                Some((prev_name, prev_args)) if prev_name == name && prev_args == args
-            );
-            if same {
-                state.tool_call_streak += 1;
-            } else {
-                state.last_tool_call = Some((name.to_string(), args.clone()));
-                state.tool_call_streak = 1;
-            }
-            if state.tool_call_streak >= self.max_repeated_tool_calls {
-                let n = state.tool_call_streak;
-                return ToolDecision::Terminate {
-                    reason: format!(
-                        "anti-loop: tool '{name}' called {n} times in a row with identical args"
-                    ),
-                };
+            match &self.tool_call_identity {
+                None => {
+                    let same = matches!(
+                        &state.last_tool_call,
+                        Some((prev_name, prev_args)) if prev_name == name && prev_args == args
+                    );
+                    if same {
+                        state.tool_call_streak += 1;
+                    } else {
+                        state.last_tool_call = Some((name.to_string(), args.clone()));
+                        state.tool_call_streak = 1;
+                    }
+                    if state.tool_call_streak >= self.max_repeated_tool_calls {
+                        let n = state.tool_call_streak;
+                        return ToolDecision::Terminate {
+                            reason: format!(
+                                "anti-loop: tool '{name}' called {n} times in a row with identical args"
+                            ),
+                        };
+                    }
+                }
+                Some(identity) => {
+                    let id = identity(name, args);
+                    let same = matches!(&state.last_tool_call_id, Some(prev) if prev == &id);
+                    if same {
+                        state.tool_call_streak += 1;
+                    } else {
+                        state.last_tool_call_id = Some(id.clone());
+                        state.tool_call_streak = 1;
+                    }
+                    if state.tool_call_streak >= self.max_repeated_tool_calls {
+                        let n = state.tool_call_streak;
+                        return ToolDecision::Terminate {
+                            reason: format!(
+                                "anti-loop: tool '{name}' with identity '{id}' called {n} times in a row"
+                            ),
+                        };
+                    }
+                }
             }
         }
 
