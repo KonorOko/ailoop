@@ -60,12 +60,63 @@ impl Message {
         }
     }
 
+    /// Shorthand for a user turn containing the given blocks in order.
+    /// Use [`Message::user`] when the turn is plain text.
+    ///
+    /// This is the idiomatic way to build a multimodal kickoff for the
+    /// `Conversation` `run` / `stream` entry points in the `ailoop`
+    /// crate, which accept anything that converts into a [`Message`].
+    pub fn user_with_blocks(blocks: impl Into<Vec<UserBlock>>) -> Message {
+        Message::User {
+            blocks: blocks.into(),
+        }
+    }
+
     /// Shorthand for an assistant turn containing a single text block.
     /// Use the [`Message::Assistant`] variant directly when seeding
     /// history with tool calls or reasoning.
     pub fn assistant_text(text: impl Into<String>) -> Message {
         Message::Assistant {
             blocks: vec![AssistantBlock::text(text)],
+        }
+    }
+}
+
+/// Plain text becomes a single-text-block user turn — the same shape
+/// [`Message::user`] builds. Lets `&str` literals flow through APIs
+/// typed as `impl Into<Message>`.
+impl From<&str> for Message {
+    fn from(s: &str) -> Self {
+        Self::user(s)
+    }
+}
+
+/// Owned text becomes a single-text-block user turn — the same shape
+/// [`Message::user`] builds. Lets `String` flow through APIs typed as
+/// `impl Into<Message>`.
+impl From<String> for Message {
+    fn from(s: String) -> Self {
+        Self::user(s)
+    }
+}
+
+/// A pre-built block list becomes the body of a user turn. Equivalent
+/// to [`Message::user_with_blocks`]; the conversion exists so callers
+/// can pass `vec![UserBlock::text(...), UserBlock::image(...)]` directly
+/// into `impl Into<Message>` parameters.
+impl From<Vec<UserBlock>> for Message {
+    fn from(blocks: Vec<UserBlock>) -> Self {
+        Self::User { blocks }
+    }
+}
+
+/// A single block becomes a single-block user turn. Convenient for the
+/// image-only or document-only kickoff where the prompt is implicit
+/// (e.g. `chat.stream(UserBlock::image(source))`).
+impl From<UserBlock> for Message {
+    fn from(block: UserBlock) -> Self {
+        Self::User {
+            blocks: vec![block],
         }
     }
 }
@@ -721,6 +772,82 @@ mod tests {
         let back: ToolResultContent = serde_json::from_str(&json).unwrap();
         assert_eq!(back.blocks.len(), 2);
         assert!(!back.is_error);
+    }
+
+    #[test]
+    fn round_trip_user_with_blocks_preserves_order() {
+        let msg = Message::user_with_blocks([
+            UserBlock::image(Source::Base64 {
+                media_type: "image/png".into(),
+                data: "AAAA".into(),
+            }),
+            UserBlock::text("describe this"),
+        ]);
+        let restored = round_trip(&msg);
+        match &restored {
+            Message::User { blocks } => {
+                assert_eq!(blocks.len(), 2);
+                match &blocks[0] {
+                    UserBlock::Image { source, .. } => assert!(matches!(
+                        source,
+                        Source::Base64 { media_type, data }
+                            if media_type == "image/png" && data == "AAAA"
+                    )),
+                    other => panic!("expected Image first, got {other:?}"),
+                }
+                match &blocks[1] {
+                    UserBlock::Text { text, .. } => assert_eq!(text, "describe this"),
+                    other => panic!("expected Text second, got {other:?}"),
+                }
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_from_str_is_single_text_block_user() {
+        let msg: Message = "hi".into();
+        assert_user_text_eq(&msg, "hi");
+    }
+
+    #[test]
+    fn message_from_string_is_single_text_block_user() {
+        let msg: Message = String::from("hi").into();
+        assert_user_text_eq(&msg, "hi");
+    }
+
+    #[test]
+    fn message_from_user_block_wraps_single_block() {
+        let block = UserBlock::image(Source::Url {
+            url: "https://example.com/x.png".into(),
+        });
+        let msg: Message = block.into();
+        match msg {
+            Message::User { blocks } => {
+                assert_eq!(blocks.len(), 1);
+                assert!(matches!(blocks[0], UserBlock::Image { .. }));
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_from_vec_user_block_uses_given_order() {
+        let blocks = vec![
+            UserBlock::text("caption"),
+            UserBlock::image(Source::Url {
+                url: "https://example.com/x.png".into(),
+            }),
+        ];
+        let msg: Message = blocks.into();
+        match msg {
+            Message::User { blocks } => {
+                assert_eq!(blocks.len(), 2);
+                assert!(matches!(blocks[0], UserBlock::Text { .. }));
+                assert!(matches!(blocks[1], UserBlock::Image { .. }));
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
     }
 
     #[test]
