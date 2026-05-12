@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ailoop::{Message, ToolDefinition, ToolResultContent, advanced::run_chat};
@@ -426,6 +426,94 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
         },
         other => panic!("expected RunFinished, got {other:?}"),
     }
+}
+
+/// Wire-up test for `ToolContext::cancellation()`: a tool that clones
+/// the token into a side task must see the same cancellation event
+/// the caller triggers via `RunConfig.cancellation`. The engine's
+/// `race_abort` drops the tool's own future when the token fires, but
+/// the spawned watcher lives independently and survives long enough
+/// to flip the observed flag.
+#[tokio::test]
+async fn tool_context_cancellation_mirrors_run_config() {
+    struct ObserverTool {
+        observed: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl ToolDyn for ObserverTool {
+        fn name(&self) -> String {
+            "observer".into()
+        }
+        fn tool_definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "observer",
+                "test tool",
+                json!({"type":"object","properties":{},"required":[]}),
+                vec![],
+            )
+        }
+        async fn call(&self, _: Value, ctx: &ToolContext) -> ToolResultContent {
+            let token = ctx.cancellation().clone();
+            let flag = self.observed.clone();
+            tokio::spawn(async move {
+                token.cancelled().await;
+                flag.store(true, Ordering::SeqCst);
+            });
+            std::future::pending::<()>().await;
+            unreachable!("cancellation should drop this future before it returns")
+        }
+    }
+
+    let turn = vec![
+        StreamChunk::ToolCallStarted {
+            id: "toolu_obs".into(),
+            name: "observer".into(),
+        },
+        StreamChunk::ToolCallFinished {
+            id: "toolu_obs".into(),
+            name: "observer".into(),
+            args: json!({}),
+        },
+        StreamChunk::TurnFinished {
+            reason: FinishReason::ToolUse,
+            usage: Usage::default(),
+            service_tier: None,
+        },
+    ];
+    let model = ScriptedModel::new([turn]);
+
+    let observed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(ObserverTool {
+            observed: observed.clone(),
+        }))
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let token_for_task = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        token_for_task.cancel();
+    });
+
+    let mut config = RunConfig::default();
+    config.cancellation = Some(token);
+
+    let stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
+        .await
+        .expect("run_chat should start");
+    let _: Vec<_> = stream.collect().await;
+
+    // The tool future is dropped by `race_abort` the moment the token
+    // fires; the spawned watcher lives in the runtime independently
+    // and needs a moment to set the flag.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "tool's side task must observe cancellation through ctx.cancellation()"
+    );
 }
 
 /// Pre-existing `HookAction::Terminate` path was already covered by the
