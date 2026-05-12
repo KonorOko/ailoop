@@ -139,6 +139,13 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
     // touching the underlying `ToolRegistry`.
     let catalog = tools.catalog_arc();
     let active_snapshot = tools.snapshot_active();
+    // Mirror `RunConfig.cancellation` into a token we hand to every
+    // per-dispatch `ToolContext`. When the caller did not supply one,
+    // a fresh never-cancelled token is the right neutral value — tools
+    // that `select!` on `ctx.cancellation().cancelled()` simply pend
+    // forever. Built once outside the loop and cloned per dispatch so
+    // every tool sees the same handle.
+    let tool_cancellation = config.cancellation.clone().unwrap_or_default();
     let stream = try_stream! {
         // The abort future resolves with a textual reason when either
         // the timeout elapses or the cancellation token fires; until
@@ -398,6 +405,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                             run_id.clone(),
                             step_id.clone(),
                             ToolActivation::new(catalog.clone(), active_snapshot.clone()),
+                            tool_cancellation.clone(),
                         );
                         let call_result = race_abort(
                             tools.tool_call_with_ctx(&name, args.clone(), &ctx),
