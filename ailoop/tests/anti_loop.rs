@@ -244,6 +244,124 @@ async fn custom_text_predicate_starts_with_fires() {
     }
 }
 
+/// Custom identity callback that collapses cosmetic variation
+/// (whitespace field changes) between otherwise-equal tool calls. The
+/// default detector would see three distinct `args` and never trip; the
+/// identity callback keys equivalence on `path` alone so the streak
+/// builds and the run aborts at the third call.
+#[tokio::test]
+async fn custom_tool_call_identity_collapses_cosmetic_variation() {
+    let turns = vec![
+        tool_turn(
+            "toolu_a",
+            json!({"path": "/etc/hosts", "whitespace": " "}),
+            None,
+        ),
+        tool_turn(
+            "toolu_b",
+            json!({"path": "/etc/hosts", "whitespace": "  "}),
+            None,
+        ),
+        tool_turn(
+            "toolu_c",
+            json!({"path": "/etc/hosts", "whitespace": "   "}),
+            None,
+        ),
+    ];
+    let model = ScriptedModel::new(turns);
+    let mw = Arc::new(AntiLoop::new().with_tool_call_identity(|name, args| {
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        format!("{name}|{path}")
+    }));
+
+    let reason = collect_finish_reason(model, mw).await;
+    match reason {
+        FinishReason::Aborted(r) => {
+            assert!(
+                r.starts_with("anti-loop: tool 'get_weather' with identity '"),
+                "reason should surface the identity prefix, got: {r}"
+            );
+            assert!(
+                r.contains("get_weather|/etc/hosts"),
+                "reason should embed the computed identity string, got: {r}"
+            );
+            assert!(r.contains("3 times"), "got: {r}");
+        }
+        other => panic!("expected Aborted from custom identity, got {other:?}"),
+    }
+}
+
+/// Sanity check that the default path is unchanged when no identity
+/// callback is configured: structurally equal args fire at the threshold
+/// with the legacy "identical args" reason. Complements the existing
+/// `tool_call_loop_aborts_on_third_identical_call`, which uses `json!({})`,
+/// by using a non-trivial args payload assembled from differently ordered
+/// keys (relying on `serde_json::Value` `PartialEq` ignoring key order).
+#[tokio::test]
+async fn default_tool_call_identity_preserves_legacy_reason() {
+    let turns = vec![
+        tool_turn("toolu_a", json!({"path": "/tmp", "mode": "r"}), None),
+        tool_turn("toolu_b", json!({"mode": "r", "path": "/tmp"}), None),
+        tool_turn("toolu_c", json!({"path": "/tmp", "mode": "r"}), None),
+    ];
+    let model = ScriptedModel::new(turns);
+    let mw = Arc::new(AntiLoop::new());
+
+    let reason = collect_finish_reason(model, mw).await;
+    match reason {
+        FinishReason::Aborted(r) => {
+            assert!(
+                r.starts_with("anti-loop: tool 'get_weather' called"),
+                "default path must keep its reason wording, got: {r}"
+            );
+            assert!(r.contains("identical args"), "got: {r}");
+            assert!(
+                !r.contains("identity"),
+                "default path must not mention identity, got: {r}"
+            );
+        }
+        other => panic!("expected Aborted, got {other:?}"),
+    }
+}
+
+/// A change in computed identity must reset the streak. Fires three
+/// distinct identities, then three identical ones — the run must reach
+/// the second batch (no premature abort) and only abort once the same
+/// identity has repeated up to the threshold.
+#[tokio::test]
+async fn custom_tool_call_identity_change_resets_streak() {
+    let turns = vec![
+        tool_turn("toolu_a", json!({"path": "/a"}), None),
+        tool_turn("toolu_b", json!({"path": "/b"}), None),
+        tool_turn("toolu_c", json!({"path": "/c"}), None),
+        tool_turn("toolu_d", json!({"path": "/c"}), None),
+        tool_turn("toolu_e", json!({"path": "/c"}), None),
+    ];
+    let model = ScriptedModel::new(turns);
+    let mw = Arc::new(AntiLoop::new().with_tool_call_identity(|name, args| {
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        format!("{name}|{path}")
+    }));
+
+    let reason = collect_finish_reason(model, mw).await;
+    match reason {
+        FinishReason::Aborted(r) => {
+            assert!(
+                r.contains("get_weather|/c"),
+                "the firing identity should be the repeated one, got: {r}"
+            );
+            assert!(r.contains("3 times"), "got: {r}");
+        }
+        other => panic!("expected Aborted on streak rebuild, got {other:?}"),
+    }
+}
+
 /// Exercises the public surface end-to-end: register `AntiLoop` via the
 /// `ConversationBuilder` middleware entry point and ensure the wiring
 /// keeps `ToolDecision::Continue` as the default for non-looping calls.

@@ -10,6 +10,23 @@ and this project adheres to
 
 ### Added
 
+- `AntiLoop::with_tool_call_identity(|name, args| -> String)`: pluggable
+  equivalence key for the tool-call loop detector. The callback maps
+  `(name, args)` to a string and the streak counter compares those
+  strings instead of the default structural `serde_json::Value`
+  `PartialEq`. Closes a real failure mode against coding agents that
+  re-issue destructive calls with cosmetic argument variation
+  (whitespace inside string fields, reordered keys inside an embedded
+  JSON payload, ignored auxiliary fields): the default detector saw
+  those as distinct and reset the streak, so the loop slipped through.
+  The terminate reason includes the computed identity string for
+  diagnostics. Mirrors the existing `with_text_predicate` for the text
+  detector, with one intentional asymmetry — text takes a predicate,
+  tool-call takes an identity (strictly more expressive, lighter
+  per-run state, useful diagnostic key for free). Default behaviour is
+  unchanged: when no identity is configured, the path stays on
+  `Value::PartialEq` and the legacy reason wording
+  ("...called N times in a row with identical args") is preserved.
 - Multimodal kickoff for `Conversation`: `run`, `run_with_options`,
   `stream`, and `stream_with_options` now take `impl Into<Message>`
   instead of `impl Into<String>`. Four new `From` impls on
