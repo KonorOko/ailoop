@@ -10,6 +10,13 @@ and this project adheres to
 
 ### Added
 
+- Re-export `CacheControl`, `SystemBlock`, `SystemPrompt`, and
+  `ToolResultBlock` from the `ailoop` façade. Downstream crates that
+  write custom `ChatMiddleware`s (setting `SystemPrompt::Blocks` with
+  per-block cache breakpoints, building multi-block tool replies via
+  `ToolResultContent::from_blocks`, or threading `CacheControl::Ephemeral`
+  through the `with_cache_control` builders) no longer need a direct
+  dependency on `ailoop-core`.
 - `AntiLoop::with_tool_call_identity(|name, args| -> String)`: pluggable
   equivalence key for the tool-call loop detector. The callback maps
   `(name, args)` to a string and the streak counter compares those
