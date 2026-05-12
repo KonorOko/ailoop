@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use ailoop_core::{RunId, StepId, ToolDefinition};
 use indexmap::{IndexMap, IndexSet};
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 use crate::registry::ToolDyn;
 
@@ -45,22 +46,30 @@ pub struct ToolContext {
     run_id: RunId,
     step_id: StepId,
     activation: ToolActivation,
+    cancellation: CancellationToken,
 }
 
 impl ToolContext {
     /// Construct a context bound to a real run. Used by the engine on
     /// each tool dispatch — tests and standalone callers want
     /// [`Self::detached`] instead.
-    pub fn new(run_id: RunId, step_id: StepId, activation: ToolActivation) -> Self {
+    pub fn new(
+        run_id: RunId,
+        step_id: StepId,
+        activation: ToolActivation,
+        cancellation: CancellationToken,
+    ) -> Self {
         Self {
             run_id,
             step_id,
             activation,
+            cancellation,
         }
     }
 
-    /// Build a detached context with synthetic identifiers and a
-    /// no-op activation handle. Use for standalone
+    /// Build a detached context with synthetic identifiers, a no-op
+    /// activation handle, and a fresh never-cancelled token. Use for
+    /// standalone
     /// [`ToolRegistry::tool_call`](crate::ToolRegistry::tool_call)
     /// invocations and unit tests where no engine is in the loop.
     pub fn detached() -> Self {
@@ -68,6 +77,7 @@ impl ToolContext {
             run_id: RunId::new(),
             step_id: StepId::new(),
             activation: ToolActivation::detached(),
+            cancellation: CancellationToken::new(),
         }
     }
 
@@ -84,6 +94,48 @@ impl ToolContext {
     /// Handle into the per-run active tool set.
     pub fn tools(&self) -> &ToolActivation {
         &self.activation
+    }
+
+    /// Cancellation token tied to the enclosing run.
+    ///
+    /// Mirrors [`RunConfig::cancellation`][rc]: firing the token the
+    /// caller supplied to the engine triggers `cancelled()` here.
+    /// When the run was started without a token, the engine hands the
+    /// tool a fresh never-cancelled handle so the getter never returns
+    /// `None` — `await`ing `cancelled()` simply pends forever.
+    ///
+    /// The engine already wraps each tool call in a `select!` against
+    /// the run-wide abort signal, so on cancellation the tool future
+    /// is dropped — that already cancels any in-flight async I/O
+    /// (reqwest, async DB drivers, etc.). Reach for this token only
+    /// when drop-cancellation isn't enough:
+    ///
+    /// - [`tokio::task::spawn_blocking`] — the blocking task survives
+    ///   its parent future. Check `token.is_cancelled()` between
+    ///   iterations or `select!` on `cancelled()` in async code that
+    ///   spawned it.
+    /// - Sub-processes via [`tokio::process::Command::spawn`] — drop
+    ///   does not kill the child; send SIGTERM/SIGKILL explicitly when
+    ///   the token fires.
+    /// - Ordered cleanup — flush buffers, close DB transactions, log
+    ///   "aborted by caller" before the future is dropped.
+    /// - Fan-out with [`tokio::task::JoinSet`] — clone
+    ///   `token.child_token()` into each spawned task so all of them
+    ///   stop when the run cancels, without one child cancelling the
+    ///   whole run.
+    ///
+    /// Note: the run-wide abort future also fires on
+    /// [`RunConfig::timeout`][to], but the timeout is not propagated
+    /// into this token. Tools that need to react to a timeout
+    /// cooperatively should wrap the relevant work in
+    /// [`tokio::time::timeout`] themselves.
+    ///
+    /// The token is cheap to clone (`Arc` internally).
+    ///
+    /// [rc]: ailoop_core::RunConfig::cancellation
+    /// [to]: ailoop_core::RunConfig::timeout
+    pub fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
     }
 }
 
@@ -308,5 +360,42 @@ mod tests {
     fn list_all_returns_full_catalog_regardless_of_active() {
         let h = build_handle(&["foo"], &["foo", "bar", "baz"]);
         assert_eq!(names(h.list_all()), vec!["foo", "bar", "baz"]);
+    }
+
+    #[test]
+    fn detached_context_exposes_never_cancelled_token() {
+        let ctx = ToolContext::detached();
+        assert!(!ctx.cancellation().is_cancelled());
+    }
+
+    #[test]
+    fn getter_returns_the_token_supplied_to_new() {
+        let token = CancellationToken::new();
+        let ctx = ToolContext::new(
+            RunId::new(),
+            StepId::new(),
+            ToolActivation::detached(),
+            token.clone(),
+        );
+        assert!(!ctx.cancellation().is_cancelled());
+        token.cancel();
+        assert!(ctx.cancellation().is_cancelled());
+    }
+
+    #[test]
+    fn cloning_the_token_is_cheap_and_shares_state() {
+        // `CancellationToken` is `Arc` internally — clones must observe
+        // the same cancellation event without going through the context.
+        let token = CancellationToken::new();
+        let ctx = ToolContext::new(
+            RunId::new(),
+            StepId::new(),
+            ToolActivation::detached(),
+            token.clone(),
+        );
+        let cloned = ctx.cancellation().clone();
+        assert!(!cloned.is_cancelled());
+        token.cancel();
+        assert!(cloned.is_cancelled());
     }
 }

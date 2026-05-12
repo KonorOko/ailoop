@@ -20,4 +20,5 @@ serde_json.workspace = true
 thiserror.workspace = true
 indexmap.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tempfile.workspace = true

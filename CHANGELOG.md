@@ -10,6 +10,37 @@ and this project adheres to
 
 ### Added
 
+- `ToolContext::cancellation() -> &CancellationToken`: cooperative
+  cancellation handle exposed to tool handlers. Mirrors the token the
+  caller supplied to `RunConfig.cancellation` (or a fresh
+  never-cancelled handle when none was set), built once at run start
+  and cloned into every per-dispatch context. The engine already
+  drops the tool future via `select!` on cancellation — that cancels
+  in-flight async I/O on its own — so this token is the escape hatch
+  for cases drop-cancellation doesn't reach: `spawn_blocking` work,
+  `tokio::process` children that need an explicit SIGTERM, ordered
+  cleanup before the future is dropped, and `JoinSet` fan-out that
+  wants to distribute `child_token()` to siblings.
+
+### Changed (BREAKING)
+
+- `ToolContext::new` gained a trailing `cancellation: CancellationToken`
+  parameter. Engine-internal; external callers rarely construct
+  `ToolContext` directly — standalone callers go through
+  `ToolContext::detached()`, whose signature is unchanged (it mints a
+  fresh never-cancelled token internally).
+
+### Migration
+
+```rust
+// Before
+let ctx = ToolContext::new(run_id, step_id, activation);
+
+// After
+use ailoop::CancellationToken;
+let ctx = ToolContext::new(run_id, step_id, activation, CancellationToken::new());
+```
+
 - `Conversation::stream_with_options` / `run_with_options` plus
   `RunOptions` (`ailoop::RunOptions`): per-call overrides for
   `timeout`, `cancellation`, `max_iterations`, `max_tokens`, and a
