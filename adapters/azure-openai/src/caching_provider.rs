@@ -171,8 +171,7 @@ mod tests {
     #[tokio::test]
     async fn ttl_expiry_forces_refresh() {
         let (inner, calls) = CountingProvider::new("tok-b");
-        let cache =
-            CachingTokenProvider::new(inner, Duration::from_millis(40), Duration::ZERO);
+        let cache = CachingTokenProvider::new(inner, Duration::from_millis(40), Duration::ZERO);
 
         cache.token().await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -262,13 +261,12 @@ mod tests {
         let client = AzureOpenAIClient::with_provider("https://x.openai.azure.com", cached);
         assert!(matches!(client.auth, AzureOpenAIAuth::Provider(_)));
 
-        let arc_cached: Arc<CachingTokenProvider<StaticProvider>> = Arc::new(
-            CachingTokenProvider::new(
+        let arc_cached: Arc<CachingTokenProvider<StaticProvider>> =
+            Arc::new(CachingTokenProvider::new(
                 StaticProvider("t".into()),
                 Duration::from_secs(60),
                 Duration::from_secs(5),
-            ),
-        );
+            ));
         let auth = AzureOpenAIAuth::Provider(arc_cached);
         assert!(matches!(auth, AzureOpenAIAuth::Provider(_)));
     }
