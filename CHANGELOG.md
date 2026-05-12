@@ -10,6 +10,16 @@ and this project adheres to
 
 ### Added
 
+- Multimodal kickoff for `Conversation`: `run`, `run_with_options`,
+  `stream`, and `stream_with_options` now take `impl Into<Message>`
+  instead of `impl Into<String>`. Four new `From` impls on
+  `ailoop_core::Message` (`&str`, `String`, `UserBlock`,
+  `Vec<UserBlock>`) cover the common shapes, and a new
+  `Message::user_with_blocks(blocks)` constructor is the idiomatic way
+  to build a multi-block user turn (e.g. text + image, text + PDF) for
+  the kickoff without writing an attachment middleware. Backward-
+  compatible: existing `&str` / `String` callers compile and behave
+  identically.
 - `ConversationBuilder::tools_with_prompt_file(names, path)`: associate
   one [`PromptSection`] read from disk with a *group* of tool names.
   The section is appended to the system prompt at most once per turn

@@ -240,6 +240,19 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
     /// [`Conversation::stream`] and materialises a [`RunOutcome`]
     /// summarising the run.
     ///
+    /// `input` accepts anything that converts into a [`Message`]:
+    /// - `&str` / `String` for the common plain-text kickoff;
+    /// - a [`UserBlock`](ailoop_core::UserBlock) for an image- or
+    ///   document-only turn (`chat.run(UserBlock::image(source))`);
+    /// - `Vec<UserBlock>` or [`Message::user_with_blocks`] for a
+    ///   multimodal turn that interleaves text, images, and documents
+    ///   in a single user message;
+    /// - a hand-built `Message::User { blocks }` for full control.
+    ///
+    /// The kickoff must be a [`Message::User`] semantically — passing
+    /// a `Message::Assistant` is undefined at the engine level and
+    /// trips a `debug_assert` in debug builds.
+    ///
     /// Errors from the model, tools, or context management surface as
     /// `Err(EngineError)`, exactly as they would on the streaming path.
     /// Aborted runs (timeout, cancellation, hook/tool `Terminate`) are
@@ -251,10 +264,9 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
     /// the same way it is on the streaming path.
     pub async fn run(
         &mut self,
-        user_input: impl Into<String>,
+        input: impl Into<Message>,
     ) -> Result<RunOutcome, EngineError<M::Error>> {
-        self.run_with_options(user_input, RunOptions::default())
-            .await
+        self.run_with_options(input, RunOptions::default()).await
     }
 
     /// Same as [`Self::run`] but parameterised by a [`RunOptions`] so
@@ -263,12 +275,18 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
     /// caller-minted [`RunId`] for cross-system correlation. The
     /// per-call options layer on top of any builder defaults; see
     /// [`RunOptions`] for the contract.
+    ///
+    /// `input` accepts the same forms as [`Self::run`] — `&str` /
+    /// `String` for plain text, a [`UserBlock`](ailoop_core::UserBlock)
+    /// or `Vec<UserBlock>` for multimodal, or a `Message::User { .. }`
+    /// directly. The kickoff must resolve to a `Message::User`; a
+    /// `Message::Assistant` trips a `debug_assert` in debug builds.
     pub async fn run_with_options(
         &mut self,
-        user_input: impl Into<String>,
+        input: impl Into<Message>,
         options: RunOptions,
     ) -> Result<RunOutcome, EngineError<M::Error>> {
-        let mut stream = self.stream_with_options(user_input, options).await?;
+        let mut stream = self.stream_with_options(input, options).await?;
 
         let mut finished: Option<(RunId, FinishReason, Usage, Vec<Message>)> = None;
         while let Some(chunk) = stream.next().await {
@@ -316,6 +334,19 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
     /// callers that want to render tokens, observe tool calls, or
     /// thread events through their own UI as the run unfolds.
     ///
+    /// `input` accepts anything that converts into a [`Message`]:
+    /// - `&str` / `String` for the common plain-text kickoff;
+    /// - a [`UserBlock`](ailoop_core::UserBlock) for an image- or
+    ///   document-only turn (`chat.stream(UserBlock::image(source))`);
+    /// - `Vec<UserBlock>` or [`Message::user_with_blocks`] for a
+    ///   multimodal turn that interleaves text, images, and documents
+    ///   in a single user message;
+    /// - a hand-built `Message::User { blocks }` for full control.
+    ///
+    /// The kickoff must be a [`Message::User`] semantically — passing
+    /// a `Message::Assistant` is undefined at the engine level and
+    /// trips a `debug_assert` in debug builds.
+    ///
     /// The returned [`RunStream`] always terminates with a
     /// [`StreamChunk::RunFinished`], whether the run completed
     /// normally or aborted (cancellation, timeout, or hook/tool
@@ -336,10 +367,9 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
     /// engine chunk uses.
     pub async fn stream(
         &mut self,
-        user_msg: impl Into<String>,
+        input: impl Into<Message>,
     ) -> Result<RunStream<'_, M>, EngineError<M::Error>> {
-        self.stream_with_options(user_msg, RunOptions::default())
-            .await
+        self.stream_with_options(input, RunOptions::default()).await
     }
 
     /// Same as [`Self::stream`] but parameterised by a [`RunOptions`]
@@ -349,12 +379,23 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
     /// engine's `select!`, so it interrupts every await — including the
     /// backoff sleeps inside `RetryingModel`. See [`RunOptions`] for
     /// the per-field contract.
+    ///
+    /// `input` accepts the same forms as [`Self::stream`] — `&str` /
+    /// `String` for plain text, a [`UserBlock`](ailoop_core::UserBlock)
+    /// or `Vec<UserBlock>` for multimodal, or a `Message::User { .. }`
+    /// directly. The kickoff must resolve to a `Message::User`; a
+    /// `Message::Assistant` trips a `debug_assert` in debug builds.
     pub async fn stream_with_options(
         &mut self,
-        user_msg: impl Into<String>,
+        input: impl Into<Message>,
         options: RunOptions,
     ) -> Result<RunStream<'_, M>, EngineError<M::Error>> {
-        self.history.add_message(Message::user(user_msg));
+        let msg: Message = input.into();
+        debug_assert!(
+            matches!(msg, Message::User { .. }),
+            "Conversation kickoff must be a Message::User; got {msg:?}"
+        );
+        self.history.add_message(msg);
         let report = self.history.compact_if_needed().await?;
 
         let snapshot = self.history.messages().to_vec();
@@ -1810,5 +1851,153 @@ mod tests {
         assert_eq!(resumed.history_messages().len(), 2);
         assert!(resumed.history.is_pinned(0));
         assert!(!resumed.history.is_pinned(1));
+    }
+
+    // ---- Kickoff input forms (`impl Into<Message>`) ----
+    //
+    // The four kickoff entry points (`run`, `run_with_options`,
+    // `stream`, `stream_with_options`) accept anything that converts
+    // into a `Message`. These tests pin the conversions exposed via
+    // the `From` impls on `Message`, plus the `Message::user_with_blocks`
+    // constructor used to assemble multimodal turns.
+
+    /// `&str` kickoff (the legacy shape) lands in history as a single
+    /// text block — same as before the kickoff signatures opened up to
+    /// `impl Into<Message>`.
+    #[tokio::test]
+    async fn kickoff_str_lands_as_single_text_block() {
+        use ailoop_core::UserBlock;
+
+        let mut chat = Conversation::builder(one_turn_model())
+            .build()
+            .expect("builder should succeed");
+        chat.run("hi").await.expect("run should succeed");
+
+        match &chat.history_messages()[0] {
+            Message::User { blocks } => {
+                assert_eq!(blocks.len(), 1);
+                match &blocks[0] {
+                    UserBlock::Text { text, .. } => assert_eq!(text, "hi"),
+                    other => panic!("expected Text block, got {other:?}"),
+                }
+            }
+            other => panic!("expected first message to be User, got {other:?}"),
+        }
+    }
+
+    /// `String` kickoff is equivalent to `&str` kickoff — both go
+    /// through `From<String> for Message` / `From<&str> for Message`.
+    #[tokio::test]
+    async fn kickoff_string_lands_as_single_text_block() {
+        use ailoop_core::UserBlock;
+
+        let mut chat = Conversation::builder(one_turn_model())
+            .build()
+            .expect("builder should succeed");
+        chat.run(String::from("hi"))
+            .await
+            .expect("run should succeed");
+
+        match &chat.history_messages()[0] {
+            Message::User { blocks } => match &blocks[0] {
+                UserBlock::Text { text, .. } => assert_eq!(text, "hi"),
+                other => panic!("expected Text block, got {other:?}"),
+            },
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    /// Multimodal kickoff: `Message::user_with_blocks([text, image])`
+    /// puts BOTH blocks on the User turn in the order supplied — no
+    /// middleware needed to inject attachments.
+    #[tokio::test]
+    async fn kickoff_user_with_blocks_preserves_multimodal_order() {
+        use ailoop_core::{Source, UserBlock};
+
+        let mut chat = Conversation::builder(one_turn_model())
+            .build()
+            .expect("builder should succeed");
+
+        chat.run(Message::user_with_blocks([
+            UserBlock::text("describe this"),
+            UserBlock::image(Source::Base64 {
+                media_type: "image/png".into(),
+                data: "AAAA".into(),
+            }),
+        ]))
+        .await
+        .expect("run should succeed");
+
+        match &chat.history_messages()[0] {
+            Message::User { blocks } => {
+                assert_eq!(blocks.len(), 2);
+                match &blocks[0] {
+                    UserBlock::Text { text, .. } => assert_eq!(text, "describe this"),
+                    other => panic!("expected Text first, got {other:?}"),
+                }
+                match &blocks[1] {
+                    UserBlock::Image { source, .. } => assert!(matches!(
+                        source,
+                        Source::Base64 { media_type, data }
+                            if media_type == "image/png" && data == "AAAA"
+                    )),
+                    other => panic!("expected Image second, got {other:?}"),
+                }
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    /// Single-block convenience: a bare `UserBlock` is the kickoff,
+    /// useful for an image-only or document-only turn with no prompt.
+    #[tokio::test]
+    async fn kickoff_bare_user_block_image_only() {
+        use ailoop_core::{Source, UserBlock};
+
+        let mut chat = Conversation::builder(one_turn_model())
+            .build()
+            .expect("builder should succeed");
+
+        chat.run(UserBlock::image(Source::Url {
+            url: "https://example.com/x.png".into(),
+        }))
+        .await
+        .expect("run should succeed");
+
+        match &chat.history_messages()[0] {
+            Message::User { blocks } => {
+                assert_eq!(blocks.len(), 1);
+                assert!(matches!(blocks[0], UserBlock::Image { .. }));
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    /// `Vec<UserBlock>` is accepted directly and produces the same
+    /// shape as `Message::user_with_blocks([...])`.
+    #[tokio::test]
+    async fn kickoff_vec_user_blocks_matches_user_with_blocks() {
+        use ailoop_core::{Source, UserBlock};
+
+        let blocks = vec![
+            UserBlock::text("caption"),
+            UserBlock::image(Source::Url {
+                url: "https://example.com/x.png".into(),
+            }),
+        ];
+
+        let mut chat = Conversation::builder(one_turn_model())
+            .build()
+            .expect("builder should succeed");
+        chat.run(blocks).await.expect("run should succeed");
+
+        match &chat.history_messages()[0] {
+            Message::User { blocks } => {
+                assert_eq!(blocks.len(), 2);
+                assert!(matches!(blocks[0], UserBlock::Text { .. }));
+                assert!(matches!(blocks[1], UserBlock::Image { .. }));
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
     }
 }

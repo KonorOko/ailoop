@@ -65,7 +65,7 @@ mod tracing_middleware;
 pub use ailoop_core::{
     AssistantBlock, CancellationToken, CharTokenizer, ChatMiddleware, ChatRequest,
     CompletionClient, CompletionModel, FinishReason, HookAction, Message, ReasoningEffort,
-    RetryClassification, RetryConfig, Retryable, RetryingModel, RunConfig, RunId, StepId,
+    RetryClassification, RetryConfig, Retryable, RetryingModel, RunConfig, RunId, Source, StepId,
     StreamChunk, Tokenizer, ToolChoice, ToolDecision, ToolDefinition, ToolResultContent, ToolTag,
     Usage, UserBlock,
 };
