@@ -10,6 +10,22 @@ and this project adheres to
 
 ### Added
 
+- `ConversationBuilder::tools_with_prompt_file(names, path)`: associate
+  one [`PromptSection`] read from disk with a *group* of tool names.
+  The section is appended to the system prompt at most once per turn
+  when at least one tool in the group is active, fixing the
+  duplication that arises when several tools share the same guide —
+  previously the only way to attach a guide was per-tool via
+  `tool_with_prompt_file`, which keyed sections by tool name and so
+  emitted the same guide N times for an N-tool family. Render order
+  follows group registration order (not the order of tools in
+  `req.tools`). Unlike `tool_with_prompt_file`, this method does *not*
+  register the tools — pair it with the usual `.tool(...)` /
+  `.tool_dyn(...)` calls. Passing an empty `names` iterator surfaces
+  `BuildError::EmptyToolGroup` at `build()` time. The 1:1
+  `tool_with_prompt_file` API is unchanged.
+- `BuildError::EmptyToolGroup`: new builder-error variant raised when
+  `tools_with_prompt_file` is called with an empty tool-name list.
 - `ToolContext::cancellation() -> &CancellationToken`: cooperative
   cancellation handle exposed to tool handlers. Mirrors the token the
   caller supplied to `RunConfig.cancellation` (or a fresh
