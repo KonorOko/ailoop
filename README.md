@@ -67,6 +67,33 @@ streams the response, runs any tools the model calls, and returns a
 appended to history. For token-level streaming, use `Conversation::stream`
 instead.
 
+### Multimodal kickoff
+
+`run` / `stream` accept anything that converts into a `Message`, so the
+same call site works for plain text, a single image, or a multi-block
+user turn that interleaves text and inline media:
+
+```rust
+use ailoop::{Conversation, Message, Source, UserBlock};
+
+let png = std::fs::read("chart.png")?;
+let outcome = chat
+    .run(Message::user_with_blocks([
+        UserBlock::text("What's in this chart?"),
+        UserBlock::image(Source::Base64 {
+            media_type: "image/png".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(&png),
+        }),
+    ]))
+    .await?;
+```
+
+`Vec<UserBlock>` and a bare `UserBlock` (image-only / document-only
+turns) are also accepted directly. Provider adapters map the blocks to
+the underlying wire format — Anthropic supports image and document
+content natively; the Azure Chat Completions adapter surfaces a typed
+error for document blocks it can't represent.
+
 ## Examples
 
 The repository ships with five runnable examples. All five require an
