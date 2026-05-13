@@ -8,12 +8,57 @@
 
 use std::time::Duration;
 
-use ailoop_core::{CompletionModel, FinishReason, ToolDefinition, ToolResultContent};
+use ailoop_core::{
+    CompletionModel, FinishReason, Message, Source, ToolDefinition, ToolResultContent, UserBlock,
+};
 use ailoop_tools::{ToolContext, ToolDyn};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::{Conversation, RunOptions};
+
+/// Parse a single entry from the JSON schema's `attachments` array into
+/// a [`UserBlock`]. The wire form mirrors Anthropic's content blocks
+/// (`{"type": "image"|"document", "source": {"type": "base64",
+/// "media_type": "…", "data": "…"} | {"type": "url", "url": "…"} |
+/// {"type": "file_id", "id": "…"}}`) so a model fluent in that shape
+/// can produce attachments natively. The variant tag dispatches to
+/// [`UserBlock::Image`] or [`UserBlock::Document`]; `source` flows
+/// through [`Source`]'s own `Deserialize` impl, so the `base64` / `url`
+/// / `file_id` discriminator is the same one providers use.
+///
+/// Done by hand rather than via a `#[derive(Deserialize)]` enum to
+/// avoid pulling `serde` into `ailoop`'s runtime deps just for this
+/// one shape.
+fn parse_attachment(value: &Value) -> Result<UserBlock, String> {
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "attachment missing required `type` field".to_string())?;
+    let source_value = value
+        .get("source")
+        .ok_or_else(|| "attachment missing required `source` field".to_string())?;
+    let source: Source = serde_json::from_value(source_value.clone())
+        .map_err(|e| format!("invalid `source`: {e}"))?;
+    match kind {
+        "image" => Ok(UserBlock::image(source)),
+        "document" => Ok(UserBlock::document(source)),
+        other => Err(format!(
+            "unknown attachment `type` {other:?}: expected \"image\" or \"document\""
+        )),
+    }
+}
+
+fn parse_attachments(value: &Value) -> Result<Vec<UserBlock>, String> {
+    let entries = value
+        .as_array()
+        .ok_or_else(|| "`attachments` must be an array".to_string())?;
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, v)| parse_attachment(v).map_err(|e| format!("attachments[{i}]: {e}")))
+        .collect()
+}
 
 /// Per-invocation budget overrides applied to every child run dispatched
 /// by a [`SubAgentTool`] built through [`SubAgentTool::with_config`].
@@ -120,6 +165,35 @@ impl SubAgentConfig {
 /// config — the cancellation handle is wired from the context, not the
 /// config, so a parent abort still cuts a child mid-run regardless of
 /// per-call budget.
+///
+/// # Multimodal input
+///
+/// The JSON schema accepts an optional `attachments` array alongside
+/// `prompt`. Each entry mirrors Anthropic's content shape:
+///
+/// ```json
+/// {
+///   "type": "image",
+///   "source": {"type": "base64", "media_type": "image/png", "data": "..."}
+/// }
+/// ```
+///
+/// `type` selects [`UserBlock::Image`] or [`UserBlock::Document`];
+/// `source` accepts `base64`, `url`, or `file_id` (matching [`Source`]).
+/// The wrapper combines the text `prompt` (if non-empty) with the
+/// parsed attachment blocks into a single [`Message::user_with_blocks`]
+/// kickoff. Malformed attachments surface as a `"sub-agent error:
+/// invalid attachments: …"` reply with `is_error: true` — never an
+/// `Err` to the engine.
+///
+/// Output stays text-only: the engine's [`AssistantBlock`] surface has
+/// no image or document variants today, so the wrapper continues to
+/// relay [`RunOutcome::final_text`](crate::RunOutcome::final_text) as
+/// the tool result. Multimodal-out would require adding inline-media
+/// variants to [`AssistantBlock`] first — tracked as a separate decision
+/// in `dev-notes/sub-agent-improvements.md`.
+///
+/// [`AssistantBlock`]: ailoop_core::AssistantBlock
 ///
 /// [`child_token`]: tokio_util::sync::CancellationToken::child_token
 /// [`ToolContext::cancellation`]: ailoop_tools::ToolContext::cancellation
@@ -239,6 +313,44 @@ where
                     "prompt": {
                         "type": "string",
                         "description": "Instruction or question to delegate to the sub-agent."
+                    },
+                    "attachments": {
+                        "type": "array",
+                        "description": "Optional images or documents to attach to the prompt. Each entry mirrors Anthropic's content shape: {\"type\": \"image\"|\"document\", \"source\": {\"type\": \"base64\", \"media_type\": \"…\", \"data\": \"…\"} | {\"type\": \"url\", \"url\": \"…\"} | {\"type\": \"file_id\", \"id\": \"…\"}}.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["image", "document"]},
+                                "source": {
+                                    "type": "object",
+                                    "oneOf": [
+                                        {
+                                            "properties": {
+                                                "type": {"const": "base64"},
+                                                "media_type": {"type": "string"},
+                                                "data": {"type": "string"}
+                                            },
+                                            "required": ["type", "media_type", "data"]
+                                        },
+                                        {
+                                            "properties": {
+                                                "type": {"const": "url"},
+                                                "url": {"type": "string"}
+                                            },
+                                            "required": ["type", "url"]
+                                        },
+                                        {
+                                            "properties": {
+                                                "type": {"const": "file_id"},
+                                                "id": {"type": "string"}
+                                            },
+                                            "required": ["type", "id"]
+                                        }
+                                    ]
+                                }
+                            },
+                            "required": ["type", "source"]
+                        }
                     }
                 },
                 "required": ["prompt"]
@@ -254,6 +366,19 @@ where
             .unwrap_or_default()
             .to_owned();
 
+        let attachment_blocks: Vec<UserBlock> = match args.get("attachments") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(v) => match parse_attachments(v) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    return ToolResultContent::text(format!(
+                        "sub-agent error: invalid attachments: {e}"
+                    ))
+                    .with_is_error(true);
+                }
+            },
+        };
+
         let mut options = RunOptions::new().cancellation(ctx.cancellation().child_token());
         if let Some(timeout) = self.config.timeout {
             options = options.timeout(timeout);
@@ -266,7 +391,22 @@ where
         }
 
         let mut conv = self.conversation.lock().await;
-        match conv.run_with_options(prompt, options).await {
+        let run_result = if attachment_blocks.is_empty() {
+            // Text-only fast path: preserve the bit-for-bit shape the
+            // wrapper has always produced (single `UserBlock::Text`),
+            // so existing snapshots and tests stay green.
+            conv.run_with_options(prompt, options).await
+        } else {
+            let mut blocks: Vec<UserBlock> = Vec::with_capacity(attachment_blocks.len() + 1);
+            if !prompt.is_empty() {
+                blocks.push(UserBlock::text(prompt));
+            }
+            blocks.extend(attachment_blocks);
+            conv.run_with_options(Message::user_with_blocks(blocks), options)
+                .await
+        };
+
+        match run_result {
             Ok(outcome) => {
                 let text = outcome.final_text.unwrap_or_default();
                 match outcome.finish_reason {
@@ -292,7 +432,7 @@ mod tests {
     use ailoop_core::testing::{ScriptedError, ScriptedModel};
     use ailoop_core::{
         CancellationToken, ChatMiddleware, ChatRequest, HookAction, Message, RunConfig, RunId,
-        StepId, StreamChunk, Usage,
+        Source, StepId, StreamChunk, Usage,
     };
     use ailoop_tools::ToolActivation;
     use std::sync::{Arc, Mutex as StdMutex};
@@ -664,5 +804,220 @@ mod tests {
             result.is_error,
             "engine errors must mark the result is_error: true"
         );
+    }
+
+    /// Recorder middleware capturing every [`ChatRequest`] the child
+    /// sees, so attachment tests can assert the exact block sequence
+    /// the engine dispatched.
+    struct MessageRecorder {
+        captures: Arc<StdMutex<Vec<Vec<Message>>>>,
+    }
+    #[async_trait::async_trait]
+    impl ChatMiddleware for MessageRecorder {
+        async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            self.captures.lock().unwrap().push(req.messages.clone());
+        }
+    }
+
+    /// Image attachment lands in the child's `ChatRequest` as a
+    /// [`UserBlock::Image`] alongside the prompt text — proves the
+    /// `attachments` field parses end-to-end into multimodal user
+    /// blocks, not into a stringified placeholder.
+    #[tokio::test]
+    async fn sub_agent_image_attachment_reaches_chat_request() {
+        let captures = Arc::new(StdMutex::new(Vec::new()));
+        let model = ScriptedModel::new([one_text_turn("looked at the image")]);
+        let conv = Conversation::builder(model)
+            .middleware(Arc::new(MessageRecorder {
+                captures: captures.clone(),
+            }))
+            .build()
+            .expect("build");
+        let tool = SubAgentTool::new("delegate", "delegate", conv);
+
+        let result = tool
+            .call(
+                json!({
+                    "prompt": "what is this?",
+                    "attachments": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "AAAA"
+                            }
+                        }
+                    ]
+                }),
+                &ToolContext::detached(),
+            )
+            .await;
+        assert!(
+            !result.is_error,
+            "happy multimodal path must not flag error"
+        );
+        assert_eq!(result.as_text(), Some("looked at the image"));
+
+        let captures = captures.lock().unwrap();
+        let blocks = captures
+            .first()
+            .and_then(|msgs| msgs.last())
+            .and_then(|m| match m {
+                Message::User { blocks } => Some(blocks),
+                _ => None,
+            })
+            .expect("expected a user message in the first ChatRequest");
+        assert_eq!(
+            blocks.len(),
+            2,
+            "expected text + image blocks, got {blocks:?}"
+        );
+        match &blocks[0] {
+            UserBlock::Text { text, .. } => assert_eq!(text, "what is this?"),
+            other => panic!("expected Text first, got {other:?}"),
+        }
+        match &blocks[1] {
+            UserBlock::Image { source, .. } => assert!(matches!(
+                source,
+                Source::Base64 { media_type, data }
+                    if media_type == "image/png" && data == "AAAA"
+            )),
+            other => panic!("expected Image second, got {other:?}"),
+        }
+    }
+
+    /// Document attachment uses [`UserBlock::Document`] (not Image) —
+    /// proves the variant tag routes correctly.
+    #[tokio::test]
+    async fn sub_agent_document_attachment_reaches_chat_request() {
+        let captures = Arc::new(StdMutex::new(Vec::new()));
+        let model = ScriptedModel::new([one_text_turn("ok")]);
+        let conv = Conversation::builder(model)
+            .middleware(Arc::new(MessageRecorder {
+                captures: captures.clone(),
+            }))
+            .build()
+            .expect("build");
+        let tool = SubAgentTool::new("delegate", "delegate", conv);
+
+        let _ = tool
+            .call(
+                json!({
+                    "prompt": "summarize",
+                    "attachments": [
+                        {
+                            "type": "document",
+                            "source": {"type": "url", "url": "https://example.com/x.pdf"}
+                        }
+                    ]
+                }),
+                &ToolContext::detached(),
+            )
+            .await;
+
+        let captures = captures.lock().unwrap();
+        let blocks = captures
+            .first()
+            .and_then(|msgs| msgs.last())
+            .and_then(|m| match m {
+                Message::User { blocks } => Some(blocks),
+                _ => None,
+            })
+            .expect("expected a user message");
+        assert!(
+            blocks.iter().any(|b| matches!(
+                b,
+                UserBlock::Document { source: Source::Url { url }, .. } if url == "https://example.com/x.pdf"
+            )),
+            "expected a Document block with the URL source, got {blocks:?}"
+        );
+    }
+
+    /// Attachment with an unknown source `type` fails to deserialize
+    /// and surfaces as a tool-reported error — not as an engine `Err`,
+    /// not as a panic. The error body should mention attachments so
+    /// the model can correct itself on the next call.
+    #[tokio::test]
+    async fn sub_agent_invalid_attachment_surfaces_as_is_error_text() {
+        let model = ScriptedModel::new([one_text_turn("never reached")]);
+        let conv = Conversation::builder(model).build().expect("build");
+        let tool = SubAgentTool::new("delegate", "delegate", conv);
+
+        let result = tool
+            .call(
+                json!({
+                    "prompt": "what?",
+                    "attachments": [
+                        {"type": "image", "source": {"type": "bogus", "data": "xxx"}}
+                    ]
+                }),
+                &ToolContext::detached(),
+            )
+            .await;
+        let text = result
+            .as_text()
+            .expect("expected text body on malformed attachment");
+        assert!(
+            text.starts_with("sub-agent error: invalid attachments:"),
+            "expected attachment error prefix, got {text:?}"
+        );
+        assert!(
+            result.is_error,
+            "malformed attachments must mark is_error: true"
+        );
+    }
+
+    /// Attachments-only kickoff (empty `prompt`, one image): the
+    /// `attachments` path drops the text block when `prompt` is empty,
+    /// so the child receives a single-block user turn — matching the
+    /// `Conversation::run(UserBlock::image(...))` ergonomics that
+    /// already exist on the public API.
+    #[tokio::test]
+    async fn sub_agent_attachments_only_omits_empty_prompt_block() {
+        let captures = Arc::new(StdMutex::new(Vec::new()));
+        let model = ScriptedModel::new([one_text_turn("ok")]);
+        let conv = Conversation::builder(model)
+            .middleware(Arc::new(MessageRecorder {
+                captures: captures.clone(),
+            }))
+            .build()
+            .expect("build");
+        let tool = SubAgentTool::new("delegate", "delegate", conv);
+
+        let _ = tool
+            .call(
+                json!({
+                    "prompt": "",
+                    "attachments": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "AAAA"
+                            }
+                        }
+                    ]
+                }),
+                &ToolContext::detached(),
+            )
+            .await;
+
+        let captures = captures.lock().unwrap();
+        let blocks = captures
+            .first()
+            .and_then(|msgs| msgs.last())
+            .and_then(|m| match m {
+                Message::User { blocks } => Some(blocks),
+                _ => None,
+            })
+            .expect("expected a user message");
+        assert_eq!(
+            blocks.len(),
+            1,
+            "expected only the image block, got {blocks:?}"
+        );
+        assert!(matches!(blocks[0], UserBlock::Image { .. }));
     }
 }
