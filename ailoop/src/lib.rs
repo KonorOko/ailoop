@@ -105,6 +105,6 @@ pub mod advanced {
 pub use json_tracer::JsonTracer;
 pub use middleware::ApprovalMiddleware;
 pub use sanitize::{Sanitize, TextRewriter, ToolArgsRewriter, ToolResultRewriter};
-pub use sub_agent::SubAgentTool;
+pub use sub_agent::{SubAgentConfig, SubAgentTool};
 #[cfg(feature = "tracing")]
 pub use tracing_middleware::TracingMiddleware;

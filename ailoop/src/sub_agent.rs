@@ -6,12 +6,94 @@
 //! prior turns. For stateless behavior reconstruct the `SubAgentTool`
 //! (or its inner `Conversation`) per call.
 
+use std::time::Duration;
+
 use ailoop_core::{CompletionModel, FinishReason, ToolDefinition, ToolResultContent};
 use ailoop_tools::{ToolContext, ToolDyn};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::{Conversation, RunOptions};
+
+/// Per-invocation budget overrides applied to every child run dispatched
+/// by a [`SubAgentTool`] built through [`SubAgentTool::with_config`].
+///
+/// Each field is `Option<T>`; `None` (the default) means "fall back to
+/// the child [`Conversation`]'s defaults for this run". The values are
+/// layered onto the [`RunOptions`] the wrapper assembles per
+/// [`ToolDyn::call`], on top of the [`ToolContext`] cancellation
+/// inheritance — the cancellation token always comes from the parent
+/// context, never from `SubAgentConfig`.
+///
+/// `SubAgentConfig` is deliberately narrower than [`RunOptions`]:
+/// `cancellation` and `run_id` are not exposed because they belong to
+/// the parent's dispatch context (cancellation rides through
+/// `ToolContext`; the engine mints a fresh `RunId` per child run).
+/// Drop down to a hand-built [`RunOptions`] via a custom wrapper if you
+/// need that surface.
+///
+/// Construct fluently — mirrors the [`RunOptions`] builder style so the
+/// per-field semantics line up one-to-one:
+///
+/// ```
+/// use std::time::Duration;
+/// let config = ailoop::SubAgentConfig::new()
+///     .timeout(Duration::from_secs(30))
+///     .max_iterations(5);
+/// ```
+#[derive(Default, Clone, Debug)]
+#[non_exhaustive]
+pub struct SubAgentConfig {
+    /// Wall-clock deadline applied to every child run. Mapped to
+    /// [`RunOptions::timeout`] — the engine checks the deadline at
+    /// every await boundary and aborts with
+    /// [`FinishReason::Aborted`] on expiry, which the wrapper surfaces
+    /// as a text-only [`ToolResultContent`] with `is_error: true`.
+    pub timeout: Option<Duration>,
+    /// Cap on the number of provider turns inside the child run.
+    /// Mapped to [`RunOptions::max_iterations`]. Hitting the cap
+    /// surfaces as
+    /// [`EngineError::MaxIterationsExceeded`](crate::EngineError::MaxIterationsExceeded),
+    /// which the wrapper renders as a `"sub-agent error: …"` text body
+    /// with `is_error: true`.
+    pub max_iterations: Option<usize>,
+    /// Per-turn `max_tokens` override for every [`ChatRequest`] the
+    /// child run builds. Mapped to [`RunOptions::max_tokens`].
+    ///
+    /// [`ChatRequest`]: ailoop_core::ChatRequest
+    pub max_tokens: Option<u32>,
+}
+
+impl SubAgentConfig {
+    /// Fresh `SubAgentConfig` with every field unset (equivalent to
+    /// [`Default::default`]).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the wall-clock deadline applied to every child run. See
+    /// [`Self::timeout`] for semantics.
+    pub fn timeout(mut self, duration: Duration) -> Self {
+        self.timeout = Some(duration);
+        self
+    }
+
+    /// Cap the child's per-run iteration count. See
+    /// [`Self::max_iterations`] for semantics.
+    pub fn max_iterations(mut self, n: usize) -> Self {
+        self.max_iterations = Some(n);
+        self
+    }
+
+    /// Override `max_tokens` for every [`ChatRequest`] the child
+    /// builds. See [`Self::max_tokens`] for semantics.
+    ///
+    /// [`ChatRequest`]: ailoop_core::ChatRequest
+    pub fn max_tokens(mut self, n: u32) -> Self {
+        self.max_tokens = Some(n);
+        self
+    }
+}
 
 /// Wraps a [`Conversation`] so a parent agent can delegate to it as a
 /// regular tool. Pure composition: nothing in the engine or registry
@@ -30,6 +112,14 @@ use crate::{Conversation, RunOptions};
 /// [`ToolContext::cancellation`], so cancelling or timing out the
 /// parent run cancels the in-flight sub-agent at the next await
 /// boundary.
+///
+/// Per-invocation budget overrides (`timeout`, `max_iterations`,
+/// `max_tokens`) live on [`SubAgentConfig`] and are applied through
+/// [`SubAgentTool::with_config`]. The parent's
+/// [`ToolContext::cancellation`] always wins over anything in the
+/// config — the cancellation handle is wired from the context, not the
+/// config, so a parent abort still cuts a child mid-run regardless of
+/// per-call budget.
 ///
 /// [`child_token`]: tokio_util::sync::CancellationToken::child_token
 /// [`ToolContext::cancellation`]: ailoop_tools::ToolContext::cancellation
@@ -59,10 +149,33 @@ use crate::{Conversation, RunOptions};
 ///     .build()?;
 /// # Ok(()) }
 /// ```
+///
+/// Cap the child's per-invocation budget when the parent needs to
+/// bound runaway loops or long-running sub-tasks:
+///
+/// ```no_run
+/// # use std::sync::Arc;
+/// # use std::time::Duration;
+/// # async fn build<M>(researcher_model: M)
+/// # -> Result<(), Box<dyn std::error::Error>>
+/// # where M: ailoop::CompletionModel + Send + Sync + 'static {
+/// let researcher = ailoop::Conversation::builder(researcher_model).build()?;
+/// let tool = ailoop::SubAgentTool::with_config(
+///     "researcher",
+///     "Delegate a research question, capped to 5 turns / 30s.",
+///     researcher,
+///     ailoop::SubAgentConfig::new()
+///         .timeout(Duration::from_secs(30))
+///         .max_iterations(5),
+/// );
+/// # let _ = Arc::new(tool);
+/// # Ok(()) }
+/// ```
 pub struct SubAgentTool<M: CompletionModel> {
     name: String,
     description: String,
     conversation: Mutex<Conversation<M>>,
+    config: SubAgentConfig,
 }
 
 impl<M> SubAgentTool<M>
@@ -73,15 +186,36 @@ where
     /// `description` to the parent's [`CompletionModel`]. Use
     /// [`Arc::new`](std::sync::Arc::new) when registering through
     /// [`tool_dyn`](crate::ConversationBuilder::tool_dyn).
+    ///
+    /// Equivalent to
+    /// [`Self::with_config(name, description, conversation, SubAgentConfig::default())`](Self::with_config):
+    /// no per-invocation budget overrides are applied, so the child
+    /// runs under its own builder defaults.
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
         conversation: Conversation<M>,
     ) -> Self {
+        Self::with_config(name, description, conversation, SubAgentConfig::default())
+    }
+
+    /// Wrap `conversation` with explicit per-invocation budget
+    /// overrides. The `config` is stored on the wrapper and layered
+    /// onto the [`RunOptions`] of every child run dispatched through
+    /// [`ToolDyn::call`]. The parent's `ToolContext::cancellation`
+    /// always wins over the config — only `timeout`, `max_iterations`,
+    /// and `max_tokens` are configurable per-invocation.
+    pub fn with_config(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        conversation: Conversation<M>,
+        config: SubAgentConfig,
+    ) -> Self {
         Self {
             name: name.into(),
             description: description.into(),
             conversation: Mutex::new(conversation),
+            config,
         }
     }
 }
@@ -120,7 +254,16 @@ where
             .unwrap_or_default()
             .to_owned();
 
-        let options = RunOptions::new().cancellation(ctx.cancellation().child_token());
+        let mut options = RunOptions::new().cancellation(ctx.cancellation().child_token());
+        if let Some(timeout) = self.config.timeout {
+            options = options.timeout(timeout);
+        }
+        if let Some(max_iterations) = self.config.max_iterations {
+            options = options.max_iterations(max_iterations);
+        }
+        if let Some(max_tokens) = self.config.max_tokens {
+            options = options.max_tokens(max_tokens);
+        }
 
         let mut conv = self.conversation.lock().await;
         match conv.run_with_options(prompt, options).await {
@@ -320,6 +463,182 @@ mod tests {
         assert!(
             result.is_error,
             "parent cancellation must mark the child result is_error: true"
+        );
+    }
+
+    /// `SubAgentConfig::max_iterations` per-call caps the child even when
+    /// the child's [`ConversationBuilder`] would otherwise allow more
+    /// turns. With `max_iterations(0)`, the engine bails on the first
+    /// iteration check with [`EngineError::MaxIterationsExceeded`], which
+    /// the wrapper surfaces as `"sub-agent error: …"` + `is_error: true`.
+    ///
+    /// [`ConversationBuilder`]: crate::ConversationBuilder
+    /// [`EngineError::MaxIterationsExceeded`]: crate::EngineError::MaxIterationsExceeded
+    #[tokio::test]
+    async fn sub_agent_config_max_iterations_caps_child() {
+        // Child builder leaves max_iterations at the engine default
+        // (10); the per-call cap of 0 must still win.
+        let model = ScriptedModel::new([one_text_turn("never reached")]);
+        let conv = Conversation::builder(model).build().expect("build");
+        let tool = SubAgentTool::with_config(
+            "delegate",
+            "delegate",
+            conv,
+            SubAgentConfig::new().max_iterations(0),
+        );
+
+        let result = tool
+            .call(json!({"prompt": "anything"}), &ToolContext::detached())
+            .await;
+        let text = result
+            .as_text()
+            .expect("expected text body when max_iterations is exceeded");
+        assert!(
+            text.starts_with("sub-agent error:") && text.contains("max iterations"),
+            "expected max-iterations error body, got {text:?}"
+        );
+        assert!(
+            result.is_error,
+            "max_iterations exceeded must mark is_error: true"
+        );
+    }
+
+    /// `SubAgentConfig::timeout` per-call aborts the child run. The
+    /// engine races the abort future against every await — here a
+    /// sleeping `on_run_started` middleware never returns, but the
+    /// 50ms timeout fires first and surfaces as a text-only result
+    /// with `is_error: true`.
+    #[tokio::test]
+    async fn sub_agent_config_timeout_aborts_child() {
+        struct SlowMw;
+        #[async_trait::async_trait]
+        impl ChatMiddleware for SlowMw {
+            async fn on_run_started(&self, _: &RunId, _: &[Message], _: &RunConfig) -> HookAction {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                HookAction::Continue
+            }
+        }
+
+        let model = ScriptedModel::new([one_text_turn("never reached")]);
+        let conv = Conversation::builder(model)
+            .middleware(Arc::new(SlowMw))
+            .build()
+            .expect("build");
+        let tool = SubAgentTool::with_config(
+            "delegate",
+            "delegate",
+            conv,
+            SubAgentConfig::new().timeout(Duration::from_millis(50)),
+        );
+
+        let result = tool
+            .call(json!({"prompt": "anything"}), &ToolContext::detached())
+            .await;
+        let text = result
+            .as_text()
+            .expect("expected text body on timeout abort");
+        assert!(
+            text.contains("aborted") && text.contains("timeout exceeded"),
+            "expected timeout-exceeded abort text, got {text:?}"
+        );
+        assert!(
+            result.is_error,
+            "timeout-aborted runs must mark is_error: true"
+        );
+    }
+
+    /// `SubAgentConfig::max_tokens` per-call reaches the per-turn
+    /// [`ChatRequest`] the engine builds. Spying via `on_chat_request`
+    /// shows the override taking effect on the first dispatch.
+    #[tokio::test]
+    async fn sub_agent_config_max_tokens_reaches_chat_request() {
+        struct ReqSpy {
+            captured: Arc<StdMutex<Option<u32>>>,
+        }
+        #[async_trait::async_trait]
+        impl ChatMiddleware for ReqSpy {
+            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+                *self.captured.lock().unwrap() = Some(req.max_tokens);
+            }
+        }
+
+        let captured = Arc::new(StdMutex::new(None));
+        let model = ScriptedModel::new([one_text_turn("ok")]);
+        let conv = Conversation::builder(model)
+            .middleware(Arc::new(ReqSpy {
+                captured: captured.clone(),
+            }))
+            .build()
+            .expect("build");
+        let tool = SubAgentTool::with_config(
+            "delegate",
+            "delegate",
+            conv,
+            SubAgentConfig::new().max_tokens(321),
+        );
+
+        let result = tool
+            .call(json!({"prompt": "anything"}), &ToolContext::detached())
+            .await;
+        assert!(!result.is_error, "happy path must not be flagged as error");
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(321),
+            "ChatRequest.max_tokens must reflect SubAgentConfig.max_tokens"
+        );
+    }
+
+    /// `SubAgentTool::new` (no per-invocation config) leaves the
+    /// engine's [`RunConfig`] untouched: budget knobs stay at their
+    /// defaults, exactly as before this PR. Anchors the no-breaking-
+    /// change contract.
+    #[tokio::test]
+    async fn sub_agent_new_without_config_leaves_run_config_at_defaults() {
+        struct ConfigSpy {
+            max_iterations: Arc<StdMutex<Option<usize>>>,
+            max_tokens: Arc<StdMutex<Option<u32>>>,
+            timeout: Arc<StdMutex<Option<Option<Duration>>>>,
+        }
+        #[async_trait::async_trait]
+        impl ChatMiddleware for ConfigSpy {
+            async fn on_run_started(
+                &self,
+                _: &RunId,
+                _: &[Message],
+                config: &RunConfig,
+            ) -> HookAction {
+                *self.max_iterations.lock().unwrap() = Some(config.max_iterations);
+                *self.max_tokens.lock().unwrap() = Some(config.max_tokens);
+                *self.timeout.lock().unwrap() = Some(config.timeout);
+                HookAction::Continue
+            }
+        }
+
+        let max_iterations = Arc::new(StdMutex::new(None));
+        let max_tokens = Arc::new(StdMutex::new(None));
+        let timeout = Arc::new(StdMutex::new(None));
+        let model = ScriptedModel::new([one_text_turn("ok")]);
+        let conv = Conversation::builder(model)
+            .middleware(Arc::new(ConfigSpy {
+                max_iterations: max_iterations.clone(),
+                max_tokens: max_tokens.clone(),
+                timeout: timeout.clone(),
+            }))
+            .build()
+            .expect("build");
+        let tool = SubAgentTool::new("delegate", "delegate", conv);
+
+        let _ = tool
+            .call(json!({"prompt": "anything"}), &ToolContext::detached())
+            .await;
+
+        // RunConfig defaults — see `ailoop-core/src/config.rs`.
+        assert_eq!(*max_iterations.lock().unwrap(), Some(10));
+        assert_eq!(*max_tokens.lock().unwrap(), Some(4096));
+        assert_eq!(
+            *timeout.lock().unwrap(),
+            Some(None),
+            "no per-call timeout when SubAgentTool::new is used"
         );
     }
 
