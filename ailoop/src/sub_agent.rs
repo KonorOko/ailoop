@@ -11,7 +11,7 @@ use ailoop_tools::{ToolContext, ToolDyn};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::Conversation;
+use crate::{Conversation, RunOptions};
 
 /// Wraps a [`Conversation`] so a parent agent can delegate to it as a
 /// regular tool. Pure composition: nothing in the engine or registry
@@ -21,11 +21,18 @@ use crate::Conversation;
 /// The child's history persists across calls (each invocation sees
 /// prior turns); rebuild the `SubAgentTool` per call if you need
 /// stateless behavior. Child errors and aborts are surfaced as a
-/// successful text-only [`ToolResultContent`] (with an
-/// `"sub-agent error: …"` / `"sub-agent aborted: …"` prefix and
-/// `is_error: false`) — never as an error reply and never as a
+/// text-only [`ToolResultContent`] (with an `"sub-agent error: …"` /
+/// `"sub-agent aborted: …"` prefix and `is_error: true`) — never as a
 /// tool-registry error — so the parent's loop continues and the model
-/// can react.
+/// can distinguish failure from a normal reply.
+///
+/// The child run inherits a [`child_token`] of the parent's
+/// [`ToolContext::cancellation`], so cancelling or timing out the
+/// parent run cancels the in-flight sub-agent at the next await
+/// boundary.
+///
+/// [`child_token`]: tokio_util::sync::CancellationToken::child_token
+/// [`ToolContext::cancellation`]: ailoop_tools::ToolContext::cancellation
 ///
 /// # Examples
 ///
@@ -106,28 +113,32 @@ where
         )
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolContext) -> ToolResultContent {
+    async fn call(&self, args: Value, ctx: &ToolContext) -> ToolResultContent {
         let prompt = args
             .get("prompt")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
 
+        let options = RunOptions::new().cancellation(ctx.cancellation().child_token());
+
         let mut conv = self.conversation.lock().await;
-        match conv.run(prompt).await {
+        match conv.run_with_options(prompt, options).await {
             Ok(outcome) => {
                 let text = outcome.final_text.unwrap_or_default();
                 match outcome.finish_reason {
                     FinishReason::Aborted(reason) if text.is_empty() => {
                         ToolResultContent::text(format!("sub-agent aborted: {reason}"))
+                            .with_is_error(true)
                     }
                     FinishReason::Aborted(reason) => {
                         ToolResultContent::text(format!("sub-agent aborted ({reason}): {text}"))
+                            .with_is_error(true)
                     }
                     _ => ToolResultContent::text(text),
                 }
             }
-            Err(e) => ToolResultContent::text(format!("sub-agent error: {e}")),
+            Err(e) => ToolResultContent::text(format!("sub-agent error: {e}")).with_is_error(true),
         }
     }
 }
@@ -135,11 +146,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ailoop_core::testing::ScriptedModel;
+    use ailoop_core::testing::{ScriptedError, ScriptedModel};
     use ailoop_core::{
-        ChatMiddleware, ChatRequest, HookAction, Message, RunConfig, RunId, StepId, StreamChunk,
-        Usage,
+        CancellationToken, ChatMiddleware, ChatRequest, HookAction, Message, RunConfig, RunId,
+        StepId, StreamChunk, Usage,
     };
+    use ailoop_tools::ToolActivation;
     use std::sync::{Arc, Mutex as StdMutex};
 
     fn one_text_turn(text: &str) -> Vec<StreamChunk> {
@@ -245,7 +257,7 @@ mod tests {
     }
 
     /// An aborted sub-agent run surfaces as `ToolResultContent::Text`
-    /// with a meaningful message — never as `Err`.
+    /// with a meaningful message and `is_error: true` — never as `Err`.
     #[tokio::test]
     async fn sub_agent_aborted_run_surfaces_as_text() {
         struct AbortMw;
@@ -272,6 +284,66 @@ mod tests {
         assert!(
             text.contains("aborted") && text.contains("policy"),
             "expected abort reason in text, got {text:?}"
+        );
+        assert!(result.is_error, "aborted runs must mark is_error: true");
+    }
+
+    /// Cancelling the parent's run-wide token aborts the in-flight
+    /// sub-agent: the child receives a `child_token()` of the parent's
+    /// cancellation handle, so `cancel()` on the parent fires inside
+    /// the child run too. The wrapper surfaces the abort as text with
+    /// `is_error: true`.
+    #[tokio::test]
+    async fn sub_agent_parent_cancellation_aborts_child() {
+        let model = ScriptedModel::new([one_text_turn("never delivered")]);
+        let conv = Conversation::builder(model).build().expect("build");
+        let tool = SubAgentTool::new("delegate", "delegate", conv);
+
+        let parent_token = CancellationToken::new();
+        let ctx = ToolContext::new(
+            RunId::new(),
+            StepId::new(),
+            ToolActivation::detached(),
+            parent_token.clone(),
+        );
+
+        // Pre-cancel before calling — the run aborts at the first await
+        // boundary, before the model emits anything.
+        parent_token.cancel();
+
+        let result = tool.call(json!({"prompt": "stop me"}), &ctx).await;
+        let text = result.as_text().expect("expected text body on abort");
+        assert!(
+            text.contains("aborted") && text.contains("cancelled by caller"),
+            "expected cancelled-by-caller in abort text, got {text:?}"
+        );
+        assert!(
+            result.is_error,
+            "parent cancellation must mark the child result is_error: true"
+        );
+    }
+
+    /// `Conversation::run_with_options` returning `Err(_)` surfaces as
+    /// `ToolResultContent::Text` with an `"sub-agent error: …"` prefix
+    /// and `is_error: true` — the parent can react without the tool
+    /// dispatch itself failing.
+    #[tokio::test]
+    async fn sub_agent_engine_error_surfaces_as_is_error_text() {
+        let model = ScriptedModel::with_turns([Err(ScriptedError("permanent: bad auth".into()))]);
+        let conv = Conversation::builder(model).build().expect("build");
+        let tool = SubAgentTool::new("delegate", "delegate", conv);
+
+        let result = tool
+            .call(json!({"prompt": "anything"}), &ToolContext::detached())
+            .await;
+        let text = result.as_text().expect("expected text body on error");
+        assert!(
+            text.starts_with("sub-agent error:") && text.contains("bad auth"),
+            "expected sub-agent error prefix and message, got {text:?}"
+        );
+        assert!(
+            result.is_error,
+            "engine errors must mark the result is_error: true"
         );
     }
 }
