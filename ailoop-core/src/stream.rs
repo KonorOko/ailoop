@@ -99,6 +99,19 @@ pub enum StreamChunk {
     /// End of a single provider turn. Equivalent to a Chat
     /// Completions `finish_reason` plus the final `usage`. Multiple
     /// turns can fire per run when the model is in a tool-use loop.
+    ///
+    /// Visible to [`crate::ChatMiddleware`] implementations only. The
+    /// engine reads `reason` and accumulates `usage` into the run
+    /// total, then drops the chunk before it reaches the stream
+    /// consumer — a caller iterating the stream returned by
+    /// `Conversation::stream_with_options` never observes this
+    /// variant. The aggregated total is surfaced on
+    /// [`Self::RunFinished::usage`]. To observe per-turn data (for
+    /// example, the final turn's `input_tokens` for a
+    /// "context full" indicator), implement [`crate::ChatMiddleware`]
+    /// and read it from [`crate::ChatMiddleware::on_chunk`]:
+    /// middleware hooks run before the engine's per-variant
+    /// filtering, so they see `TurnFinished` directly.
     TurnFinished {
         /// Why the model stopped this turn.
         reason: FinishReason,
@@ -222,9 +235,19 @@ pub enum FinishReason {
 
 /// Token counters reported by the provider for a turn.
 ///
-/// Aggregated to the run level by the engine and surfaced on
-/// [`StreamChunk::RunFinished`] / [`StreamChunk::TurnFinished`]. Fields
-/// not surfaced by a given provider stay at `0`.
+/// Aggregated to the run level by the engine. A stream consumer
+/// iterating `Conversation::stream_with_options` only sees the run
+/// total on [`StreamChunk::RunFinished::usage`]; per-turn `Usage`
+/// rides on [`StreamChunk::TurnFinished::usage`], which is exposed to
+/// [`crate::ChatMiddleware::on_chunk`] but filtered out of the public
+/// stream (see the variant docs for the rationale). Fields not
+/// surfaced by a given provider stay at `0`.
+///
+/// Use [`StreamChunk::RunFinished::usage`] for end-of-run totals;
+/// reach for the middleware path when per-turn metrics matter — a
+/// context-size indicator built from the final turn's `input_tokens`,
+/// per-turn latency or service-tier attribution, online tokenizer
+/// calibration, and similar uses.
 #[derive(Debug, Default, Clone, Copy)]
 #[non_exhaustive]
 pub struct Usage {
