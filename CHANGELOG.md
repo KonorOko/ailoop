@@ -72,6 +72,18 @@ and this project adheres to
   cleanup before the future is dropped, and `JoinSet` fan-out that
   wants to distribute `child_token()` to siblings.
 
+### Changed
+
+- Docstrings for `StreamChunk::TurnFinished` and `Usage` now make
+  explicit that the per-turn variant is visible to `ChatMiddleware`
+  implementations only — the engine accumulates its `usage` into the
+  run total and drops the chunk before the public stream, so stream
+  consumers see aggregated `Usage` on `RunFinished.usage`, never the
+  per-turn variant. Middleware path points to `on_chunk` for cases
+  that need per-turn data (context-size indicator from the final
+  turn's `input_tokens`, per-turn latency or service-tier attribution,
+  online tokenizer calibration).
+
 ### Changed (BREAKING)
 
 - `ToolContext::new` gained a trailing `cancellation: CancellationToken`
