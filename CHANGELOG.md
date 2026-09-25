@@ -54,6 +54,24 @@ and this project adheres to
   `ConversationBuilder::with_history` (including after
   `from_snapshot`), and is not persisted in `ConversationSnapshot`.
   `estimated_tokens()` is unchanged.
+- `History::force_compact()`: runs the compaction strategy regardless
+  of the token budget. It is for the case where the estimate said the
+  history fits and the provider disagreed, for example after a
+  context-window overflow. It returns the same `CompactionReport` and
+  errors as `compact_if_needed`. The strategy may still be unable to
+  shrink the history (everything before the preserved tail is pinned,
+  or the tail itself is what does not fit), so compare
+  `estimated_tokens()` before and after when that matters.
+  `compact_if_needed` now delegates to it.
+- `History::needs_compaction()`: exposes the budget check
+  `compact_if_needed` runs (`estimated_tokens() >= max_tokens -
+  reserved_tokens`) without running the strategy.
+- `History::replace_messages(messages, pinned)`: the in-place
+  counterpart of `History::from_messages`. It swaps the message vector
+  and pin mask and keeps the budget, strategy and tokenizer. Useful
+  for rolling back to a captured state or loading a snapshot into a
+  live history. If the lengths differ it returns
+  `FromMessagesError::LengthMismatch` and leaves the history untouched.
 - Re-export `CacheControl`, `SystemBlock`, `SystemPrompt`, and
   `ToolResultBlock` from the `ailoop` façade. Downstream crates that
   write custom `ChatMiddleware`s (setting `SystemPrompt::Blocks` with
