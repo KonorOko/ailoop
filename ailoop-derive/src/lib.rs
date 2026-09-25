@@ -532,7 +532,7 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
     // generated `Tool::call` still receives a `_ctx: &ToolContext`
     // (silently ignored) so the trait signature is uniform.
     let total_inputs = input_fn.sig.inputs.len();
-    let takes_ctx = match input_fn.sig.inputs.iter().last() {
+    let takes_ctx = match input_fn.sig.inputs.iter().next_back() {
         Some(syn::FnArg::Typed(pat_type)) => is_tool_context_ref(&pat_type.ty),
         _ => false,
     };
