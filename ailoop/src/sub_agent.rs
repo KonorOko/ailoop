@@ -389,6 +389,18 @@ fn budget_label(reason: &AbortReason) -> &'static str {
 /// config, so a parent abort still cuts a child mid-run regardless of
 /// per-call budget.
 ///
+/// # Usage
+///
+/// Every token the child spends — its own provider turns and those of
+/// any sub-agent it calls in turn — is reported to the parent through
+/// [`ToolContext::report_usage`] as it is spent, so the parent's
+/// [`RunFinished::usage`] / [`RunOutcome::usage`](crate::RunOutcome::usage)
+/// include it. That holds when the child aborts (its own `timeout`,
+/// `max_iterations`, or a wrap-up) and when the parent aborts while
+/// the child is still running: the turns completed before the cutoff
+/// count. Don't add the child's usage yourself; it is already in the
+/// parent's total.
+///
 /// # Multimodal input
 ///
 /// The JSON schema accepts an optional `attachments` array alongside
@@ -420,6 +432,8 @@ fn budget_label(reason: &AbortReason) -> &'static str {
 ///
 /// [`child_token`]: tokio_util::sync::CancellationToken::child_token
 /// [`ToolContext::cancellation`]: ailoop_tools::ToolContext::cancellation
+/// [`ToolContext::report_usage`]: ailoop_tools::ToolContext::report_usage
+/// [`RunFinished::usage`]: ailoop_core::StreamChunk::RunFinished::usage
 ///
 /// # Examples
 ///
@@ -605,6 +619,11 @@ where
         };
 
         let mut options = RunOptions::new().cancellation(ctx.cancellation().child_token());
+        // The child's engine forwards every token it spends (its own
+        // turns and its nested sub-agents) into our sink as it happens,
+        // so the parent's total includes it even on aborts. Reporting
+        // `outcome.usage` again here would double count.
+        options.usage_parent = Some(ctx.usage_sink().clone());
         if let Some(timeout) = self.config.timeout {
             options = options.timeout(timeout);
         }
@@ -680,7 +699,7 @@ mod tests {
         CancellationToken, ChatMiddleware, ChatRequest, HookAction, Message, RunConfig, RunId,
         Source, StepId, StreamChunk, Usage,
     };
-    use ailoop_tools::ToolActivation;
+    use ailoop_tools::{ToolActivation, UsageSink};
     use std::sync::{Arc, Mutex as StdMutex};
 
     fn one_text_turn(text: &str) -> Vec<StreamChunk> {
@@ -1619,5 +1638,160 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2, "the wrap-up request was sent");
         assert_eq!(requests[1].tool_choice, Some(ToolChoice::None_));
+    }
+
+    fn tokens(input: u32, output: u32) -> Usage {
+        let mut u = Usage::default();
+        u.input_tokens = input;
+        u.output_tokens = output;
+        u
+    }
+
+    fn text_turn_with(text: &str, usage: Usage) -> Vec<StreamChunk> {
+        vec![
+            StreamChunk::TextDelta { delta: text.into() },
+            StreamChunk::TurnFinished {
+                reason: FinishReason::EndTurn,
+                usage,
+                service_tier: None,
+            },
+        ]
+    }
+
+    fn call_turn_with(tool: &str, args: Value, usage: Usage) -> Vec<StreamChunk> {
+        vec![
+            StreamChunk::ToolCallStarted {
+                id: "toolu_1".into(),
+                name: tool.into(),
+            },
+            StreamChunk::ToolCallFinished {
+                id: "toolu_1".into(),
+                name: tool.into(),
+                args,
+            },
+            StreamChunk::TurnFinished {
+                reason: FinishReason::ToolUse,
+                usage,
+                service_tier: None,
+            },
+        ]
+    }
+
+    fn io(u: Usage) -> (u32, u32) {
+        (u.input_tokens, u.output_tokens)
+    }
+
+    /// The parent's run usage includes what the child spent, exactly
+    /// once.
+    #[tokio::test]
+    async fn parent_run_usage_includes_child_usage() {
+        let child = Conversation::builder(ScriptedModel::new([text_turn_with(
+            "child answer",
+            tokens(100, 20),
+        )]))
+        .build()
+        .expect("build");
+        let tool = SubAgentTool::new("delegate", "delegate", child);
+
+        let parent_model = ScriptedModel::new([
+            call_turn_with("delegate", json!({"prompt": "go"}), tokens(10, 1)),
+            text_turn_with("done", tokens(5, 2)),
+        ]);
+        let mut parent = Conversation::builder(parent_model)
+            .tool_dyn(Arc::new(tool))
+            .build()
+            .expect("build");
+
+        let outcome = parent.run("start").await.expect("run");
+        assert!(matches!(outcome.finish_reason, FinishReason::EndTurn));
+        assert_eq!(io(outcome.usage), (115, 23));
+    }
+
+    /// A child aborted by its own timeout still reports what it spent
+    /// before the cutoff.
+    #[tokio::test]
+    async fn child_aborted_by_timeout_reports_partial_usage() {
+        let mut first = lookup_turn();
+        if let Some(StreamChunk::TurnFinished { usage, .. }) = first.last_mut() {
+            *usage = tokens(100, 20);
+        }
+        let (model, _) = Recording::new(vec![first, text_turn_with("never", tokens(1, 1))]);
+        let tool = SubAgentTool::with_config(
+            "delegate",
+            "delegate",
+            child(model, Duration::from_secs(60)),
+            SubAgentConfig::new().timeout(Duration::from_millis(50)),
+        );
+
+        let sink = UsageSink::new();
+        let ctx = ToolContext::detached().with_usage_sink(sink.clone());
+        let result = tool.call(json!({"prompt": "research"}), &ctx).await;
+
+        assert!(result.is_error, "child should have timed out");
+        assert_eq!(io(sink.total()), (100, 20));
+    }
+
+    /// When the parent aborts while the child is still running, the
+    /// child's completed turns are in the parent's aborted total.
+    #[tokio::test]
+    async fn parent_timeout_mid_child_keeps_child_usage() {
+        let mut first = lookup_turn();
+        if let Some(StreamChunk::TurnFinished { usage, .. }) = first.last_mut() {
+            *usage = tokens(100, 20);
+        }
+        let (model, _) = Recording::new(vec![first, text_turn_with("never", tokens(1, 1))]);
+        let tool = SubAgentTool::new(
+            "delegate",
+            "delegate",
+            child(model, Duration::from_secs(60)),
+        );
+
+        let parent_model = ScriptedModel::new([
+            call_turn_with("delegate", json!({"prompt": "go"}), tokens(10, 1)),
+            text_turn_with("never", tokens(5, 2)),
+        ]);
+        let mut parent = Conversation::builder(parent_model)
+            .tool_dyn(Arc::new(tool))
+            .build()
+            .expect("build");
+
+        let outcome = parent
+            .run_with_options(
+                "start",
+                RunOptions::new().timeout(Duration::from_millis(50)),
+            )
+            .await
+            .expect("run");
+        assert!(matches!(
+            outcome.finish_reason,
+            FinishReason::Aborted(AbortReason::Timeout(_))
+        ));
+        assert_eq!(io(outcome.usage), (110, 21));
+    }
+
+    /// A sub-agent's own sub-agent rolls up to the outermost caller.
+    #[tokio::test]
+    async fn nested_sub_agent_usage_rolls_up() {
+        let grandchild = Conversation::builder(ScriptedModel::new([text_turn_with(
+            "leaf",
+            tokens(1000, 300),
+        )]))
+        .build()
+        .expect("build");
+        let child = Conversation::builder(ScriptedModel::new([
+            call_turn_with("deeper", json!({"prompt": "dig"}), tokens(100, 20)),
+            text_turn_with("mid", tokens(50, 10)),
+        ]))
+        .tool_dyn(Arc::new(SubAgentTool::new("deeper", "deeper", grandchild)))
+        .build()
+        .expect("build");
+        let tool = SubAgentTool::new("delegate", "delegate", child);
+
+        let sink = UsageSink::new();
+        let ctx = ToolContext::detached().with_usage_sink(sink.clone());
+        let result = tool.call(json!({"prompt": "go"}), &ctx).await;
+
+        assert_eq!(result.as_text(), Some("mid"));
+        assert_eq!(io(sink.total()), (1150, 330));
     }
 }

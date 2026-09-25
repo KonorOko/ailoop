@@ -9,10 +9,15 @@
 //! plumbing on the user side, no middleware to filter `req.tools`.
 //!
 //! The handle is per-run, so two concurrent runs do not share state.
+//!
+//! Tools that spend tokens outside the engine's own provider turns (a
+//! sub-agent, a tool that calls an LLM directly) report that spend
+//! through [`ToolContext::report_usage`]; the engine folds it into the
+//! run total on `RunFinished.usage`. See [`UsageSink`].
 
 use std::sync::{Arc, Mutex};
 
-use ailoop_core::{RunId, StepId, ToolDefinition};
+use ailoop_core::{RunId, StepId, ToolDefinition, Usage};
 use indexmap::{IndexMap, IndexSet};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -47,6 +52,7 @@ pub struct ToolContext {
     step_id: StepId,
     activation: ToolActivation,
     cancellation: CancellationToken,
+    usage: UsageSink,
 }
 
 impl ToolContext {
@@ -64,7 +70,17 @@ impl ToolContext {
             step_id,
             activation,
             cancellation,
+            usage: UsageSink::new(),
         }
+    }
+
+    /// Replace the [`UsageSink`] that [`Self::report_usage`] writes to.
+    /// The engine calls this on every dispatch so reports land in the
+    /// run's total; standalone callers can pass their own sink to read
+    /// back what a tool reported.
+    pub fn with_usage_sink(mut self, sink: UsageSink) -> Self {
+        self.usage = sink;
+        self
     }
 
     /// Build a detached context with synthetic identifiers, a no-op
@@ -78,6 +94,7 @@ impl ToolContext {
             step_id: StepId::new(),
             activation: ToolActivation::detached(),
             cancellation: CancellationToken::new(),
+            usage: UsageSink::new(),
         }
     }
 
@@ -136,6 +153,87 @@ impl ToolContext {
     /// [to]: ailoop_core::RunConfig::timeout
     pub fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
+    }
+
+    /// Report tokens this tool spent outside the engine's own provider
+    /// turns — typically a tool that calls an LLM itself. The engine
+    /// adds the report to the run's [`Usage`] total, so it shows up in
+    /// `RunFinished.usage` / `RunOutcome.usage`.
+    ///
+    /// Reports count as soon as they are made: if the run aborts
+    /// (timeout, cancellation) and the tool future is dropped
+    /// afterwards, what was already reported stays in the aborted
+    /// run's total. Report each spend once; the engine does not
+    /// deduplicate. `ailoop::SubAgentTool` reports its child run's usage
+    /// automatically.
+    ///
+    /// On a [`Self::detached`] context the report only accumulates in
+    /// the context's own sink (readable via [`Self::usage_sink`]).
+    pub fn report_usage(&self, usage: Usage) {
+        self.usage.report(usage);
+    }
+
+    /// Sink behind [`Self::report_usage`]. Hand a clone to a nested run
+    /// or a spawned task that needs to report on the tool's behalf.
+    pub fn usage_sink(&self) -> &UsageSink {
+        &self.usage
+    }
+}
+
+/// Shared accumulator for [`Usage`] reported by tools.
+///
+/// Cheap to clone (`Arc` internally); every clone adds into the same
+/// total. A sink built with [`Self::forwarding_to`] also adds every
+/// report into its parent, so usage spent by nested runs rolls up to
+/// the outermost run as it happens rather than at the end.
+#[derive(Clone, Default)]
+pub struct UsageSink {
+    inner: Arc<UsageSinkInner>,
+}
+
+#[derive(Default)]
+struct UsageSinkInner {
+    total: Mutex<Usage>,
+    parent: Option<UsageSink>,
+}
+
+impl UsageSink {
+    /// Standalone sink with a zero total.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sink with a zero total that also forwards every report into
+    /// `parent` (and, transitively, into the parent's parents).
+    pub fn forwarding_to(parent: UsageSink) -> Self {
+        Self {
+            inner: Arc::new(UsageSinkInner {
+                total: Mutex::new(Usage::default()),
+                parent: Some(parent),
+            }),
+        }
+    }
+
+    /// Add `usage` to this sink's total and to every parent's.
+    pub fn report(&self, usage: Usage) {
+        *self.inner.total.lock().expect("UsageSink lock") += usage;
+        if let Some(parent) = &self.inner.parent {
+            parent.report(usage);
+        }
+    }
+
+    /// Sum of every report made to this sink (and its clones) so far.
+    pub fn total(&self) -> Usage {
+        *self.inner.total.lock().expect("UsageSink lock")
+    }
+}
+
+impl std::fmt::Debug for UsageSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UsageSink")
+            .field("total", &self.total())
+            .field("forwarding", &self.inner.parent.is_some())
+            .finish()
     }
 }
 
@@ -397,5 +495,42 @@ mod tests {
         assert!(!cloned.is_cancelled());
         token.cancel();
         assert!(cloned.is_cancelled());
+    }
+
+    fn tokens(input: u32, output: u32) -> Usage {
+        let mut u = Usage::default();
+        u.input_tokens = input;
+        u.output_tokens = output;
+        u
+    }
+
+    #[test]
+    fn report_usage_accumulates_in_the_context_sink() {
+        let ctx = ToolContext::detached();
+        ctx.report_usage(tokens(10, 2));
+        ctx.report_usage(tokens(5, 1));
+        let total = ctx.usage_sink().total();
+        assert_eq!((total.input_tokens, total.output_tokens), (15, 3));
+    }
+
+    #[test]
+    fn with_usage_sink_routes_reports_to_the_supplied_sink() {
+        let sink = UsageSink::new();
+        let ctx = ToolContext::detached().with_usage_sink(sink.clone());
+        ctx.report_usage(tokens(7, 3));
+        assert_eq!(sink.total().input_tokens, 7);
+    }
+
+    #[test]
+    fn forwarding_sink_propagates_to_every_ancestor() {
+        let root = UsageSink::new();
+        let mid = UsageSink::forwarding_to(root.clone());
+        let leaf = UsageSink::forwarding_to(mid.clone());
+        leaf.report(tokens(4, 1));
+        mid.report(tokens(1, 1));
+        assert_eq!(leaf.total().input_tokens, 4);
+        assert_eq!(mid.total().input_tokens, 5);
+        assert_eq!(root.total().input_tokens, 5);
+        assert_eq!(root.total().output_tokens, 2);
     }
 }

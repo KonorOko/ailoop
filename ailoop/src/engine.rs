@@ -10,7 +10,9 @@ use ailoop_core::{
     ToolDecision, ToolResultContent, Usage, UserBlock,
 };
 use ailoop_history::{CompactionError, CompactionReport, History};
-use ailoop_tools::{ToolActivation, ToolContext, ToolRegistry, errors::ToolRegistryError};
+use ailoop_tools::{
+    ToolActivation, ToolContext, ToolRegistry, UsageSink, errors::ToolRegistryError,
+};
 use async_stream::try_stream;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
@@ -310,6 +312,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
         tools,
         config,
         |_| false,
+        None,
     ))
 }
 
@@ -317,7 +320,10 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
 /// appends to `history` in place and commits on `RunFinished`; on `Err`
 /// or when the stream is dropped mid-run, `history` is rolled back to
 /// its state at the call. `is_overflow` classifies model setup errors
-/// for [`ContextOptions::recover_from_overflow`].
+/// for [`ContextOptions::recover_from_overflow`]. `usage_parent`, when
+/// set, receives every token this run spends (own turns and tool
+/// reports) as it happens; `SubAgentTool` passes its own
+/// `ToolContext::usage_sink` here.
 pub(crate) fn run_with_history<'a, M: CompletionModel + Sync + Send>(
     model: &'a M,
     history: &'a mut History,
@@ -325,6 +331,7 @@ pub(crate) fn run_with_history<'a, M: CompletionModel + Sync + Send>(
     config: RunConfig,
     options: ContextOptions,
     is_overflow: fn(&M::Error) -> bool,
+    usage_parent: Option<UsageSink>,
 ) -> EngineStream<'a, M::Error> {
     let rollback = Some((history.messages().to_vec(), history.pinned().to_vec()));
     let managed = ManagedHistory {
@@ -338,6 +345,7 @@ pub(crate) fn run_with_history<'a, M: CompletionModel + Sync + Send>(
         tools,
         config,
         is_overflow,
+        usage_parent,
     )
 }
 
@@ -347,6 +355,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
     tools: &'a ToolRegistry,
     config: RunConfig,
     is_overflow: fn(&M::Error) -> bool,
+    usage_parent: Option<UsageSink>,
 ) -> EngineStream<'a, M::Error> {
     let mut run_msgs = RunMessages {
         context,
@@ -368,6 +377,15 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
     // forever. Built once outside the loop and cloned per dispatch so
     // every tool sees the same handle.
     let tool_cancellation = config.cancellation.clone().unwrap_or_default();
+    // Usage tools report through `ToolContext::report_usage` (e.g. a
+    // sub-agent's child run). Reports land here the moment they are
+    // made, so an abort that drops a tool mid-call still counts what
+    // it already spent. When this run is itself a sub-agent, the sink
+    // forwards into the parent's, and so on up to the outermost run.
+    let delegated = match &usage_parent {
+        Some(parent) => UsageSink::forwarding_to(parent.clone()),
+        None => UsageSink::new(),
+    };
     let stream = try_stream! {
         // The abort future resolves with a textual reason when either
         // the timeout elapses or the cancellation token fires; until
@@ -412,6 +430,8 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
 
         let mut iteration = 0;
         let mut finish_reason = FinishReason::EndTurn;
+        // Spend of this run's own provider turns. The run total adds
+        // `delegated` (tool reports) wherever `RunFinished` is built.
         let mut usage_run = Usage::default();
         // Cleared for the rest of the run once a proactive compaction
         // fails to bring the history under budget: with the built-in
@@ -428,7 +448,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 // looping, so the run's messages have no dangling tool_use.
                 let new_messages = run_msgs.finish();
                 let chunk = fire_abort_hooks(
-                    &config.middlewares, &run_id, AbortReason::MaxIterations(config.max_iterations), usage_run, new_messages,
+                    &config.middlewares, &run_id, AbortReason::MaxIterations(config.max_iterations), usage_run + delegated.total(), new_messages,
                 ).await;
                 yield chunk;
                 return;
@@ -443,7 +463,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     Err(reason) => {
                         let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
                         ).await;
                         yield chunk;
                         return;
@@ -508,7 +528,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 if let Some(reason) = aborted {
                     let new_messages = run_msgs.finish();
                     let chunk = fire_abort_hooks(
-                        &config.middlewares, &run_id, reason, usage_run, new_messages,
+                        &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
                     ).await;
                     yield chunk;
                     return;
@@ -520,7 +540,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     Err(reason) => {
                         let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
                         ).await;
                         yield chunk;
                         return;
@@ -545,7 +565,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     Err(reason) => {
                         let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
                         ).await;
                         yield chunk;
                         return;
@@ -581,7 +601,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         }
                         let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
                         ).await;
                         yield chunk;
                         return;
@@ -656,6 +676,12 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     StreamChunk::TurnFinished { reason, usage, .. } => {
                         finish_reason = reason.clone();
                         usage_run += *usage;
+                        // Forward this run's own spend to an enclosing
+                        // run (sub-agent) as it happens, so it counts
+                        // there even if this run is later dropped.
+                        if let Some(parent) = &usage_parent {
+                            parent.report(*usage);
+                        }
                         continue;
                     },
                     _=> ()
@@ -714,7 +740,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     }
                     let new_messages = run_msgs.finish();
                     let chunk = fire_abort_hooks(
-                        &config.middlewares, &run_id, abort_reason, usage_run, new_messages,
+                        &config.middlewares, &run_id, abort_reason, usage_run + delegated.total(), new_messages,
                     ).await;
                     yield chunk;
                     return;
@@ -731,7 +757,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         }
                         let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
                         ).await;
                         yield chunk;
                         return;
@@ -745,7 +771,8 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                             step_id.clone(),
                             ToolActivation::new(catalog.clone(), active_snapshot.clone()),
                             tool_cancellation.clone(),
-                        );
+                        )
+                        .with_usage_sink(delegated.clone());
                         let call_result = race_abort(
                             tools.tool_call_with_ctx(&name, args.clone(), &ctx),
                             &mut abort_fut,
@@ -770,7 +797,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                                 }
                                 let new_messages = run_msgs.finish();
                                 let chunk = fire_abort_hooks(
-                                    &config.middlewares, &run_id, reason, usage_run, new_messages,
+                                    &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
                                 ).await;
                                 yield chunk;
                                 return;
@@ -787,7 +814,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         let new_messages = run_msgs.finish();
                         let reason = AbortReason::ToolTerminated { tool_name: name.clone(), reason };
                         let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
                         ).await;
                         yield chunk;
                         return;
@@ -812,7 +839,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
                         let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
                         ).await;
                         yield chunk;
                         return;
@@ -831,7 +858,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
                         let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
                         ).await;
                         yield chunk;
                         return;
@@ -870,7 +897,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         }
                         let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
                         ).await;
                         yield chunk;
                         return;
@@ -911,15 +938,16 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
         }
 
         let new_messages = run_msgs.finish();
+        let usage_total = usage_run + delegated.total();
 
         for mw in &config.middlewares {
-            mw.on_run_finished(&run_id, &finish_reason, &usage_run, &new_messages).await;
+            mw.on_run_finished(&run_id, &finish_reason, &usage_total, &new_messages).await;
         }
 
         let mut chunk = StreamChunk::RunFinished {
             run_id: run_id.clone(),
             reason: finish_reason,
-            usage: usage_run,
+            usage: usage_total,
             new_messages,
         };
         for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
@@ -1485,5 +1513,125 @@ mod tests {
             user_tool_result_ids.contains(&"toolu_a"),
             "first tool's ToolResult must be preserved in history, got {user_tool_result_ids:?}"
         );
+    }
+
+    fn tokens(input: u32, output: u32) -> Usage {
+        let mut u = Usage::default();
+        u.input_tokens = input;
+        u.output_tokens = output;
+        u
+    }
+
+    fn weather_call_turn(usage: Usage) -> Vec<StreamChunk> {
+        vec![
+            StreamChunk::ToolCallStarted {
+                id: "toolu_1".into(),
+                name: "get_weather".into(),
+            },
+            StreamChunk::ToolCallFinished {
+                id: "toolu_1".into(),
+                name: "get_weather".into(),
+                args: json!({}),
+            },
+            StreamChunk::TurnFinished {
+                reason: FinishReason::ToolUse,
+                usage,
+                service_tier: None,
+            },
+        ]
+    }
+
+    fn end_turn(usage: Usage) -> Vec<StreamChunk> {
+        vec![StreamChunk::TurnFinished {
+            reason: FinishReason::EndTurn,
+            usage,
+            service_tier: None,
+        }]
+    }
+
+    /// Stand-in for a tool that calls an LLM itself: reports `usage`,
+    /// then takes `delay` to answer.
+    struct ReportingWeather {
+        usage: Usage,
+        delay: std::time::Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolDyn for ReportingWeather {
+        fn name(&self) -> String {
+            "get_weather".into()
+        }
+        fn tool_definition(&self) -> ToolDefinition {
+            GetWeather.tool_definition()
+        }
+        async fn call(&self, _: serde_json::Value, ctx: &ToolContext) -> ToolResultContent {
+            ctx.report_usage(self.usage);
+            tokio::time::sleep(self.delay).await;
+            ToolResultContent::text("sunny")
+        }
+    }
+
+    async fn run_finished(
+        model: &ScriptedModel,
+        tool: Arc<dyn ToolDyn>,
+        config: RunConfig,
+    ) -> (FinishReason, Usage) {
+        let mut registry = ToolRegistry::new();
+        registry.register(tool).unwrap();
+        let stream = run_chat(model, vec![Message::user("hi")], &registry, config)
+            .await
+            .expect("run_chat should start");
+        stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .find_map(|c| match c {
+                Ok(StreamChunk::RunFinished { reason, usage, .. }) => Some((reason, usage)),
+                _ => None,
+            })
+            .expect("run should emit RunFinished")
+    }
+
+    /// A tool that reports nothing leaves `RunFinished.usage` as the
+    /// plain sum of the run's own turns.
+    #[tokio::test]
+    async fn run_usage_is_sum_of_turns_when_no_tool_reports() {
+        let model = ScriptedModel::new([weather_call_turn(tokens(10, 1)), end_turn(tokens(20, 2))]);
+        let (reason, usage) =
+            run_finished(&model, Arc::new(GetWeather), RunConfig::default()).await;
+        assert!(matches!(reason, FinishReason::EndTurn));
+        assert_eq!((usage.input_tokens, usage.output_tokens), (30, 3));
+    }
+
+    /// Usage a tool reports through `ToolContext::report_usage` is
+    /// added to the run total.
+    #[tokio::test]
+    async fn tool_reported_usage_is_added_to_run_usage() {
+        let model = ScriptedModel::new([weather_call_turn(tokens(10, 1)), end_turn(tokens(20, 2))]);
+        let tool = ReportingWeather {
+            usage: tokens(100, 40),
+            delay: std::time::Duration::ZERO,
+        };
+        let (_, usage) = run_finished(&model, Arc::new(tool), RunConfig::default()).await;
+        assert_eq!((usage.input_tokens, usage.output_tokens), (130, 43));
+    }
+
+    /// A report made before the run times out and drops the tool
+    /// future still counts in the aborted run's total.
+    #[tokio::test]
+    async fn tool_reported_usage_survives_timeout_abort() {
+        let model = ScriptedModel::new([weather_call_turn(tokens(10, 1)), end_turn(tokens(20, 2))]);
+        let tool = ReportingWeather {
+            usage: tokens(100, 40),
+            delay: std::time::Duration::from_secs(60),
+        };
+        let mut config = RunConfig::default();
+        config.timeout = Some(std::time::Duration::from_millis(50));
+        let (reason, usage) = run_finished(&model, Arc::new(tool), config).await;
+        assert!(
+            matches!(reason, FinishReason::Aborted(AbortReason::Timeout(_))),
+            "expected timeout abort, got {reason:?}"
+        );
+        assert_eq!((usage.input_tokens, usage.output_tokens), (110, 41));
     }
 }
