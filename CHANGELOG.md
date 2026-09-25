@@ -10,6 +10,33 @@ and this project adheres to
 
 ### Added
 
+- `ProviderError` trait (in `ailoop-core`, re-exported from `ailoop`)
+  with `is_context_overflow()`, which defaults to `false`. It answers
+  "did the provider reject this prompt because it does not fit the
+  context window?" without the caller knowing the adapter's error type.
+  This lets the engine and `Conversation` compact the history and try
+  again in a later release. The trait is separate from `Retryable`:
+  overflow is `Permanent` for `RetryingModel`, because resending the
+  same prompt fails the same way, but a caller that owns the history
+  can still recover. `AnthropicError`, `AzureOpenAIError`, and
+  `testing::ScriptedError` implement it. `ScriptedError` reports an
+  overflow when its message contains `"context_overflow"`.
+- `AnthropicApiErrorKind::ContextOverflow`: a 400
+  `invalid_request_error` whose message contains "prompt is too long",
+  which the API returns when the input exceeds the model's context
+  window. It was classified as `InvalidRequest`, so it could not be told
+  apart from other validation failures. It is detected for both HTTP
+  error envelopes and mid-stream error events. The new
+  `AnthropicApiErrorKind::from_error(type, message)` does the
+  message-aware mapping. `from_error_type` is unchanged and still
+  returns `InvalidRequest`, because the type alone cannot distinguish
+  the two. Other `invalid_request_error`s stay `InvalidRequest`.
+- `AzureOpenAIApiErrorKind::ContextOverflow`: `error.code ==
+  "context_length_exceeded"`. It was captured as
+  `Other("context_length_exceeded")`, which `RetryingModel` treated as
+  transient, so a prompt that could never fit was resent up to
+  `max_attempts` times. It is now `Permanent`.
+
 - `HistoryBuilder::reserved_tokens(n)` (default 0): headroom subtracted
   from `max_tokens` before `History::compact_if_needed` compares it with
   `estimated_tokens()`. The estimate counts only the history's messages,

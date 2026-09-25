@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ailoop_core::{RetryClassification, Retryable};
+use ailoop_core::{ProviderError, RetryClassification, Retryable};
 use reqwest::StatusCode;
 
 /// Discriminated category of an HTTP-level Anthropic API error, derived
@@ -22,6 +22,19 @@ pub enum AnthropicApiErrorKind {
     /// validation failure. Permanent — retrying without changes
     /// produces the same error.
     InvalidRequest,
+    /// `invalid_request_error` whose message reports that the prompt
+    /// does not fit the model's context window (`"prompt is too
+    /// long"`, HTTP 400). Split out of
+    /// [`InvalidRequest`](Self::InvalidRequest) so callers can react
+    /// by compacting the history. Permanent for
+    /// [`RetryingModel`](ailoop_core::RetryingModel): resending the
+    /// same prompt fails the same way; recovery needs the history,
+    /// which lives above the model.
+    ///
+    /// Only produced by [`from_error`](Self::from_error), which sees
+    /// the message; [`from_error_type`](Self::from_error_type) alone
+    /// cannot tell it apart from `InvalidRequest`.
+    ContextOverflow,
     /// `authentication_error` — missing or invalid API key.
     /// Permanent.
     Authentication,
@@ -60,6 +73,23 @@ impl AnthropicApiErrorKind {
             other => Self::Other(other.to_string()),
         }
     }
+
+    /// Like [`from_error_type`](Self::from_error_type), but also reads
+    /// the message to tell a context-window overflow apart from other
+    /// validation failures. Anthropic reports both as
+    /// `invalid_request_error`; the overflow is recognised by its
+    /// documented `"prompt is too long"` message (matched
+    /// case-insensitively, since the API appends token counts).
+    pub fn from_error(error_type: &str, message: &str) -> Self {
+        match Self::from_error_type(error_type) {
+            Self::InvalidRequest if is_prompt_too_long(message) => Self::ContextOverflow,
+            kind => kind,
+        }
+    }
+}
+
+fn is_prompt_too_long(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("prompt is too long")
 }
 
 /// Failure surface of [`AnthropicModel::chat_stream`](crate::AnthropicModel)
@@ -148,6 +178,7 @@ fn classify_kind(
         AnthropicApiErrorKind::Authentication
         | AnthropicApiErrorKind::Permission
         | AnthropicApiErrorKind::InvalidRequest
+        | AnthropicApiErrorKind::ContextOverflow
         | AnthropicApiErrorKind::NotFound
         | AnthropicApiErrorKind::RequestTooLarge => RetryClassification::Permanent,
     }
@@ -174,8 +205,30 @@ impl Retryable for AnthropicError {
     }
 }
 
+impl ProviderError for AnthropicError {
+    /// `true` for [`AnthropicApiErrorKind::ContextOverflow`], whether it
+    /// arrived as an HTTP error envelope or as a mid-stream error event.
+    fn is_context_overflow(&self) -> bool {
+        matches!(
+            self,
+            AnthropicError::Api {
+                kind: AnthropicApiErrorKind::ContextOverflow,
+                ..
+            } | AnthropicError::Provider {
+                kind: AnthropicApiErrorKind::ContextOverflow,
+                ..
+            }
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ailoop_core::{ChatRequest, CompletionModel, RetryConfig, RetryingModel, StreamChunk};
+    use futures::stream::BoxStream;
+
     use super::*;
 
     #[test]
@@ -232,6 +285,67 @@ mod tests {
     }
 
     #[test]
+    fn context_overflow_is_permanent() {
+        let err = AnthropicError::Api {
+            status: StatusCode::BAD_REQUEST,
+            kind: AnthropicApiErrorKind::ContextOverflow,
+            message: "prompt is too long: 1048577 tokens > 1000000 maximum".into(),
+            retry_after: None,
+        };
+        assert_eq!(err.retry_classification(), RetryClassification::Permanent);
+    }
+
+    #[test]
+    fn provider_error_flags_only_context_overflow() {
+        let http = AnthropicError::Api {
+            status: StatusCode::BAD_REQUEST,
+            kind: AnthropicApiErrorKind::ContextOverflow,
+            message: "prompt is too long".into(),
+            retry_after: None,
+        };
+        let event = AnthropicError::Provider {
+            kind: AnthropicApiErrorKind::ContextOverflow,
+            message: "prompt is too long".into(),
+        };
+        let other = AnthropicError::Api {
+            status: StatusCode::BAD_REQUEST,
+            kind: AnthropicApiErrorKind::InvalidRequest,
+            message: "bad field".into(),
+            retry_after: None,
+        };
+        assert!(http.is_context_overflow());
+        assert!(event.is_context_overflow());
+        assert!(!other.is_context_overflow());
+    }
+
+    #[test]
+    fn from_error_splits_overflow_from_other_invalid_requests() {
+        assert_eq!(
+            AnthropicApiErrorKind::from_error("invalid_request_error", "prompt is too long"),
+            AnthropicApiErrorKind::ContextOverflow,
+        );
+        assert_eq!(
+            AnthropicApiErrorKind::from_error(
+                "invalid_request_error",
+                "Prompt is too long: 1048577 tokens > 1000000 maximum",
+            ),
+            AnthropicApiErrorKind::ContextOverflow,
+        );
+        assert_eq!(
+            AnthropicApiErrorKind::from_error(
+                "invalid_request_error",
+                "adaptive thinking is not supported on this model",
+            ),
+            AnthropicApiErrorKind::InvalidRequest,
+        );
+        // The phrase only means overflow on an invalid_request_error.
+        assert_eq!(
+            AnthropicApiErrorKind::from_error("api_error", "prompt is too long"),
+            AnthropicApiErrorKind::Api,
+        );
+    }
+
+    #[test]
     fn status_fallback_splits_on_server_vs_client() {
         let server = AnthropicError::Status {
             status: StatusCode::BAD_GATEWAY,
@@ -248,6 +362,83 @@ mod tests {
         assert_eq!(
             client.retry_classification(),
             RetryClassification::Permanent
+        );
+    }
+
+    /// Minimal model whose `chat_stream` setup always fails with the
+    /// error built by `make`, counting calls so tests can observe
+    /// whether [`RetryingModel`](ailoop_core::RetryingModel) reissued it.
+    struct FailingModel {
+        make: fn() -> AnthropicError,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl CompletionModel for FailingModel {
+        type Error = AnthropicError;
+
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn model(&self) -> &str {
+            "failing"
+        }
+
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> Result<BoxStream<'static, Result<StreamChunk, Self::Error>>, Self::Error> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err((self.make)())
+        }
+    }
+
+    async fn calls_through_retrying_model(make: fn() -> AnthropicError) -> usize {
+        let mut config = RetryConfig::default();
+        config.base_delay = Duration::from_millis(1);
+        config.max_delay = Duration::from_millis(1);
+        config.jitter = false;
+        let model = RetryingModel::with_config(
+            FailingModel {
+                make,
+                calls: AtomicUsize::new(0),
+            },
+            config,
+        );
+        assert!(
+            model
+                .chat_stream(ChatRequest::new(vec![], 0))
+                .await
+                .is_err(),
+            "setup must fail",
+        );
+        model.inner().calls.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn retrying_model_does_not_retry_context_overflow() {
+        assert_eq!(
+            calls_through_retrying_model(|| AnthropicError::Api {
+                status: StatusCode::BAD_REQUEST,
+                kind: AnthropicApiErrorKind::ContextOverflow,
+                message: "prompt is too long".into(),
+                retry_after: None,
+            })
+            .await,
+            1
+        );
+        // Control: a transient error on the same harness is retried up
+        // to `max_attempts`, so the assertion above is not vacuous.
+        assert_eq!(
+            calls_through_retrying_model(|| AnthropicError::Api {
+                status: StatusCode::from_u16(529).unwrap(),
+                kind: AnthropicApiErrorKind::Overloaded,
+                message: "busy".into(),
+                retry_after: None,
+            })
+            .await,
+            3
         );
     }
 }

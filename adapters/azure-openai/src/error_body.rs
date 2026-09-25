@@ -144,6 +144,68 @@ mod tests {
         ));
     }
 
+    /// Body returned by Azure OpenAI (API version `2025-04-01-preview`)
+    /// when the input exceeds the deployment's context window, as
+    /// reported on Microsoft Q&A:
+    /// <https://learn.microsoft.com/en-us/answers/questions/2280883/azure-openai-model-gpt-4-1-context-window-exceeded>.
+    const INPUT_EXCEEDS_WINDOW_BODY: &str = r#"{
+        "error": {
+            "message": "Your input exceeds the context window of this model. Please adjust your input and try again.",
+            "type": "invalid_request_error",
+            "param": "input",
+            "code": "context_length_exceeded"
+        }
+    }"#;
+
+    /// Older wording of the same error (messages + `max_tokens` over the
+    /// limit), as surfaced in
+    /// <https://github.com/Azure/azure-sdk-for-python/issues/40986>.
+    const MAX_CONTEXT_LENGTH_BODY: &str = r#"{
+        "error": {
+            "message": "This model's maximum context length is 128000 tokens. However, you requested 1124171 tokens (124171 in the messages, 1000000 in the completion). Please reduce the length of the messages or completion.",
+            "type": "invalid_request_error",
+            "param": "messages",
+            "code": "context_length_exceeded"
+        }
+    }"#;
+
+    #[test]
+    fn classifies_context_length_exceeded_as_context_overflow() {
+        for body in [INPUT_EXCEEDS_WINDOW_BODY, MAX_CONTEXT_LENGTH_BODY] {
+            let err = classify_http_error(StatusCode::BAD_REQUEST, body.into(), None);
+            assert!(
+                matches!(
+                    err,
+                    AzureOpenAIError::Api {
+                        kind: AzureOpenAIApiErrorKind::ContextOverflow,
+                        ..
+                    }
+                ),
+                "got {err:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn other_invalid_request_stays_invalid_request() {
+        let body = r#"{
+            "error": {
+                "message": "Unrecognized request argument supplied: foo",
+                "type": "invalid_request_error",
+                "param": null,
+                "code": "invalid_request_error"
+            }
+        }"#;
+        let err = classify_http_error(StatusCode::BAD_REQUEST, body.into(), None);
+        assert!(matches!(
+            err,
+            AzureOpenAIError::Api {
+                kind: AzureOpenAIApiErrorKind::InvalidRequest,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn unknown_error_code_is_captured_as_other() {
         let body = r#"{"error":{"code":"FutureCode","message":"x"}}"#.to_string();

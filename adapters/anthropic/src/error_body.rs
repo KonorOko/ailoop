@@ -41,7 +41,10 @@ pub(crate) fn classify_http_error(
     match serde_json::from_str::<AnthropicApiErrorBody>(&body) {
         Ok(parsed) => AnthropicError::Api {
             status,
-            kind: AnthropicApiErrorKind::from_error_type(&parsed.error.error_type),
+            kind: AnthropicApiErrorKind::from_error(
+                &parsed.error.error_type,
+                &parsed.error.message,
+            ),
             message: parsed.error.message,
             retry_after,
         },
@@ -115,6 +118,60 @@ mod tests {
             err,
             AnthropicError::Api {
                 kind: AnthropicApiErrorKind::Overloaded,
+                ..
+            }
+        ));
+    }
+
+    /// Wire shape from the Claude API docs: a 400 `invalid_request_error`
+    /// ("prompt is too long") when the input alone exceeds the context
+    /// window. See <https://platform.claude.com/docs/en/build-with-claude/context-windows>
+    /// and <https://platform.claude.com/docs/en/api/errors#error-shapes>.
+    const PROMPT_TOO_LONG_BODY: &str = r#"{
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "prompt is too long: 1048577 tokens > 1000000 maximum"
+        },
+        "request_id": "req_011CSHoEeqs5C35K2UUqR7Fy"
+    }"#;
+
+    #[test]
+    fn classifies_prompt_too_long_as_context_overflow() {
+        let err = classify_http_error(StatusCode::BAD_REQUEST, PROMPT_TOO_LONG_BODY.into(), None);
+        match err {
+            AnthropicError::Api {
+                status,
+                kind,
+                message,
+                ..
+            } => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(kind, AnthropicApiErrorKind::ContextOverflow);
+                assert_eq!(
+                    message,
+                    "prompt is too long: 1048577 tokens > 1000000 maximum"
+                );
+            }
+            other => panic!("expected Api variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_invalid_request_stays_invalid_request() {
+        // Documented validation error from the same page.
+        let body = r#"{
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "This model does not support assistant message prefill. The conversation must end with a user message."
+            }
+        }"#;
+        let err = classify_http_error(StatusCode::BAD_REQUEST, body.into(), None);
+        assert!(matches!(
+            err,
+            AnthropicError::Api {
+                kind: AnthropicApiErrorKind::InvalidRequest,
                 ..
             }
         ));
