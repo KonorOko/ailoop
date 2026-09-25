@@ -77,7 +77,7 @@ async fn approval_request_carries_call_tags_and_user_message() {
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 1, "one gated call");
     let req = &seen[0];
-    assert_eq!(req.tool_name, "delete_file");
+    assert_eq!(req.name, "delete_file");
     assert_eq!(req.args, json!({ "path": "build/" }));
     assert_eq!(&*req.tags, &[ToolTag::Destructive, ToolTag::WritesFiles]);
     assert_eq!(req.run_id, outcome.run_id);

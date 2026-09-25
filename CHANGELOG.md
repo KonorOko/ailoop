@@ -87,7 +87,7 @@ and this project adheres to
 
 - `ApprovalRequest` (re-exported from `ailoop`): what an approval
   callback receives for one gated call. Public fields `run_id`,
-  `step_id`, `tool_name`, `args`, `tags` (the tool's declared tags) and
+  `step_id`, `call_id`, `name` (the tool's wire name), `args`, `tags` (the tool's declared tags) and
   `messages` (the context sent to the model on the step that produced
   the call, after every middleware's `on_chat_request`). The type is
   `#[non_exhaustive]` so more context can be added without breaking
@@ -951,7 +951,7 @@ arguments from its fields:
 
 // After
 .with_approval(|req| async move {
-    ask_human(&req.tool_name, &req.args).await
+    ask_human(&req.name, &req.args).await
 })
 ```
 

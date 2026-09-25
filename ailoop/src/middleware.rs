@@ -167,7 +167,7 @@ impl ChatMiddleware for RequestDefaultsMiddleware {
 ///
 /// Built by [`ApprovalMiddleware`] right before the engine runs the
 /// tool. Fields are public so a callback can read or move them out
-/// directly (`req.tool_name`, `req.args`); the type is
+/// directly (`req.name`, `req.args`); the type is
 /// `#[non_exhaustive]` so new context can be added without breaking
 /// callbacks. Use [`new`](Self::new) plus the `with_*` setters to build
 /// one outside the crate, e.g. to unit-test a verifier.
@@ -258,7 +258,7 @@ pub struct ApprovalRequest {
     /// [`ToolCallInfo`] and on the `ToolResult` chunk.
     pub call_id: String,
     /// Wire name of the tool.
-    pub tool_name: String,
+    pub name: String,
     /// Arguments the tool will run with, after every earlier
     /// middleware's `on_before_tool_call_mut`.
     pub args: Value,
@@ -271,7 +271,7 @@ pub struct ApprovalRequest {
     /// Context sent to the model on the step that produced this call,
     /// as left by every middleware's `on_chat_request` (it can be
     /// compacted or rewritten relative to the stored history). The call
-    /// being approved is not in it — see `tool_name` / `args`. Shared,
+    /// being approved is not in it — see `name` / `args`. Shared,
     /// not copied, between the gated calls of a step.
     pub messages: Arc<[Message]>,
 }
@@ -287,7 +287,7 @@ impl ApprovalRequest {
             run_id: call.run_id,
             step_id: call.step_id,
             call_id: call.call_id,
-            tool_name: call.name,
+            name: call.name,
             args,
             tags: Arc::from([]),
             messages: Arc::from([]),
@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(req.run_id, call.run_id);
         assert_eq!(req.step_id, call.step_id);
         assert_eq!(req.call_id, "toolu_1");
-        assert_eq!(req.tool_name, "rm");
+        assert_eq!(req.name, "rm");
         assert!(req.tags.is_empty());
         assert!(req.messages.is_empty());
     }
