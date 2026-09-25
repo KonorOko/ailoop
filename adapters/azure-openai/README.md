@@ -8,8 +8,8 @@ Streams Azure OpenAI responses through ailoop's unified
 
 - API-key, Bearer, or bring-your-own `TokenProvider` for Entra-ID
   auth
-- Tool use with `parallel_tool_calls` (the inverse of Anthropic's
-  `disable_parallel_tool_use`)
+- Tool use with `parallel_tool_calls` (from
+  `ChatRequest::parallel_tool_use`)
 - Streaming usage with `cached_tokens`
 - Sampling controls (`temperature`, `top_p`, `stop_sequences`) and
   `tool_choice` (with `Any` lowered to `"required"`)

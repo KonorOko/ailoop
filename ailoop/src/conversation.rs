@@ -1038,10 +1038,11 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
-    /// Default `disable_parallel_tool_use` applied to every
-    /// [`ChatRequest`]. See [`Self::temperature`] for precedence rules.
-    pub fn disable_parallel_tool_use(mut self, v: bool) -> Self {
-        self.request_defaults.disable_parallel_tool_use = Some(v);
+    /// Default `parallel_tool_use` applied to every [`ChatRequest`]:
+    /// `false` limits the model to one tool call per turn. See
+    /// [`Self::temperature`] for precedence rules.
+    pub fn parallel_tool_use(mut self, v: bool) -> Self {
+        self.request_defaults.parallel_tool_use = Some(v);
         self
     }
 
@@ -1712,7 +1713,7 @@ mod tests {
     //
     // These exercise the builder shortcuts (`temperature`, `top_p`,
     // `top_k`, `stop_sequences`, `tool_choice`,
-    // `disable_parallel_tool_use`, `max_tokens`, `additional_params`)
+    // `parallel_tool_use`, `max_tokens`, `additional_params`)
     // and the `request_defaults` closure escape hatch. The shape is the
     // same in each test: drive a one-turn `ScriptedModel` through
     // `Conversation::run`, with a `RecordingMiddleware` registered last
@@ -1730,7 +1731,7 @@ mod tests {
         top_k: Option<u32>,
         stop_sequences: Vec<String>,
         tool_choice: Option<ToolChoice>,
-        disable_parallel_tool_use: Option<bool>,
+        parallel_tool_use: Option<bool>,
         reasoning_effort: Option<ReasoningEffort>,
         max_tokens: u32,
         additional_params: Option<serde_json::Value>,
@@ -1749,7 +1750,7 @@ mod tests {
                 top_k: req.top_k,
                 stop_sequences: req.stop_sequences.clone(),
                 tool_choice: req.tool_choice.clone(),
-                disable_parallel_tool_use: req.disable_parallel_tool_use,
+                parallel_tool_use: req.parallel_tool_use,
                 reasoning_effort: req.reasoning_effort,
                 max_tokens: req.max_tokens,
                 additional_params: req.additional_params.clone(),
@@ -1775,7 +1776,7 @@ mod tests {
             .top_k(40)
             .stop_sequences(["STOP", "END"])
             .tool_choice(ToolChoice::Any)
-            .disable_parallel_tool_use(true)
+            .parallel_tool_use(false)
             .reasoning_effort(ReasoningEffort::Medium)
             .max_tokens(1234)
             .additional_params(json!({"thinking": {"type": "enabled"}}))
@@ -1793,7 +1794,7 @@ mod tests {
         assert_eq!(rec.top_k, Some(40));
         assert_eq!(rec.stop_sequences, vec!["STOP".to_string(), "END".into()]);
         assert_eq!(rec.tool_choice, Some(ToolChoice::Any));
-        assert_eq!(rec.disable_parallel_tool_use, Some(true));
+        assert_eq!(rec.parallel_tool_use, Some(false));
         assert_eq!(rec.reasoning_effort, Some(ReasoningEffort::Medium));
         assert_eq!(rec.max_tokens, 1234);
         assert_eq!(
@@ -1824,7 +1825,7 @@ mod tests {
         assert_eq!(rec.top_k, None);
         assert!(rec.stop_sequences.is_empty());
         assert_eq!(rec.tool_choice, None);
-        assert_eq!(rec.disable_parallel_tool_use, None);
+        assert_eq!(rec.parallel_tool_use, None);
         assert_eq!(rec.reasoning_effort, None);
         assert_eq!(rec.max_tokens, 4096); // RunConfig::default().max_tokens
         assert_eq!(rec.additional_params, None);

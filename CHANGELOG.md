@@ -409,6 +409,17 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `ChatRequest::disable_parallel_tool_use` is
+  `ChatRequest::parallel_tool_use`, and
+  `ConversationBuilder::disable_parallel_tool_use(bool)` is
+  `ConversationBuilder::parallel_tool_use(bool)`. The flag now states
+  the positive: `Some(false)` limits the model to one tool call per
+  turn, `Some(true)` allows several, and `None` still leaves the
+  provider default. The old name copied Anthropic's wire field, so
+  `disable_…(false)` meant "allow" and every other provider needed a
+  negation; now the Anthropic adapter is the one that negates it, and
+  Chat Completions' `parallel_tool_calls` maps one to one.
+
 - `ToolChoice::None_` is `ToolChoice::None`. The trailing underscore was
   meant to avoid a clash with `Option::None`, but an enum variant is
   always reached through its type (`ToolChoice::None`), so there was no
@@ -770,6 +781,18 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Invert the value when moving to `parallel_tool_use`:
+
+```rust
+// Before (1.0.0-rc.3)
+builder.disable_parallel_tool_use(true);
+req.disable_parallel_tool_use = Some(true);
+
+// After
+builder.parallel_tool_use(false);
+req.parallel_tool_use = Some(false);
+```
 
 Drop the trailing underscore from `ToolChoice::None_`:
 

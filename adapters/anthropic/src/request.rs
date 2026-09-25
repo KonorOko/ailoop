@@ -42,10 +42,10 @@ pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
     // Anthropic carries `disable_parallel_tool_use` *inside* the
     // tool_choice object, so emitting one without the other still has
     // to materialise a tool_choice (defaulting to `auto`).
-    if req.tool_choice.is_some() || req.disable_parallel_tool_use.is_some() {
+    if req.tool_choice.is_some() || req.parallel_tool_use.is_some() {
         body.insert(
             "tool_choice".into(),
-            to_anthropic_tool_choice(req.tool_choice.as_ref(), req.disable_parallel_tool_use),
+            to_anthropic_tool_choice(req.tool_choice.as_ref(), req.parallel_tool_use),
         );
     }
 
@@ -298,7 +298,7 @@ fn to_anthropic_assistant_block(block: &AssistantBlock) -> serde_json::Value {
 
 fn to_anthropic_tool_choice(
     choice: Option<&ToolChoice>,
-    disable_parallel: Option<bool>,
+    parallel_tool_use: Option<bool>,
 ) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     match choice.unwrap_or(&ToolChoice::Auto) {
@@ -321,8 +321,8 @@ fn to_anthropic_tool_choice(
             obj.insert("type".into(), json!("auto"));
         }
     }
-    if let Some(flag) = disable_parallel {
-        obj.insert("disable_parallel_tool_use".into(), json!(flag));
+    if let Some(parallel) = parallel_tool_use {
+        obj.insert("disable_parallel_tool_use".into(), json!(!parallel));
     }
     serde_json::Value::Object(obj)
 }
@@ -413,12 +413,13 @@ mod tests {
     }
 
     /// `disable_parallel_tool_use` lives inside `tool_choice` on
-    /// Anthropic, so setting it without an explicit choice must still
-    /// emit a tool_choice object — defaulting to `auto`.
+    /// Anthropic, so setting `parallel_tool_use` without an explicit
+    /// choice must still emit a tool_choice object — defaulting to
+    /// `auto`.
     #[test]
-    fn disable_parallel_alone_emits_auto_tool_choice_with_flag() {
+    fn serial_tool_use_alone_emits_auto_tool_choice_with_flag() {
         let mut req = base_req();
-        req.disable_parallel_tool_use = Some(true);
+        req.parallel_tool_use = Some(false);
         let body = build_body("claude", &req);
         assert_eq!(
             body["tool_choice"],
@@ -427,10 +428,10 @@ mod tests {
     }
 
     #[test]
-    fn disable_parallel_combines_with_explicit_tool_choice() {
+    fn serial_tool_use_combines_with_explicit_tool_choice() {
         let mut req = base_req();
         req.tool_choice = Some(ToolChoice::Any);
-        req.disable_parallel_tool_use = Some(true);
+        req.parallel_tool_use = Some(false);
         let body = build_body("claude", &req);
         assert_eq!(
             body["tool_choice"],
