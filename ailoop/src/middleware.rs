@@ -338,7 +338,7 @@ enum GatePolicy {
 /// after any middleware that rewrites `req.messages` (the builder
 /// always puts it last). That state is keyed by [`RunId`] — one
 /// instance can be shared across concurrent runs — and dropped in
-/// `on_run_finished` / `on_run_error`.
+/// `on_run_finished`, `on_run_error` or `on_run_dropped`.
 pub struct ApprovalMiddleware {
     callback: ApprovalCallback,
     policy: GatePolicy,
@@ -418,7 +418,7 @@ impl ApprovalMiddleware {
     }
 
     #[cfg(test)]
-    fn tracked_runs(&self) -> usize {
+    pub(crate) fn tracked_runs(&self) -> usize {
         self.contexts().len()
     }
 }
@@ -484,6 +484,10 @@ impl ChatMiddleware for ApprovalMiddleware {
         _usage: &Usage,
         _partial_messages: &[Message],
     ) {
+        self.contexts().remove(run_id);
+    }
+
+    fn on_run_dropped(&self, run_id: &RunId) {
         self.contexts().remove(run_id);
     }
 }

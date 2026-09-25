@@ -10,6 +10,22 @@ and this project adheres to
 
 ### Added
 
+- `ChatMiddleware::on_run_dropped(&self, run_id)`: a third closing
+  hook, fired when the caller drops a run's stream before the run
+  closed (a `select!` that picks another branch, an outer timeout, a
+  client that disconnects). Before, a dropped run fired neither
+  `on_run_finished` nor `on_run_error`, so a middleware that kept
+  per-run state keyed by `RunId`, the pattern the trait docs
+  recommend, never released it and a long-lived conversation grew it
+  without bound. Each middleware now gets exactly one of
+  `on_run_finished`, `on_run_error` or `on_run_dropped` per run; a drop
+  during the closing hooks only reaches the middlewares not called yet.
+  The hook is synchronous because it runs inside `Drop`: it must not
+  block, only clean up (use a `std::sync::Mutex` or `try_lock`). A
+  stream dropped before its first poll never started a run and fires
+  nothing. The default does nothing, so existing middlewares compile
+  unchanged.
+
 - `ConversationBuilder::max_iterations(n)`: a default iteration cap for
   every run of a conversation, like `ConversationBuilder::max_tokens`.
   Before, the only way to change the cap was per run with
@@ -547,6 +563,17 @@ and this project adheres to
     model.
 
 ### Fixed
+
+- `ApprovalMiddleware`, `MaxToolCalls` and `AntiLoop` leaked a run's
+  state when the caller dropped the stream mid-run. Each keeps a map
+  keyed by `RunId` (the step's messages for approval requests, the
+  tool-call count, the repetition streaks) and only cleared it in
+  `on_run_finished` / `on_run_error`, which a dropped run never fires,
+  so a long-lived conversation whose runs were cancelled by dropping
+  the stream grew them without bound. They now clear it in the new
+  `on_run_dropped` too. `MaxToolCalls` and `AntiLoop` switched their
+  internal lock from `tokio::sync::Mutex` to `std::sync::Mutex` so the
+  synchronous hook can take it; neither holds it across an `.await`.
 
 - A run that aborted part-way through a step left tool calls without a
   `tool_result`. When a tool's `ToolDecision::Terminate`, a timeout, a

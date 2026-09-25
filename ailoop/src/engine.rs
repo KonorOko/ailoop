@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::errors::{EngineError, RunError};
@@ -73,22 +74,87 @@ where
     }
 }
 
+/// Owns a run's closing hooks. Every middleware gets exactly one of
+/// `on_run_finished` / `on_run_error` through [`Self::finished`] /
+/// [`Self::failed`]; when the stream is dropped before (or while) that
+/// happens, `Drop` fires `on_run_dropped` on the ones not reached yet.
+/// It lives inside the stream body, so a stream that is never polled
+/// never builds one and fires nothing.
+struct RunGuard {
+    middlewares: Vec<Arc<dyn ChatMiddleware>>,
+    run_id: RunId,
+    /// How many middlewares, in order, have had their closing hook
+    /// called. Counted before the hook is awaited: one interrupted at
+    /// an `.await` has already been told the run is over.
+    closed: AtomicUsize,
+}
+
+impl RunGuard {
+    fn new(middlewares: Vec<Arc<dyn ChatMiddleware>>, run_id: RunId) -> Self {
+        Self {
+            middlewares,
+            run_id,
+            closed: AtomicUsize::new(0),
+        }
+    }
+
+    fn middlewares(&self) -> &[Arc<dyn ChatMiddleware>] {
+        &self.middlewares
+    }
+
+    /// The middlewares whose closing hook is still due, marking each
+    /// as closed when handed out.
+    fn pending(&self) -> impl Iterator<Item = &Arc<dyn ChatMiddleware>> {
+        self.middlewares
+            .iter()
+            .skip(self.closed.load(Ordering::Relaxed))
+            .inspect(|_| {
+                self.closed.fetch_add(1, Ordering::Relaxed);
+            })
+    }
+
+    async fn finished(&self, reason: &FinishReason, usage: &Usage, new_messages: &[Message]) {
+        for mw in self.pending() {
+            mw.on_run_finished(&self.run_id, reason, usage, new_messages)
+                .await;
+        }
+    }
+
+    async fn failed(
+        &self,
+        err: &(dyn std::error::Error + Send + Sync),
+        usage: &Usage,
+        partial_messages: &[Message],
+    ) {
+        for mw in self.pending() {
+            mw.on_run_error(&self.run_id, err, usage, partial_messages)
+                .await;
+        }
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        for mw in self.pending() {
+            mw.on_run_dropped(&self.run_id);
+        }
+    }
+}
+
 /// Fires the `on_run_finished` + `on_chunk` hook pair for an aborted
 /// run and returns the `RunFinished` chunk for the caller to yield.
 /// Centralised so every abort site (hook terminate, tool terminate,
 /// timeout, cancellation) follows the same persistence discipline.
 async fn fire_abort_hooks(
-    middlewares: &[Arc<dyn ChatMiddleware>],
-    run_id: &RunId,
+    guard: &RunGuard,
     reason: AbortReason,
     usage: Usage,
     new_messages: Vec<Message>,
 ) -> StreamChunk {
+    let middlewares = guard.middlewares();
+    let run_id = &guard.run_id;
     let finish_reason = FinishReason::Aborted(reason);
-    for mw in middlewares {
-        mw.on_run_finished(run_id, &finish_reason, &usage, &new_messages)
-            .await;
-    }
+    guard.finished(&finish_reason, &usage, &new_messages).await;
     let mut chunk = StreamChunk::RunFinished {
         run_id: run_id.clone(),
         reason: finish_reason,
@@ -113,8 +179,7 @@ async fn fire_abort_hooks(
 /// `RunFinished` last.
 #[allow(clippy::too_many_arguments)]
 async fn abort_step(
-    middlewares: &[Arc<dyn ChatMiddleware>],
-    run_id: &RunId,
+    guard: &RunGuard,
     step_id: &StepId,
     reason: AbortReason,
     usage: Usage,
@@ -122,6 +187,8 @@ async fn abort_step(
     mut tools_result: Vec<UserBlock>,
     unanswered: impl IntoIterator<Item = PendingCall>,
 ) -> Vec<StreamChunk> {
+    let middlewares = guard.middlewares();
+    let run_id = &guard.run_id;
     let mut chunks = Vec::new();
     for call in unanswered {
         let (id, content) = match call {
@@ -149,7 +216,7 @@ async fn abort_step(
         });
     }
     let new_messages = run_msgs.finish();
-    chunks.push(fire_abort_hooks(middlewares, run_id, reason, usage, new_messages).await);
+    chunks.push(fire_abort_hooks(guard, reason, usage, new_messages).await);
     chunks
 }
 
@@ -161,16 +228,14 @@ fn not_run_result(reason: &AbortReason) -> ToolResultContent {
 /// Turns an `Err` into a [`RunError`] carrying the run's usage so far
 /// and its completed steps, and fires `on_run_error` with both.
 macro_rules! bail_with_hooks {
-    ($result: expr, $chain: expr, $run_id: expr, $usage: expr, $run_msgs: expr) => {
+    ($result: expr, $guard: expr, $usage: expr, $run_msgs: expr) => {
         match $result {
             Ok(v) => Ok(v),
             Err(e) => {
                 let err: EngineError<_> = e.into();
                 let usage: Usage = $usage;
                 let partial = $run_msgs.completed().to_vec();
-                for mw in $chain {
-                    mw.on_run_error($run_id, &err, &usage, &partial).await;
-                }
+                $guard.failed(&err, &usage, &partial).await;
                 Err(RunError::new(err, usage, partial))
             }
         }
@@ -455,6 +520,9 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
             config.timeout,
             config.cancellation.clone(),
         );
+        // Fires `on_run_dropped` if the caller drops the stream before
+        // every middleware got its closing hook.
+        let guard = RunGuard::new(config.middlewares.clone(), run_id.clone());
 
         for mw in &config.middlewares {
             let action = match race_abort(
@@ -464,7 +532,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 Ok(a) => a,
                 Err(reason) => {
                     let chunk = fire_abort_hooks(
-                        &config.middlewares, &run_id, reason, Usage::default(), vec![],
+                        &guard, reason, Usage::default(), vec![],
                     ).await;
                     yield chunk;
                     return;
@@ -474,7 +542,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 HookAction::Continue => {},
                 HookAction::Terminate {reason} => {
                     let chunk = fire_abort_hooks(
-                        &config.middlewares, &run_id, AbortReason::Terminated { reason }, Usage::default(), vec![],
+                        &guard, AbortReason::Terminated { reason }, Usage::default(), vec![],
                     ).await;
                     yield chunk;
                     return;
@@ -508,7 +576,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 // looping, so the run's messages have no dangling tool_use.
                 let new_messages = run_msgs.finish();
                 let chunk = fire_abort_hooks(
-                    &config.middlewares, &run_id, AbortReason::MaxIterations(config.max_iterations), usage_run + delegated.total(), new_messages,
+                    &guard, AbortReason::MaxIterations(config.max_iterations), usage_run + delegated.total(), new_messages,
                 ).await;
                 yield chunk;
                 return;
@@ -523,7 +591,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     Err(reason) => {
                         let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
+                            &guard, reason, usage_run + delegated.total(), new_messages,
                         ).await;
                         yield chunk;
                         return;
@@ -540,7 +608,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     // Best effort: nothing to drop yet. The overflow
                     // recovery below is the safety net.
                     Err(CompactionError::NotEnoughHistory) => proactive_compaction = false,
-                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?,
+                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &guard, usage_run + delegated.total(), run_msgs)?,
                 }
             }
 
@@ -588,7 +656,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 if let Some(reason) = aborted {
                     let new_messages = run_msgs.finish();
                     let chunk = fire_abort_hooks(
-                        &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
+                        &guard, reason, usage_run + delegated.total(), new_messages,
                     ).await;
                     yield chunk;
                     return;
@@ -600,7 +668,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     Err(reason) => {
                         let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
+                            &guard, reason, usage_run + delegated.total(), new_messages,
                         ).await;
                         yield chunk;
                         return;
@@ -610,11 +678,11 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 let recoverable = is_overflow(&error)
                     && run_msgs.managed().is_some_and(|m| m.options.recover_from_overflow);
                 if !recoverable {
-                    bail_with_hooks!(Err::<(), _>(EngineError::Model(error)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?;
+                    bail_with_hooks!(Err::<(), _>(EngineError::Model(error)), &guard, usage_run + delegated.total(), run_msgs)?;
                     unreachable!();
                 }
                 if overflow_recovered {
-                    bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?;
+                    bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &guard, usage_run + delegated.total(), run_msgs)?;
                     unreachable!();
                 }
                 overflow_recovered = true;
@@ -625,7 +693,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     Err(reason) => {
                         let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
+                            &guard, reason, usage_run + delegated.total(), new_messages,
                         ).await;
                         yield chunk;
                         return;
@@ -638,9 +706,9 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     // Nothing the strategy can drop, or dropping it did
                     // not shrink the prompt: resending would fail again.
                     Ok(_) | Err(CompactionError::NotEnoughHistory) => {
-                        bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?;
+                        bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &guard, usage_run + delegated.total(), run_msgs)?;
                     }
-                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?,
+                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &guard, usage_run + delegated.total(), run_msgs)?,
                 }
             };
 
@@ -661,7 +729,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                             run_msgs.push(Message::Assistant { blocks: assistant_blocks });
                         }
                         let chunks = abort_step(
-                            &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                            &guard, &step_id, reason, usage_run + delegated.total(),
                             &mut run_msgs, Vec::new(), tool_calls,
                         ).await;
                         for chunk in chunks { yield chunk; }
@@ -672,7 +740,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     Some(c) => c,
                     None => break,
                 };
-                let chunk = bail_with_hooks!(chunk.map_err(EngineError::Model), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?;
+                let chunk = bail_with_hooks!(chunk.map_err(EngineError::Model), &guard, usage_run + delegated.total(), run_msgs)?;
 
                 // Mutating phase first: every `_mut` runs before any
                 // observer, so the engine itself, the assistant-history
@@ -822,7 +890,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 if let Some(abort_reason) = abort_reason {
                     let current = PendingCall::Run { id, name, args };
                     let chunks = abort_step(
-                        &config.middlewares, &run_id, &step_id, abort_reason, usage_run + delegated.total(),
+                        &guard, &step_id, abort_reason, usage_run + delegated.total(),
                         &mut run_msgs, tools_result, std::iter::once(current).chain(pending),
                     ).await;
                     for chunk in chunks { yield chunk; }
@@ -837,7 +905,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     Err(reason) => {
                         let current = PendingCall::Run { id, name, args };
                         let chunks = abort_step(
-                            &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                            &guard, &step_id, reason, usage_run + delegated.total(),
                             &mut run_msgs, tools_result, std::iter::once(current).chain(pending),
                         ).await;
                         for chunk in chunks { yield chunk; }
@@ -866,11 +934,11 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                             Ok(Err(ToolRegistryError::NotFound(_))) => {
                                 unavailable_tool(&name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()))
                             },
-                            Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?,
+                            Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &guard, usage_run + delegated.total(), run_msgs)?,
                             Err(reason) => {
                                 let current = PendingCall::Run { id, name, args };
                                 let chunks = abort_step(
-                                    &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                                    &guard, &step_id, reason, usage_run + delegated.total(),
                                     &mut run_msgs, tools_result, std::iter::once(current).chain(pending),
                                 ).await;
                                 for chunk in chunks { yield chunk; }
@@ -885,7 +953,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         let reason = AbortReason::ToolTerminated { tool_name: name.clone(), reason };
                         let current = PendingCall::Run { id, name, args };
                         let chunks = abort_step(
-                            &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                            &guard, &step_id, reason, usage_run + delegated.total(),
                             &mut run_msgs, tools_result, std::iter::once(current).chain(pending),
                         ).await;
                         for chunk in chunks { yield chunk; }
@@ -909,7 +977,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         // assistant turn isn't missing a tool_result.
                         tools_result.push(UserBlock::tool_result(id.clone(), content.clone()));
                         let chunks = abort_step(
-                            &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                            &guard, &step_id, reason, usage_run + delegated.total(),
                             &mut run_msgs, tools_result, pending,
                         ).await;
                         for chunk in chunks { yield chunk; }
@@ -927,7 +995,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         // its tool_result on the next assistant turn.
                         tools_result.push(UserBlock::tool_result(id.clone(), content.clone()));
                         let chunks = abort_step(
-                            &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                            &guard, &step_id, reason, usage_run + delegated.total(),
                             &mut run_msgs, tools_result, pending,
                         ).await;
                         for chunk in chunks { yield chunk; }
@@ -963,7 +1031,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     Ok(d) => d,
                     Err(reason) => {
                         let chunks = abort_step(
-                            &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                            &guard, &step_id, reason, usage_run + delegated.total(),
                             &mut run_msgs, tools_result, Vec::new(),
                         ).await;
                         for chunk in chunks { yield chunk; }
@@ -1007,9 +1075,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
         let new_messages = run_msgs.finish();
         let usage_total = usage_run + delegated.total();
 
-        for mw in &config.middlewares {
-            mw.on_run_finished(&run_id, &finish_reason, &usage_total, &new_messages).await;
-        }
+        guard.finished(&finish_reason, &usage_total, &new_messages).await;
 
         let mut chunk = StreamChunk::RunFinished {
             run_id: run_id.clone(),
@@ -1162,6 +1228,71 @@ mod tests {
         async fn call(&self, _: serde_json::Value, _ctx: &ToolContext) -> ToolResultContent {
             ToolResultContent::text("sunny")
         }
+    }
+
+    /// The built-in middlewares keep per-run state keyed by `RunId`.
+    /// A caller that drops the stream mid-run fires neither
+    /// `on_run_finished` nor `on_run_error`, so without
+    /// `on_run_dropped` that state stays in the map forever.
+    #[tokio::test]
+    async fn builtin_middlewares_release_run_state_when_dropped() {
+        use crate::{AntiLoop, ApprovalMiddleware, MaxToolCalls};
+
+        let model = ScriptedModel::new([
+            vec![
+                StreamChunk::ToolCallFinished {
+                    id: "toolu_1".into(),
+                    name: "get_weather".into(),
+                    args: json!({}),
+                },
+                StreamChunk::TurnFinished {
+                    reason: FinishReason::ToolUse,
+                    usage: Usage::default(),
+                    service_tier: None,
+                },
+            ],
+            vec![StreamChunk::TurnFinished {
+                reason: FinishReason::EndTurn,
+                usage: Usage::default(),
+                service_tier: None,
+            }],
+        ]);
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(GetWeather)).unwrap();
+
+        let anti_loop = Arc::new(AntiLoop::new());
+        let max_calls = Arc::new(MaxToolCalls::new(10));
+        let approval = Arc::new(ApprovalMiddleware::approve_all(|_req| async {
+            ToolDecision::Continue
+        }));
+        let mut config = RunConfig::default();
+        config.middlewares = vec![anti_loop.clone(), max_calls.clone(), approval.clone()];
+
+        let mut stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
+            .await
+            .unwrap();
+        // Stop right after the tool ran: every middleware holds state.
+        while let Some(chunk) = stream.next().await {
+            if matches!(chunk.unwrap(), StreamChunk::ToolResult { .. }) {
+                break;
+            }
+        }
+        assert_eq!(anti_loop.tracked_runs(), 1);
+        assert_eq!(max_calls.tracked_runs(), 1);
+        assert_eq!(approval.tracked_runs(), 1);
+
+        drop(stream);
+        assert_eq!(anti_loop.tracked_runs(), 0, "AntiLoop kept the dropped run");
+        assert_eq!(
+            max_calls.tracked_runs(),
+            0,
+            "MaxToolCalls kept the dropped run"
+        );
+        assert_eq!(
+            approval.tracked_runs(),
+            0,
+            "ApprovalMiddleware kept the dropped run"
+        );
     }
 
     #[test]

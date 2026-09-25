@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use ailoop_core::{
     ChatMiddleware, FinishReason, Message, RunId, StepId, StreamChunk, ToolCallInfo, ToolDecision,
     Usage,
 };
 use serde_json::Value;
-use tokio::sync::Mutex;
 
 /// Predicate used to compare two assistant text turns. Receives
 /// `(previous, current)` and returns `true` when the texts should count
@@ -166,6 +165,28 @@ impl Default for AntiLoop {
     }
 }
 
+impl AntiLoop {
+    fn inner(&self) -> MutexGuard<'_, Inner> {
+        // Poisoning only means another thread panicked mid-update; the
+        // map itself is still consistent.
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Drops a run's state once the run is over, however it ended.
+    fn forget(&self, run_id: &RunId) {
+        let mut guard = self.inner();
+        guard.runs.remove(run_id);
+        if guard.active_text_run.as_ref() == Some(run_id) {
+            guard.active_text_run = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_runs(&self) -> usize {
+        self.inner().runs.len()
+    }
+}
+
 #[async_trait::async_trait]
 impl ChatMiddleware for AntiLoop {
     async fn on_run_started(
@@ -174,9 +195,7 @@ impl ChatMiddleware for AntiLoop {
         _messages: &[Message],
         _config: &ailoop_core::RunConfig,
     ) -> ailoop_core::HookAction {
-        self.inner
-            .lock()
-            .await
+        self.inner()
             .runs
             .insert(run_id.clone(), RunState::default());
         ailoop_core::HookAction::Continue
@@ -185,7 +204,7 @@ impl ChatMiddleware for AntiLoop {
     async fn on_chunk(&self, chunk: &StreamChunk) {
         match chunk {
             StreamChunk::StepStarted { run_id, .. } => {
-                let mut guard = self.inner.lock().await;
+                let mut guard = self.inner();
                 guard.active_text_run = Some(run_id.clone());
                 let state = guard.runs.entry(run_id.clone()).or_default();
                 state.text_buffer.clear();
@@ -197,7 +216,7 @@ impl ChatMiddleware for AntiLoop {
                 // concurrent conversations may cross-attribute text
                 // here — wire one instance per `Conversation` when
                 // concurrent runs matter.
-                let mut guard = self.inner.lock().await;
+                let mut guard = self.inner();
                 if let Some(run_id) = guard.active_text_run.clone()
                     && let Some(state) = guard.runs.get_mut(&run_id)
                 {
@@ -210,7 +229,7 @@ impl ChatMiddleware for AntiLoop {
 
     async fn on_before_tool_call(&self, call: &ToolCallInfo, args: &Value) -> ToolDecision {
         let name = call.name.as_str();
-        let mut guard = self.inner.lock().await;
+        let mut guard = self.inner();
         let state = guard.runs.entry(call.run_id.clone()).or_default();
 
         // First tool call of this step closes out the assistant's text
@@ -296,11 +315,7 @@ impl ChatMiddleware for AntiLoop {
         _usage: &Usage,
         _new_messages: &[Message],
     ) {
-        let mut guard = self.inner.lock().await;
-        guard.runs.remove(run_id);
-        if guard.active_text_run.as_ref() == Some(run_id) {
-            guard.active_text_run = None;
-        }
+        self.forget(run_id);
     }
 
     async fn on_run_error(
@@ -310,10 +325,10 @@ impl ChatMiddleware for AntiLoop {
         _usage: &Usage,
         _partial_messages: &[Message],
     ) {
-        let mut guard = self.inner.lock().await;
-        guard.runs.remove(run_id);
-        if guard.active_text_run.as_ref() == Some(run_id) {
-            guard.active_text_run = None;
-        }
+        self.forget(run_id);
+    }
+
+    fn on_run_dropped(&self, run_id: &RunId) {
+        self.forget(run_id);
     }
 }
