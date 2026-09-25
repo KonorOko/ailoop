@@ -131,5 +131,27 @@ async fn scripted_model_is_reachable_through_the_testing_feature() {
     let mut chat = Conversation::builder(model).build().unwrap();
     let outcome = chat.run("hi").await.unwrap();
     assert_eq!(outcome.final_text.as_deref(), Some("hello"));
+    assert_eq!(outcome.finish_reason, FinishReason::EndTurn);
     assert_eq!(outcome.usage.input_tokens, 3);
+}
+
+/// Middleware decisions print with `{:?}` and finish reasons compare
+/// with `assert_eq!`, which is what a middleware unit test reaches for.
+#[test]
+fn decisions_are_debug_and_finish_reason_is_comparable() {
+    let skip = ailoop::ToolDecision::Skip {
+        reason: "rate limited".into(),
+    };
+    assert!(format!("{skip:?}").contains("rate limited"));
+    let terminate = ailoop::HookAction::Terminate {
+        reason: "budget".into(),
+    };
+    assert!(format!("{terminate:?}").contains("budget"));
+
+    assert_eq!(FinishReason::EndTurn, FinishReason::EndTurn);
+    assert_ne!(FinishReason::EndTurn, FinishReason::ToolUse);
+    assert_eq!(
+        FinishReason::Aborted(ailoop::AbortReason::Cancelled),
+        FinishReason::Aborted(ailoop::AbortReason::Cancelled),
+    );
 }

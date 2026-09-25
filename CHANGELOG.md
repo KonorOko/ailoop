@@ -10,6 +10,15 @@ and this project adheres to
 
 ### Added
 
+- `HookAction` and `ToolDecision` derive `Debug`, and `FinishReason`
+  derives `PartialEq` and `Eq`. A middleware unit test can now print the
+  decision it got back and write
+  `assert_eq!(outcome.finish_reason, FinishReason::EndTurn)` instead of
+  `matches!`. The decision enums get only `Debug` on purpose: a future
+  variant may carry a value that cannot be cloned or compared, and
+  adding a derive later is compatible while removing one is not.
+  `FinishReason` takes the same commitment `AbortReason` already made.
+
 - `testing` feature on `ailoop`, which exposes `ailoop::testing` (a
   re-export of `ailoop_core::testing`: `ScriptedModel`, `ScriptedError`,
   `ScriptedTurn`). `ScriptedModel` was only reachable through the

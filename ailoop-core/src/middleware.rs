@@ -491,6 +491,7 @@ impl ToolCallInfo {
 /// Decision returned from
 /// [`ChatMiddleware::on_run_started`] to optionally short-circuit a
 /// run before any provider call.
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum HookAction {
     /// Default: let the run proceed.
@@ -509,6 +510,7 @@ pub enum HookAction {
 /// Decision returned from
 /// [`ChatMiddleware::on_before_tool_call`] to optionally bypass or
 /// abort a tool invocation.
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum ToolDecision {
     /// Default: execute the tool.
