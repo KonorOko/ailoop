@@ -12,7 +12,7 @@ use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
 
 use crate::{
     engine::{ContextOptions, run_with_history},
-    errors::{BuildError, EngineError},
+    errors::{BuildError, EngineError, RunError},
     middleware::{
         ApprovalCallback, ApprovalMiddleware, RequestDefaults, RequestDefaultsMiddleware,
         SystemPromptMiddleware, ToolPromptGroup, wrap_callback,
@@ -55,8 +55,9 @@ pub const DEFAULT_HISTORY_MAX_TOKENS: usize = 100_000;
 /// being reached, and middleware/tool returning `Terminate` all
 /// surface as `Ok(_)` carrying
 /// [`FinishReason::Aborted`] — never as `Err(EngineError::_)`. Only
-/// model / tool-registry / context errors produce an `Err`. See
-/// [`EngineError`] for the failure surface.
+/// model / tool-registry / context errors produce an `Err`: a
+/// [`RunError`] carrying the [`EngineError`] cause and the steps the
+/// run completed before failing.
 pub struct Conversation<M: CompletionModel> {
     model: M,
     history: History,
@@ -237,6 +238,30 @@ where
         self.history.add_message(message);
     }
 
+    /// Append several messages to history without going through a run,
+    /// in order. Same contract as [`Self::history_push`]: compaction
+    /// waits for the next run.
+    ///
+    /// The main use is keeping the steps a failed run completed: a run
+    /// that ends in `Err` rolls the history back, and
+    /// [`RunError::partial_messages`] holds those steps. Every `tool_use`
+    /// in them has its `tool_result`, so appending them after the
+    /// rollback leaves a valid history:
+    ///
+    /// ```no_run
+    /// # async fn demo<M>(chat: &mut ailoop::Conversation<M>)
+    /// # where M: ailoop::CompletionModel + Send + Sync, M::Error: ailoop::ProviderError {
+    /// if let Err(err) = chat.run("migrate the database").await {
+    ///     chat.history_extend(err.partial_messages().iter().cloned());
+    /// }
+    /// # }
+    /// ```
+    pub fn history_extend(&mut self, messages: impl IntoIterator<Item = Message>) {
+        for message in messages {
+            self.history.add_message(message);
+        }
+    }
+
     /// Persistable snapshot of this conversation's logical state:
     /// the message vector and the parallel pin mask. Pair with
     /// [`ConversationBuilder::from_snapshot`] to rebuild a
@@ -280,7 +305,10 @@ where
     /// trips a `debug_assert` in debug builds.
     ///
     /// Errors from the model, tools, or context management surface as
-    /// `Err(EngineError)`, exactly as they would on the streaming path.
+    /// `Err(RunError)`, exactly as they would on the streaming path. The
+    /// [`RunError`] carries the [`EngineError`] cause and the steps the
+    /// run completed before failing; the history is rolled back either
+    /// way (see [`Self::stream`]).
     /// Aborted runs (timeout, cancellation, hook/tool `Terminate`) are
     /// **not** errors — they return `Ok(RunOutcome)` with
     /// `finish_reason = FinishReason::Aborted(_)`. The caller decides
@@ -291,7 +319,7 @@ where
     pub async fn run(
         &mut self,
         input: impl Into<Message>,
-    ) -> Result<RunOutcome, EngineError<M::Error>> {
+    ) -> Result<RunOutcome, RunError<M::Error>> {
         self.run_with_options(input, RunOptions::default()).await
     }
 
@@ -311,7 +339,7 @@ where
         &mut self,
         input: impl Into<Message>,
         options: RunOptions,
-    ) -> Result<RunOutcome, EngineError<M::Error>> {
+    ) -> Result<RunOutcome, RunError<M::Error>> {
         let mut stream = self.stream_with_options(input, options).await?;
 
         let mut finished: Option<(RunId, FinishReason, Usage, Vec<Message>)> = None;
@@ -380,7 +408,7 @@ where
     /// [`FinishReason::Aborted`] — they are never `Err`. The same
     /// failure surface as [`Conversation::run`] applies otherwise:
     /// model, tool-registry, and context errors yield
-    /// `Err(EngineError)`.
+    /// `Err(RunError)`.
     ///
     /// History is extended with the run's `new_messages` exactly once,
     /// keyed off the terminal `RunFinished` chunk — pair this with
@@ -399,11 +427,14 @@ where
     /// committed on `RunFinished`. If the run ends in `Err`, or the
     /// stream is dropped before `RunFinished`, the history is rolled
     /// back to its state right after the kickoff was added (and the
-    /// pre-run compaction, if any, ran).
+    /// pre-run compaction, if any, ran). On `Err`, the steps the run
+    /// completed before failing travel in
+    /// [`RunError::partial_messages`]; append them with
+    /// [`Self::history_extend`] to keep them.
     pub async fn stream(
         &mut self,
         input: impl Into<Message>,
-    ) -> Result<RunStream<'_, M>, EngineError<M::Error>> {
+    ) -> Result<RunStream<'_, M>, RunError<M::Error>> {
         self.stream_with_options(input, RunOptions::default()).await
     }
 
@@ -424,14 +455,18 @@ where
         &mut self,
         input: impl Into<Message>,
         options: RunOptions,
-    ) -> Result<RunStream<'_, M>, EngineError<M::Error>> {
+    ) -> Result<RunStream<'_, M>, RunError<M::Error>> {
         let msg: Message = input.into();
         debug_assert!(
             matches!(msg, Message::User { .. }),
             "Conversation kickoff must be a Message::User; got {msg:?}"
         );
         self.history.add_message(msg);
-        let report = self.history.compact_if_needed().await?;
+        let report = self
+            .history
+            .compact_if_needed()
+            .await
+            .map_err(EngineError::Context)?;
 
         let run_id = options.run_id.unwrap_or_default();
 
@@ -457,7 +492,7 @@ where
             M::Error::is_context_overflow,
         );
 
-        let prelude: BoxStream<'_, Result<StreamChunk, EngineError<M::Error>>> = match report {
+        let prelude: BoxStream<'_, Result<StreamChunk, RunError<M::Error>>> = match report {
             Some(r) => {
                 let mut chunk = StreamChunk::HistoryCompacted {
                     run_id,
@@ -1160,13 +1195,14 @@ impl<M: CompletionModel> ConversationBuilder<M> {
 /// The run's changes to the conversation history are committed on the
 /// terminal [`StreamChunk::RunFinished`], atomically with delivery of
 /// that chunk to the consumer. Dropping the stream earlier (or a run
-/// ending in `Err`) rolls them back.
+/// ending in `Err`) rolls them back. The `Err` item is a [`RunError`]
+/// that keeps a copy of the steps completed before the failure.
 pub struct RunStream<'a, M: CompletionModel> {
-    inner: BoxStream<'a, Result<StreamChunk, EngineError<M::Error>>>,
+    inner: BoxStream<'a, Result<StreamChunk, RunError<M::Error>>>,
 }
 
 impl<'a, M: CompletionModel> Stream for RunStream<'a, M> {
-    type Item = Result<StreamChunk, EngineError<M::Error>>;
+    type Item = Result<StreamChunk, RunError<M::Error>>;
 
     fn poll_next(
         self: std::pin::Pin<&mut Self>,

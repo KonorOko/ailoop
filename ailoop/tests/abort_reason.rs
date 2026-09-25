@@ -214,7 +214,12 @@ impl ChatMiddleware for LifecycleCounter {
         self.finished.fetch_add(1, Ordering::SeqCst);
     }
 
-    async fn on_run_error(&self, _run_id: &RunId, _err: &(dyn std::error::Error + Send + Sync)) {
+    async fn on_run_error(
+        &self,
+        _run_id: &RunId,
+        _err: &(dyn std::error::Error + Send + Sync),
+        _: &[Message],
+    ) {
         self.errored.fetch_add(1, Ordering::SeqCst);
     }
 }

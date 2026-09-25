@@ -376,10 +376,16 @@ impl ChatMiddleware for JsonTracer {
         self.emit("run_finished", p).await;
     }
 
-    async fn on_run_error(&self, run_id: &RunId, err: &(dyn std::error::Error + Send + Sync)) {
+    async fn on_run_error(
+        &self,
+        run_id: &RunId,
+        err: &(dyn std::error::Error + Send + Sync),
+        partial_messages: &[Message],
+    ) {
         let mut p = serde_json::Map::new();
         p.insert("run_id".into(), json!(run_id.to_string()));
         p.insert("error".into(), json!(err.to_string()));
+        p.insert("partial_messages".into(), json!(partial_messages.len()));
         self.emit("run_error", p).await;
     }
 

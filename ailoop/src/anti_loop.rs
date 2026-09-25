@@ -307,7 +307,12 @@ impl ChatMiddleware for AntiLoop {
         }
     }
 
-    async fn on_run_error(&self, run_id: &RunId, _err: &(dyn std::error::Error + Send + Sync)) {
+    async fn on_run_error(
+        &self,
+        run_id: &RunId,
+        _err: &(dyn std::error::Error + Send + Sync),
+        _partial_messages: &[Message],
+    ) {
         let mut guard = self.inner.lock().await;
         guard.runs.remove(run_id);
         if guard.active_text_run.as_ref() == Some(run_id) {

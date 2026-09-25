@@ -150,7 +150,21 @@ pub trait ChatMiddleware: Send + Sync {
     /// [`ToolDecision::Terminate`] / `RunConfig.cancellation` /
     /// `RunConfig.timeout` go through [`Self::on_run_finished`]
     /// instead — they are not errors.
-    async fn on_run_error(&self, run_id: &RunId, err: &(dyn std::error::Error + Send + Sync)) {}
+    ///
+    /// `partial_messages` holds the messages of the steps the run
+    /// completed before failing, the same list the caller receives in
+    /// the returned error. Every `tool_use` in it has its `tool_result`,
+    /// and the step that failed is left out. It is empty when the first
+    /// step failed. The conversation history is still rolled back; use
+    /// this to record the work that already happened, for example tools
+    /// with side effects.
+    async fn on_run_error(
+        &self,
+        run_id: &RunId,
+        err: &(dyn std::error::Error + Send + Sync),
+        partial_messages: &[Message],
+    ) {
+    }
 
     // tools
     /// Fired before the engine invokes a tool. Return
