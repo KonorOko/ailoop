@@ -10,6 +10,22 @@ and this project adheres to
 
 ### Added
 
+- `RunError::usage()`: what a failed run spent before the error, counted
+  like `RunFinished.usage` (finished provider turns plus usage reported
+  by tools, sub-agents included). Before, a run ending in `Err` lost its
+  usage entirely, and the delegated part could not be rebuilt from
+  `TurnFinished` chunks, so a token or cost budget was blind exactly on
+  the runs that fail. The turn that failed is not counted: a response
+  cut off by an error never reports its usage, although the provider
+  may bill it. The usage can include the failed step's turn and its
+  tool reports (for example when a tool registry error follows a
+  finished turn) even though that step is left out of
+  `partial_messages`. Errors raised before the run starts (history
+  compaction in `Conversation::stream_with_options`) carry zero usage.
+  `into_parts` is unchanged.
+
+- `Usage` derives `PartialEq` and `Eq`.
+
 - `ToolRegistry::retain_by_tags(tags)`: unregister every tool whose
   tags do not overlap with `tags`. Unlike `deactivate_by_tags`, the
   removed tools can no longer be dispatched or activated at runtime.
@@ -383,6 +399,15 @@ and this project adheres to
   run did before failing. `JsonTracer` adds `partial_messages` (a
   count) to its `run_error` event and `TracingMiddleware` adds it as a
   field.
+- `ChatMiddleware::on_run_error` also gained a `usage: &Usage`
+  parameter, between `err` and `partial_messages` (the same order as
+  `on_run_finished`), carrying the same value as `RunError::usage()`.
+  It was the only place a middleware could see delegated usage (tool
+  and sub-agent reports) on a failed run; adding it after 1.0 would
+  break every implementor again. `JsonTracer` adds `usage` to its
+  `run_error` event and `TracingMiddleware` adds `input_tokens` /
+  `output_tokens` fields. The hook still fires only for runs that
+  started: a pre-run compaction error reaches the caller without it.
 - `Conversation`'s methods and `SubAgentTool`'s `ToolDyn` impl now
   require `M::Error: ProviderError`, so the engine can tell a
   context-window overflow from other model errors. The built-in
@@ -608,7 +633,7 @@ if let Err(err) = chat.run("go").await {
 }
 ```
 
-`on_run_error` overrides take the partial messages:
+`on_run_error` overrides take the run's usage and the partial messages:
 
 ```rust
 // Before
@@ -619,6 +644,7 @@ async fn on_run_error(
     &self,
     run_id: &RunId,
     err: &(dyn std::error::Error + Send + Sync),
+    usage: &Usage,
     partial_messages: &[Message],
 ) {}
 ```

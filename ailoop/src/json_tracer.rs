@@ -380,11 +380,13 @@ impl ChatMiddleware for JsonTracer {
         &self,
         run_id: &RunId,
         err: &(dyn std::error::Error + Send + Sync),
+        usage: &Usage,
         partial_messages: &[Message],
     ) {
         let mut p = serde_json::Map::new();
         p.insert("run_id".into(), json!(run_id.to_string()));
         p.insert("error".into(), json!(err.to_string()));
+        p.insert("usage".into(), usage_payload(usage));
         p.insert("partial_messages".into(), json!(partial_messages.len()));
         self.emit("run_error", p).await;
     }

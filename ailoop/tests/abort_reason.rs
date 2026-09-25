@@ -218,6 +218,7 @@ impl ChatMiddleware for LifecycleCounter {
         &self,
         _run_id: &RunId,
         _err: &(dyn std::error::Error + Send + Sync),
+        _usage: &Usage,
         _: &[Message],
     ) {
         self.errored.fetch_add(1, Ordering::SeqCst);

@@ -104,19 +104,20 @@ async fn fire_abort_hooks(
     chunk
 }
 
-/// Turns an `Err` into a [`RunError`] carrying the run's completed
-/// steps and fires `on_run_error` with them.
+/// Turns an `Err` into a [`RunError`] carrying the run's usage so far
+/// and its completed steps, and fires `on_run_error` with both.
 macro_rules! bail_with_hooks {
-    ($result: expr, $chain: expr, $run_id: expr, $run_msgs: expr) => {
+    ($result: expr, $chain: expr, $run_id: expr, $usage: expr, $run_msgs: expr) => {
         match $result {
             Ok(v) => Ok(v),
             Err(e) => {
                 let err: EngineError<_> = e.into();
+                let usage: Usage = $usage;
                 let partial = $run_msgs.completed().to_vec();
                 for mw in $chain {
-                    mw.on_run_error($run_id, &err, &partial).await;
+                    mw.on_run_error($run_id, &err, &usage, &partial).await;
                 }
-                Err(RunError::new(err, partial))
+                Err(RunError::new(err, usage, partial))
             }
         }
     };
@@ -485,7 +486,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     // Best effort: nothing to drop yet. The overflow
                     // recovery below is the safety net.
                     Err(CompactionError::NotEnoughHistory) => proactive_compaction = false,
-                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &config.middlewares, &run_id, run_msgs)?,
+                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?,
                 }
             }
 
@@ -555,11 +556,11 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 let recoverable = is_overflow(&error)
                     && run_msgs.managed().is_some_and(|m| m.options.recover_from_overflow);
                 if !recoverable {
-                    bail_with_hooks!(Err::<(), _>(EngineError::Model(error)), &config.middlewares, &run_id, run_msgs)?;
+                    bail_with_hooks!(Err::<(), _>(EngineError::Model(error)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?;
                     unreachable!();
                 }
                 if overflow_recovered {
-                    bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &config.middlewares, &run_id, run_msgs)?;
+                    bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?;
                     unreachable!();
                 }
                 overflow_recovered = true;
@@ -583,9 +584,9 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     // Nothing the strategy can drop, or dropping it did
                     // not shrink the prompt: resending would fail again.
                     Ok(_) | Err(CompactionError::NotEnoughHistory) => {
-                        bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &config.middlewares, &run_id, run_msgs)?;
+                        bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?;
                     }
-                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &config.middlewares, &run_id, run_msgs)?,
+                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?,
                 }
             };
 
@@ -616,7 +617,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     Some(c) => c,
                     None => break,
                 };
-                let chunk = bail_with_hooks!(chunk.map_err(EngineError::Model), &config.middlewares, &run_id, run_msgs)?;
+                let chunk = bail_with_hooks!(chunk.map_err(EngineError::Model), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?;
 
                 // Mutating phase first: every `_mut` runs before any
                 // observer, so the engine itself, the assistant-history
@@ -809,7 +810,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                             Ok(Err(ToolRegistryError::NotFound(_))) => {
                                 unavailable_tool(&name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()))
                             },
-                            Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id, run_msgs)?,
+                            Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?,
                             Err(reason) => {
                                 if !tools_result.is_empty() {
                                     run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });

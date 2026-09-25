@@ -52,6 +52,7 @@ impl ChatMiddleware for Spy {
         &self,
         _: &RunId,
         _: &(dyn std::error::Error + Send + Sync),
+        _: &Usage,
         partial_messages: &[Message],
     ) {
         self.run_errors
