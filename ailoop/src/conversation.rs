@@ -76,6 +76,7 @@ pub struct Conversation<M: CompletionModel> {
     tools: ToolRegistry,
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
     max_tokens: Option<u32>,
+    max_iterations: Option<usize>,
     context_options: ContextOptions,
 }
 
@@ -154,11 +155,15 @@ pub struct RunOptions {
     /// Maximum number of provider turns before the engine aborts with
     /// [`ailoop_core::FinishReason::Aborted`] carrying
     /// [`ailoop_core::AbortReason::MaxIterations`] — **never** an `Err`;
-    /// the partial turns are kept in history. `None` keeps the engine
-    /// default (25). Override per-run when a
+    /// the partial turns are kept in history. Override per-run when a
     /// particular agentic task is known to be longer-running than the
     /// default would allow. This is a safety brake, not a budget; see
     /// [`RunConfig::max_iterations`].
+    ///
+    /// Precedence, highest first: this field >
+    /// [`ConversationBuilder::max_iterations`] > the engine default
+    /// (25). `None` falls through to the builder default. The resolved
+    /// value is what [`RunConfig::max_iterations`] carries.
     pub max_iterations: Option<usize>,
     /// Per-run `max_tokens` cap for every `ChatRequest` of this run.
     ///
@@ -497,7 +502,7 @@ where
         config.run_id = Some(run_id.clone());
         config.timeout = options.timeout;
         config.cancellation = options.cancellation;
-        if let Some(n) = options.max_iterations {
+        if let Some(n) = options.max_iterations.or(self.max_iterations) {
             config.max_iterations = n;
         }
         if let Some(n) = options.max_tokens.or(self.max_tokens) {
@@ -578,6 +583,7 @@ pub struct ConversationBuilder<M: CompletionModel> {
     approval: Option<ApprovalSpec>,
     request_defaults: RequestDefaults,
     max_tokens: Option<u32>,
+    max_iterations: Option<usize>,
     context_options: ContextOptions,
     errors: Vec<BuildError>,
 }
@@ -605,6 +611,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             approval: None,
             request_defaults: RequestDefaults::default(),
             max_tokens: None,
+            max_iterations: None,
             context_options: ContextOptions {
                 compact_between_iterations: false,
                 recover_from_overflow: true,
@@ -1066,6 +1073,20 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
+    /// Default iteration cap for every run, replacing the engine
+    /// default (25, see [`RunConfig::max_iterations`]).
+    ///
+    /// A per-run [`RunOptions::max_iterations`] (and therefore
+    /// [`SubAgentConfig::max_iterations`](crate::SubAgentConfig::max_iterations)
+    /// on a sub-agent's child conversation) overrides it. The value is
+    /// resolved into [`RunConfig::max_iterations`] before the run
+    /// starts, so `on_run_started` observers see the cap in effect.
+    /// Like the engine default, it is a safety brake, not a budget.
+    pub fn max_iterations(mut self, n: usize) -> Self {
+        self.max_iterations = Some(n);
+        self
+    }
+
     /// Default `additional_params` applied to every [`ChatRequest`].
     /// Useful for provider-specific knobs that don't yet have a typed
     /// surface (e.g. Anthropic `thinking`). See [`Self::temperature`]
@@ -1218,6 +1239,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             tools,
             middlewares,
             max_tokens: self.max_tokens,
+            max_iterations: self.max_iterations,
             context_options: self.context_options,
         })
     }
@@ -2108,6 +2130,62 @@ mod tests {
         let captured = Arc::new(Mutex::new(None));
         let mut chat = Conversation::builder(one_turn_model())
             .middleware(Arc::new(ConfigSpy {
+                captured: captured.clone(),
+            }))
+            .build()
+            .expect("builder should succeed");
+
+        chat.run_with_options("hi", RunOptions::new().max_iterations(42))
+            .await
+            .expect("run should succeed");
+
+        assert_eq!(*captured.lock().unwrap(), Some(42));
+    }
+
+    /// Spy that records the `max_iterations` each run starts with.
+    struct MaxIterationsSpy {
+        captured: Arc<Mutex<Option<usize>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChatMiddleware for MaxIterationsSpy {
+        async fn on_run_started(
+            &self,
+            _run_id: &RunId,
+            _messages: &[Message],
+            config: &RunConfig,
+        ) -> ailoop_core::HookAction {
+            *self.captured.lock().unwrap() = Some(config.max_iterations);
+            ailoop_core::HookAction::Continue
+        }
+    }
+
+    /// `ConversationBuilder::max_iterations` replaces the engine
+    /// default in the `RunConfig` the engine runs with.
+    #[tokio::test]
+    async fn builder_max_iterations_reaches_run_config() {
+        let captured = Arc::new(Mutex::new(None));
+        let mut chat = Conversation::builder(one_turn_model())
+            .max_iterations(7)
+            .middleware(Arc::new(MaxIterationsSpy {
+                captured: captured.clone(),
+            }))
+            .build()
+            .expect("builder should succeed");
+
+        chat.run("hi").await.expect("run should succeed");
+
+        assert_eq!(*captured.lock().unwrap(), Some(7));
+    }
+
+    /// A per-run `RunOptions::max_iterations` wins over the builder
+    /// default.
+    #[tokio::test]
+    async fn run_options_max_iterations_beats_builder_default() {
+        let captured = Arc::new(Mutex::new(None));
+        let mut chat = Conversation::builder(one_turn_model())
+            .max_iterations(7)
+            .middleware(Arc::new(MaxIterationsSpy {
                 captured: captured.clone(),
             }))
             .build()

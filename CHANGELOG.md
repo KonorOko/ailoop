@@ -10,6 +10,17 @@ and this project adheres to
 
 ### Added
 
+- `ConversationBuilder::max_iterations(n)`: a default iteration cap for
+  every run of a conversation, like `ConversationBuilder::max_tokens`.
+  Before, the only way to change the cap was per run with
+  `RunOptions::max_iterations`, so keeping one value meant passing it on
+  every call. Precedence, highest first: `RunOptions::max_iterations`
+  (and `SubAgentConfig::max_iterations`, which maps to it) > the builder
+  default > the engine default (25). The resolved value is what
+  `RunConfig::max_iterations` carries, so `on_run_started` observers and
+  `JsonTracer` see the cap in effect. On a sub-agent's child
+  conversation, it sets the child's default cap.
+
 - `ToolCallInfo` (re-exported from `ailoop`): the identity of one tool
   call, passed to every tool hook of `ChatMiddleware`. Public fields
   `run_id`, `step_id`, `call_id` (the provider-assigned id, the same as
@@ -645,6 +656,9 @@ and this project adheres to
 To keep the old cap of 10 iterations, set it explicitly:
 
 ```rust
+// Every run of a conversation (also a sub-agent's child)
+let chat = Conversation::builder(model).max_iterations(10).build()?;
+
 // Per run
 chat.run_with_options(input, RunOptions::new().max_iterations(10)).await?;
 
