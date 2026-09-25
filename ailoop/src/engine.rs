@@ -1230,6 +1230,71 @@ mod tests {
         }
     }
 
+    /// The built-in middlewares keep per-run state keyed by `RunId`.
+    /// A caller that drops the stream mid-run fires neither
+    /// `on_run_finished` nor `on_run_error`, so without
+    /// `on_run_dropped` that state stays in the map forever.
+    #[tokio::test]
+    async fn builtin_middlewares_release_run_state_when_dropped() {
+        use crate::{AntiLoop, ApprovalMiddleware, MaxToolCalls};
+
+        let model = ScriptedModel::new([
+            vec![
+                StreamChunk::ToolCallFinished {
+                    id: "toolu_1".into(),
+                    name: "get_weather".into(),
+                    args: json!({}),
+                },
+                StreamChunk::TurnFinished {
+                    reason: FinishReason::ToolUse,
+                    usage: Usage::default(),
+                    service_tier: None,
+                },
+            ],
+            vec![StreamChunk::TurnFinished {
+                reason: FinishReason::EndTurn,
+                usage: Usage::default(),
+                service_tier: None,
+            }],
+        ]);
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(GetWeather)).unwrap();
+
+        let anti_loop = Arc::new(AntiLoop::new());
+        let max_calls = Arc::new(MaxToolCalls::new(10));
+        let approval = Arc::new(ApprovalMiddleware::approve_all(|_req| async {
+            ToolDecision::Continue
+        }));
+        let mut config = RunConfig::default();
+        config.middlewares = vec![anti_loop.clone(), max_calls.clone(), approval.clone()];
+
+        let mut stream = run_chat(&model, vec![Message::user("hi")], &registry, config)
+            .await
+            .unwrap();
+        // Stop right after the tool ran: every middleware holds state.
+        while let Some(chunk) = stream.next().await {
+            if matches!(chunk.unwrap(), StreamChunk::ToolResult { .. }) {
+                break;
+            }
+        }
+        assert_eq!(anti_loop.tracked_runs(), 1);
+        assert_eq!(max_calls.tracked_runs(), 1);
+        assert_eq!(approval.tracked_runs(), 1);
+
+        drop(stream);
+        assert_eq!(anti_loop.tracked_runs(), 0, "AntiLoop kept the dropped run");
+        assert_eq!(
+            max_calls.tracked_runs(),
+            0,
+            "MaxToolCalls kept the dropped run"
+        );
+        assert_eq!(
+            approval.tracked_runs(),
+            0,
+            "ApprovalMiddleware kept the dropped run"
+        );
+    }
+
     #[test]
     fn malformed_args_result_wraps_and_caps_raw() {
         let short = malformed_args_result("write_file", r#"{"a":"#, "EOF while parsing");

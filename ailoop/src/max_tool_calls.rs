@@ -2,12 +2,12 @@
 //! invocations across an entire run.
 
 use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard};
 
 use ailoop_core::{
     ChatMiddleware, FinishReason, Message, RunId, ToolCallInfo, ToolDecision, Usage,
 };
 use serde_json::Value;
-use tokio::sync::Mutex;
 
 /// Middleware that aborts a run once the total tool-call count
 /// reaches a fixed cap.
@@ -47,12 +47,23 @@ impl MaxToolCalls {
             counts: Mutex::new(HashMap::new()),
         }
     }
+
+    fn counts(&self) -> MutexGuard<'_, HashMap<RunId, usize>> {
+        // Poisoning only means another thread panicked mid-update; the
+        // map itself is still consistent.
+        self.counts.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_runs(&self) -> usize {
+        self.counts().len()
+    }
 }
 
 #[async_trait::async_trait]
 impl ChatMiddleware for MaxToolCalls {
     async fn on_before_tool_call(&self, call: &ToolCallInfo, _args: &Value) -> ToolDecision {
-        let mut guard = self.counts.lock().await;
+        let mut guard = self.counts();
         let counter = guard.entry(call.run_id.clone()).or_insert(0);
         *counter += 1;
         if *counter > self.max {
@@ -72,7 +83,7 @@ impl ChatMiddleware for MaxToolCalls {
         _usage: &Usage,
         _new_messages: &[Message],
     ) {
-        self.counts.lock().await.remove(run_id);
+        self.counts().remove(run_id);
     }
 
     async fn on_run_error(
@@ -82,7 +93,11 @@ impl ChatMiddleware for MaxToolCalls {
         _usage: &Usage,
         _partial_messages: &[Message],
     ) {
-        self.counts.lock().await.remove(run_id);
+        self.counts().remove(run_id);
+    }
+
+    fn on_run_dropped(&self, run_id: &RunId) {
+        self.counts().remove(run_id);
     }
 }
 
@@ -218,9 +233,9 @@ mod tests {
             &json!({}),
         )
         .await;
-        assert_eq!(mw.counts.lock().await.len(), 1);
+        assert_eq!(mw.counts().len(), 1);
         mw.on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
             .await;
-        assert!(mw.counts.lock().await.is_empty());
+        assert!(mw.counts().is_empty());
     }
 }
