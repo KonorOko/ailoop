@@ -37,7 +37,7 @@ impl CallLog {
 impl ChatMiddleware for CallLog {
     async fn on_chunk(&self, chunk: &StreamChunk) {
         match chunk {
-            StreamChunk::ToolCallFinished { id, .. } => {
+            StreamChunk::ToolCallFinished { call_id: id, .. } => {
                 self.finished.lock().unwrap().push(id.clone())
             }
             StreamChunk::ToolResult { call_id, .. } => {
@@ -101,11 +101,11 @@ fn model() -> ScriptedModel {
     let mut turn = Vec::new();
     for id in ["toolu_a", "toolu_b"] {
         turn.push(StreamChunk::ToolCallStarted {
-            id: id.into(),
+            call_id: id.into(),
             name: "echo".into(),
         });
         turn.push(StreamChunk::ToolCallFinished {
-            id: id.into(),
+            call_id: id.into(),
             name: "echo".into(),
             args: json!({"x": 1}),
         });

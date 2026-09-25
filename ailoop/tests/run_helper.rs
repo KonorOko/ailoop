@@ -72,11 +72,11 @@ async fn run_returns_final_text_for_text_only_turn() {
 async fn run_final_text_reflects_last_assistant_turn_only() {
     let turn1 = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "get_weather".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "get_weather".into(),
             args: json!({}),
         },

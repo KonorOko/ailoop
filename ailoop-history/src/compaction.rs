@@ -363,9 +363,12 @@ fn flatten_for_summary(msg: &Message) -> Message {
                 .iter()
                 .map(|b| match b {
                     AssistantBlock::Text { text, .. } => AssistantBlock::text(text.clone()),
-                    AssistantBlock::ToolCall { id, name, args, .. } => {
-                        AssistantBlock::text(format!("[tool_call:{id} {name}] {args}"))
-                    }
+                    AssistantBlock::ToolCall {
+                        call_id: id,
+                        name,
+                        args,
+                        ..
+                    } => AssistantBlock::text(format!("[tool_call:{id} {name}] {args}")),
                     AssistantBlock::Reasoning { text, .. } => AssistantBlock::text(text.clone()),
                     AssistantBlock::RedactedReasoning { .. } => {
                         AssistantBlock::text("[redacted reasoning]".to_string())

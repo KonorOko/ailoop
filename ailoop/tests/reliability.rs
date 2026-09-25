@@ -225,20 +225,20 @@ async fn abort_during_tool_loop_preserves_prior_tool_results() {
     // in `RunFinished.new_messages` so history is consistent on resume.
     let turn = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_a".into(),
+            call_id: "toolu_a".into(),
             name: "cancel_on_second".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_a".into(),
+            call_id: "toolu_a".into(),
             name: "cancel_on_second".into(),
             args: json!({}),
         },
         StreamChunk::ToolCallStarted {
-            id: "toolu_b".into(),
+            call_id: "toolu_b".into(),
             name: "cancel_on_second".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_b".into(),
+            call_id: "toolu_b".into(),
             name: "cancel_on_second".into(),
             args: json!({}),
         },
@@ -283,7 +283,7 @@ async fn abort_during_tool_loop_preserves_prior_tool_results() {
         })
         .flat_map(|blocks| blocks.iter())
         .filter_map(|b| match b {
-            AssistantBlock::ToolCall { id, .. } => Some(id.as_str()),
+            AssistantBlock::ToolCall { call_id: id, .. } => Some(id.as_str()),
             _ => None,
         })
         .collect();
@@ -368,11 +368,11 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
 
     let turn = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_x".into(),
+            call_id: "toolu_x".into(),
             name: "noop".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_x".into(),
+            call_id: "toolu_x".into(),
             name: "noop".into(),
             args: json!({}),
         },
@@ -445,11 +445,11 @@ async fn tool_context_cancellation_mirrors_run_config() {
 
     let turn = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_obs".into(),
+            call_id: "toolu_obs".into(),
             name: "observer".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_obs".into(),
+            call_id: "toolu_obs".into(),
             name: "observer".into(),
             args: json!({}),
         },

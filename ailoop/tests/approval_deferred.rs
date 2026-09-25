@@ -67,11 +67,11 @@ impl ToolDyn for Recording {
 fn tool_turn(id: &str, name: &str, args: Value) -> Vec<StreamChunk> {
     vec![
         StreamChunk::ToolCallStarted {
-            id: id.into(),
+            call_id: id.into(),
             name: name.into(),
         },
         StreamChunk::ToolCallFinished {
-            id: id.into(),
+            call_id: id.into(),
             name: name.into(),
             args,
         },

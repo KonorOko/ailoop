@@ -194,7 +194,12 @@ fn append_assistant_blocks(out: &mut Vec<Value>, blocks: &[AssistantBlock]) {
     for block in blocks {
         match block {
             AssistantBlock::Text { text, .. } => text_parts.push(text.as_str()),
-            AssistantBlock::ToolCall { id, name, args, .. } => {
+            AssistantBlock::ToolCall {
+                call_id: id,
+                name,
+                args,
+                ..
+            } => {
                 // Chat Completions requires `arguments` as a JSON-encoded
                 // string, not an object.
                 let arguments = serde_json::to_string(args).unwrap_or_else(|_| "{}".into());

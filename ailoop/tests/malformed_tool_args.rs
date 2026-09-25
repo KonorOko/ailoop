@@ -75,7 +75,7 @@ impl ChatMiddleware for Spy {
 
 fn started(id: &str) -> StreamChunk {
     StreamChunk::ToolCallStarted {
-        id: id.into(),
+        call_id: id.into(),
         name: "write_file".into(),
     }
 }
@@ -172,7 +172,14 @@ async fn malformed_call_is_not_executed_and_answered_with_error() {
     assert_eq!(msgs.len(), 3, "{msgs:?}");
     match &msgs[0] {
         Message::Assistant { blocks } => match blocks.as_slice() {
-            [AssistantBlock::ToolCall { id, name, args, .. }] => {
+            [
+                AssistantBlock::ToolCall {
+                    call_id: id,
+                    name,
+                    args,
+                    ..
+                },
+            ] => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(name, "write_file");
                 assert_eq!(args, &json!({}));

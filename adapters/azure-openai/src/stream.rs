@@ -99,7 +99,7 @@ where
                             emitted_starts.insert(idx);
                             tool_call_order.push(idx);
                             yield StreamChunk::ToolCallStarted {
-                                id: id.clone(),
+                                call_id: id.clone(),
                                 name: name.clone(),
                             };
                         }
@@ -112,7 +112,7 @@ where
                     {
                         state.args_buf.push_str(args_chunk);
                         yield StreamChunk::ToolCallArgsDelta {
-                            id: state.id.clone(),
+                            call_id: state.id.clone(),
                             delta: args_chunk.clone(),
                         };
                     }
@@ -231,28 +231,32 @@ mod tests {
         let chunks = run(events).await;
         let mut iter = chunks.into_iter();
         match iter.next().unwrap() {
-            StreamChunk::ToolCallStarted { id, name } => {
+            StreamChunk::ToolCallStarted { call_id: id, name } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "get_weather");
             }
             other => panic!("expected ToolCallStarted, got {other:?}"),
         }
         match iter.next().unwrap() {
-            StreamChunk::ToolCallArgsDelta { id, delta } => {
+            StreamChunk::ToolCallArgsDelta { call_id: id, delta } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(delta, "{\"loc\":");
             }
             other => panic!("expected ToolCallArgsDelta, got {other:?}"),
         }
         match iter.next().unwrap() {
-            StreamChunk::ToolCallArgsDelta { id, delta } => {
+            StreamChunk::ToolCallArgsDelta { call_id: id, delta } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(delta, "\"SF\"}");
             }
             other => panic!("expected ToolCallArgsDelta, got {other:?}"),
         }
         match iter.next().unwrap() {
-            StreamChunk::ToolCallFinished { id, name, args } => {
+            StreamChunk::ToolCallFinished {
+                call_id: id,
+                name,
+                args,
+            } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "get_weather");
                 assert_eq!(args, json!({ "loc": "SF" }));
@@ -296,9 +300,11 @@ mod tests {
         let mut finished = 0;
         for chunk in chunks {
             match chunk {
-                StreamChunk::ToolCallStarted { id, name } => starts.push((id, name)),
-                StreamChunk::ToolCallArgsDelta { id, delta } => args.push((id, delta)),
-                StreamChunk::ToolCallFinished { id, args, .. } => ends.push((id, args)),
+                StreamChunk::ToolCallStarted { call_id: id, name } => starts.push((id, name)),
+                StreamChunk::ToolCallArgsDelta { call_id: id, delta } => args.push((id, delta)),
+                StreamChunk::ToolCallFinished {
+                    call_id: id, args, ..
+                } => ends.push((id, args)),
                 StreamChunk::TurnFinished { .. } => finished += 1,
                 other => panic!("unexpected chunk {other:?}"),
             }
@@ -480,7 +486,7 @@ mod tests {
         let mut finished: Option<FinishReason> = None;
         for chunk in &chunks {
             match chunk {
-                StreamChunk::ToolCallStarted { id, name } => {
+                StreamChunk::ToolCallStarted { call_id: id, name } => {
                     assert!(!id.is_empty(), "tool call id must not be empty");
                     assert!(!name.is_empty(), "tool call name must not be empty");
                     starts += 1;
@@ -556,7 +562,12 @@ mod tests {
         let (id, name, raw) = chunks
             .iter()
             .find_map(|c| match c {
-                StreamChunk::ToolCallMalformed { id, name, raw, .. } => Some((id, name, raw)),
+                StreamChunk::ToolCallMalformed {
+                    call_id: id,
+                    name,
+                    raw,
+                    ..
+                } => Some((id, name, raw)),
                 _ => None,
             })
             .expect("ToolCallMalformed");

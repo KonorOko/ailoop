@@ -221,7 +221,7 @@ impl History {
             Message::Assistant { blocks } => blocks
                 .iter()
                 .filter_map(|b| match b {
-                    AssistantBlock::ToolCall { id, .. } => Some(id.clone()),
+                    AssistantBlock::ToolCall { call_id: id, .. } => Some(id.clone()),
                     _ => None,
                 })
                 .collect(),
@@ -249,7 +249,7 @@ impl History {
                 (true, Message::User { blocks }) => blocks.iter().any(|b| matches!(b,
                     UserBlock::ToolResult { call_id, .. } if target_ids.iter().any(|t| t == call_id))),
                 (false, Message::Assistant { blocks }) => blocks.iter().any(|b| matches!(b,
-                    AssistantBlock::ToolCall { id, .. } if target_ids.iter().any(|t| t == id))),
+                    AssistantBlock::ToolCall { call_id: id, .. } if target_ids.iter().any(|t| t == id))),
                 _ => false,
             };
             if matches {
@@ -597,10 +597,9 @@ mod tests {
         for msg in mgr.messages() {
             match msg {
                 Message::Assistant { blocks } => {
-                    if blocks
-                        .iter()
-                        .any(|b| matches!(b, AssistantBlock::ToolCall { id, .. } if id == "c1"))
-                    {
+                    if blocks.iter().any(
+                        |b| matches!(b, AssistantBlock::ToolCall { call_id: id, .. } if id == "c1"),
+                    ) {
                         saw_call = true;
                     }
                 }

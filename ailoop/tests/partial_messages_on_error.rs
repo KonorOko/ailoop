@@ -70,11 +70,11 @@ fn tool_turn(id: &str) -> ScriptedTurn {
             delta: format!("calling {id}"),
         }),
         Ok(StreamChunk::ToolCallStarted {
-            id: id.into(),
+            call_id: id.into(),
             name: "bump".into(),
         }),
         Ok(StreamChunk::ToolCallFinished {
-            id: id.into(),
+            call_id: id.into(),
             name: "bump".into(),
             args: json!({}),
         }),
@@ -119,7 +119,7 @@ fn assert_no_orphans(messages: &[Message]) {
         match msg {
             Message::Assistant { blocks } => {
                 for b in blocks {
-                    if let AssistantBlock::ToolCall { id, .. } = b {
+                    if let AssistantBlock::ToolCall { call_id: id, .. } = b {
                         let answered = matches!(messages.get(i + 1), Some(Message::User { blocks })
                             if blocks.iter().any(|b| matches!(b,
                                 UserBlock::ToolResult { call_id, .. } if call_id == id)));
@@ -133,7 +133,7 @@ fn assert_no_orphans(messages: &[Message]) {
                         let called = i > 0
                             && matches!(&messages[i - 1], Message::Assistant { blocks }
                                 if blocks.iter().any(|b| matches!(b,
-                                    AssistantBlock::ToolCall { id, .. } if id == call_id)));
+                                    AssistantBlock::ToolCall { call_id: id, .. } if id == call_id)));
                         assert!(called, "tool_result {call_id} at {i} has no tool_use");
                     }
                 }
@@ -151,7 +151,7 @@ fn tool_call_ids(messages: &[Message]) -> Vec<String> {
             _ => &[],
         })
         .filter_map(|b| match b {
-            AssistantBlock::ToolCall { id, .. } => Some(id.clone()),
+            AssistantBlock::ToolCall { call_id: id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect()

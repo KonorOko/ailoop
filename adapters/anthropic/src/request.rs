@@ -261,7 +261,7 @@ fn to_anthropic_assistant_block(block: &AssistantBlock) -> serde_json::Value {
             Value::Object(obj)
         }
         AssistantBlock::ToolCall {
-            id,
+            call_id: id,
             name,
             args,
             cache_control,

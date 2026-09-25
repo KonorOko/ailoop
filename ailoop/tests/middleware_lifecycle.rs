@@ -133,11 +133,11 @@ async fn engine_invokes_middleware_hooks_in_order() {
             delta: "let me check ".into(),
         },
         StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "get_weather".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "get_weather".into(),
             args: json!({}),
         },

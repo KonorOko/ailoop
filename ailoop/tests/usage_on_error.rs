@@ -68,11 +68,11 @@ impl Spy {
 fn call_turn(tool: &str, args: Value, usage: Usage) -> ScriptedTurn {
     Ok(vec![
         Ok(StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: tool.into(),
         }),
         Ok(StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: tool.into(),
             args,
         }),

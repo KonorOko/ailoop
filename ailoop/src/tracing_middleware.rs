@@ -69,7 +69,7 @@ impl ChatMiddleware for TracingMiddleware {
             StreamChunk::RedactedReasoningBlock { .. } => {
                 tracing::debug!(target: "ailoop.chunk", "redacted reasoning block");
             }
-            StreamChunk::ToolCallStarted { id, name } => {
+            StreamChunk::ToolCallStarted { call_id: id, name } => {
                 tracing::info!(
                     target: "ailoop.chunk",
                     call_id = %id,
@@ -78,7 +78,9 @@ impl ChatMiddleware for TracingMiddleware {
                 );
             }
             StreamChunk::ToolCallArgsDelta { .. } => {}
-            StreamChunk::ToolCallFinished { id, name, .. } => {
+            StreamChunk::ToolCallFinished {
+                call_id: id, name, ..
+            } => {
                 tracing::debug!(
                     target: "ailoop.chunk",
                     call_id = %id,
@@ -87,7 +89,7 @@ impl ChatMiddleware for TracingMiddleware {
                 );
             }
             StreamChunk::ToolCallMalformed {
-                id,
+                call_id: id,
                 name,
                 raw,
                 error,

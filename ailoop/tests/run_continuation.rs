@@ -39,11 +39,11 @@ fn text_turn(text: &str, reason: FinishReason, usage: Usage) -> Vec<StreamChunk>
 fn tool_call_turn(id: &str) -> Vec<StreamChunk> {
     vec![
         StreamChunk::ToolCallStarted {
-            id: id.into(),
+            call_id: id.into(),
             name: "noop".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: id.into(),
+            call_id: id.into(),
             name: "noop".into(),
             args: json!({}),
         },

@@ -86,7 +86,7 @@ impl ChatMiddleware for ToolResultChunks {
 
 fn call(id: &str, name: &str) -> StreamChunk {
     StreamChunk::ToolCallFinished {
-        id: id.into(),
+        call_id: id.into(),
         name: name.into(),
         args: json!({}),
     }
@@ -144,7 +144,7 @@ fn check_pairing(messages: &[Message]) -> Result<(), String> {
         let calls: Vec<&str> = blocks
             .iter()
             .filter_map(|b| match b {
-                AssistantBlock::ToolCall { id, .. } => Some(id.as_str()),
+                AssistantBlock::ToolCall { call_id: id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();

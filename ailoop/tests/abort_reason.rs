@@ -65,11 +65,11 @@ impl ToolDyn for GetWeather {
 fn tool_turn(id: &str) -> Vec<StreamChunk> {
     vec![
         StreamChunk::ToolCallStarted {
-            id: id.into(),
+            call_id: id.into(),
             name: "get_weather".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: id.into(),
+            call_id: id.into(),
             name: "get_weather".into(),
             args: json!({}),
         },

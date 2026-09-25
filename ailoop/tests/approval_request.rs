@@ -24,11 +24,11 @@ async fn delete_file(_path: String) -> i32 {
 fn tool_turn(id: &str, args: Value) -> Vec<StreamChunk> {
     vec![
         StreamChunk::ToolCallStarted {
-            id: id.into(),
+            call_id: id.into(),
             name: "delete_file".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: id.into(),
+            call_id: id.into(),
             name: "delete_file".into(),
             args,
         },

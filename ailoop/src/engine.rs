@@ -788,11 +788,11 @@ fn run_engine<'a, M: CompletionModel>(
                             assistant_blocks.push(AssistantBlock::text(std::mem::take(&mut text_buf)));
                         }
                     },
-                    StreamChunk::ToolCallFinished { id, name, args } => {
+                    StreamChunk::ToolCallFinished { call_id: id, name, args } => {
                         assistant_blocks.push(AssistantBlock::tool_call(id.clone(), name.clone(), args.clone()));
                         tool_calls.push(PendingCall::Run { id: id.clone(), name: name.clone(), args: args.clone() })
                     },
-                    StreamChunk::ToolCallMalformed { id, name, raw, error } => {
+                    StreamChunk::ToolCallMalformed { call_id: id, name, raw, error } => {
                         // Providers require an object input on replay; the
                         // raw text travels back in the error result instead.
                         assistant_blocks.push(AssistantBlock::tool_call(
@@ -1265,7 +1265,7 @@ mod tests {
         let model = ScriptedModel::new([
             vec![
                 StreamChunk::ToolCallFinished {
-                    id: "toolu_1".into(),
+                    call_id: "toolu_1".into(),
                     name: "get_weather".into(),
                     args: json!({}),
                 },
@@ -1362,11 +1362,11 @@ mod tests {
                 signature: Some("sig-xyz".into()),
             },
             StreamChunk::ToolCallStarted {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "get_weather".into(),
             },
             StreamChunk::ToolCallFinished {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "get_weather".into(),
                 args: json!({"location": "SF"}),
             },
@@ -1429,7 +1429,12 @@ mod tests {
             other => panic!("expected Reasoning first, got {other:?}"),
         }
         match &assistant_blocks[1] {
-            AssistantBlock::ToolCall { id, name, args, .. } => {
+            AssistantBlock::ToolCall {
+                call_id: id,
+                name,
+                args,
+                ..
+            } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(name, "get_weather");
                 assert_eq!(args, &json!({"location": "SF"}));
@@ -1447,11 +1452,11 @@ mod tests {
     async fn engine_chunks_share_run_id_and_step_ids_match_per_iteration() {
         let turn1 = vec![
             StreamChunk::ToolCallStarted {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "get_weather".into(),
             },
             StreamChunk::ToolCallFinished {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "get_weather".into(),
                 args: json!({}),
             },
@@ -1652,20 +1657,20 @@ mod tests {
 
         let turn = vec![
             StreamChunk::ToolCallStarted {
-                id: "toolu_a".into(),
+                call_id: "toolu_a".into(),
                 name: "get_weather".into(),
             },
             StreamChunk::ToolCallFinished {
-                id: "toolu_a".into(),
+                call_id: "toolu_a".into(),
                 name: "get_weather".into(),
                 args: json!({}),
             },
             StreamChunk::ToolCallStarted {
-                id: "toolu_b".into(),
+                call_id: "toolu_b".into(),
                 name: "get_weather".into(),
             },
             StreamChunk::ToolCallFinished {
-                id: "toolu_b".into(),
+                call_id: "toolu_b".into(),
                 name: "get_weather".into(),
                 args: json!({}),
             },
@@ -1711,7 +1716,7 @@ mod tests {
             })
             .flat_map(|blocks| blocks.iter())
             .filter_map(|b| match b {
-                AssistantBlock::ToolCall { id, .. } => Some(id.as_str()),
+                AssistantBlock::ToolCall { call_id: id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
@@ -1758,12 +1763,12 @@ mod tests {
 
         let turn = vec![
             StreamChunk::ToolCallFinished {
-                id: "toolu_a".into(),
+                call_id: "toolu_a".into(),
                 name: "get_weather".into(),
                 args: json!({}),
             },
             StreamChunk::ToolCallFinished {
-                id: "toolu_b".into(),
+                call_id: "toolu_b".into(),
                 name: "get_weather".into(),
                 args: json!({}),
             },
@@ -1843,11 +1848,11 @@ mod tests {
     fn weather_call_turn(usage: Usage) -> Vec<StreamChunk> {
         vec![
             StreamChunk::ToolCallStarted {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "get_weather".into(),
             },
             StreamChunk::ToolCallFinished {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "get_weather".into(),
                 args: json!({}),
             },

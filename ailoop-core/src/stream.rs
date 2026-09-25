@@ -33,13 +33,13 @@ pub enum StreamChunk {
         delta: String,
     },
     /// A new tool call has begun. The model has emitted the tool name
-    /// but no arguments yet. Closed by exactly one matching (same `id`)
+    /// but no arguments yet. Closed by exactly one matching (same `call_id`)
     /// [`Self::ToolCallFinished`] or [`Self::ToolCallMalformed`] once
     /// the call is fully assembled.
     ToolCallStarted {
         /// Provider-assigned id; mirrors back as `call_id` on the
         /// [`Self::ToolResult`] the engine emits after execution.
-        id: String,
+        call_id: String,
         /// Tool name as registered in the request's `tools` list.
         name: String,
     },
@@ -49,8 +49,8 @@ pub enum StreamChunk {
     /// and read [`Self::ToolCallFinished::args`] instead.
     ToolCallArgsDelta {
         /// Tool call id; matches the originating
-        /// [`Self::ToolCallStarted::id`].
-        id: String,
+        /// [`Self::ToolCallStarted::call_id`].
+        call_id: String,
         /// JSON fragment appended this delta.
         delta: String,
     },
@@ -59,8 +59,8 @@ pub enum StreamChunk {
     /// [`Self::ToolResult`] when execution completes.
     ToolCallFinished {
         /// Tool call id; matches the originating
-        /// [`Self::ToolCallStarted::id`].
-        id: String,
+        /// [`Self::ToolCallStarted::call_id`].
+        call_id: String,
         /// Tool name, repeated for convenience so consumers do not
         /// have to track the originating `Started` chunk.
         name: String,
@@ -84,8 +84,8 @@ pub enum StreamChunk {
     /// Adapters build this with [`Self::tool_call_from_raw_args`].
     ToolCallMalformed {
         /// Tool call id; matches the originating
-        /// [`Self::ToolCallStarted::id`].
-        id: String,
+        /// [`Self::ToolCallStarted::call_id`].
+        call_id: String,
         /// Tool name, repeated for convenience.
         name: String,
         /// Argument text exactly as the provider streamed it.
@@ -202,7 +202,7 @@ pub enum StreamChunk {
         run_id: RunId,
         /// Step that owns the tool call.
         step_id: StepId,
-        /// Matches [`Self::ToolCallFinished::id`].
+        /// Matches [`Self::ToolCallFinished::call_id`].
         call_id: String,
         /// Tool reply, with `is_error` preserved for the next provider
         /// turn.
@@ -347,27 +347,31 @@ impl StreamChunk {
     /// Intended for provider adapters, at the point where a tool call's
     /// argument deltas are complete.
     pub fn tool_call_from_raw_args(
-        id: impl Into<String>,
+        call_id: impl Into<String>,
         name: impl Into<String>,
         raw: impl Into<String>,
     ) -> Self {
-        let (id, name, raw) = (id.into(), name.into(), raw.into());
+        let (call_id, name, raw) = (call_id.into(), name.into(), raw.into());
         if raw.trim().is_empty() {
             return Self::ToolCallFinished {
-                id,
+                call_id,
                 name,
                 args: serde_json::Value::Object(Default::default()),
             };
         }
         let error = match serde_json::from_str::<serde_json::Value>(&raw) {
             Ok(args @ serde_json::Value::Object(_)) => {
-                return Self::ToolCallFinished { id, name, args };
+                return Self::ToolCallFinished {
+                    call_id,
+                    name,
+                    args,
+                };
             }
             Ok(_) => "tool arguments must be a JSON object".to_string(),
             Err(e) => e.to_string(),
         };
         Self::ToolCallMalformed {
-            id,
+            call_id,
             name,
             raw,
             error,
@@ -615,7 +619,11 @@ mod tests {
     fn empty_raw_args_are_an_empty_object() {
         for raw in ["", "  \n"] {
             match close(raw) {
-                StreamChunk::ToolCallFinished { id, name, args } => {
+                StreamChunk::ToolCallFinished {
+                    call_id: id,
+                    name,
+                    args,
+                } => {
                     assert_eq!(id, "call_1");
                     assert_eq!(name, "write_file");
                     assert_eq!(args, serde_json::json!({}));
@@ -639,7 +647,7 @@ mod tests {
     fn truncated_raw_args_are_malformed() {
         match close(r#"{"path":"a"#) {
             StreamChunk::ToolCallMalformed {
-                id,
+                call_id: id,
                 name,
                 raw,
                 error,

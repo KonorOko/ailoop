@@ -916,11 +916,11 @@ mod tests {
                 delta: "found two candidates so far".into(),
             },
             StreamChunk::ToolCallStarted {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "lookup".into(),
             },
             StreamChunk::ToolCallFinished {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "lookup".into(),
                 args: json!({}),
             },
@@ -1455,11 +1455,11 @@ mod tests {
     fn lookup_turn() -> Vec<StreamChunk> {
         vec![
             StreamChunk::ToolCallStarted {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "lookup".into(),
             },
             StreamChunk::ToolCallFinished {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "lookup".into(),
                 args: json!({}),
             },
@@ -1654,11 +1654,11 @@ mod tests {
     fn call_turn_with(tool: &str, args: Value, usage: Usage) -> Vec<StreamChunk> {
         vec![
             StreamChunk::ToolCallStarted {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: tool.into(),
             },
             StreamChunk::ToolCallFinished {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: tool.into(),
                 args,
             },

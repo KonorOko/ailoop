@@ -253,7 +253,7 @@ impl ChatMiddleware for JsonTracer {
                 p.insert("bytes".into(), json!(data.len()));
                 self.emit("redacted_reasoning", p).await;
             }
-            StreamChunk::ToolCallStarted { id, name } => {
+            StreamChunk::ToolCallStarted { call_id: id, name } => {
                 let mut p = serde_json::Map::new();
                 p.insert("call_id".into(), json!(id));
                 p.insert("name".into(), json!(name));
@@ -264,7 +264,11 @@ impl ChatMiddleware for JsonTracer {
                 // accumulated args land on `ToolCallFinished` and per-delta
                 // entries would dominate the log.
             }
-            StreamChunk::ToolCallFinished { id, name, args } => {
+            StreamChunk::ToolCallFinished {
+                call_id: id,
+                name,
+                args,
+            } => {
                 let mut p = serde_json::Map::new();
                 p.insert("call_id".into(), json!(id));
                 p.insert("name".into(), json!(name));
@@ -274,7 +278,7 @@ impl ChatMiddleware for JsonTracer {
                 self.emit("tool_call_finished", p).await;
             }
             StreamChunk::ToolCallMalformed {
-                id,
+                call_id: id,
                 name,
                 raw,
                 error,
@@ -697,11 +701,11 @@ mod tests {
         let model = ScriptedModel::new([
             vec![
                 StreamChunk::ToolCallStarted {
-                    id: "toolu_1".into(),
+                    call_id: "toolu_1".into(),
                     name: "echo".into(),
                 },
                 StreamChunk::ToolCallFinished {
-                    id: "toolu_1".into(),
+                    call_id: "toolu_1".into(),
                     name: "echo".into(),
                     args: json!({}),
                 },

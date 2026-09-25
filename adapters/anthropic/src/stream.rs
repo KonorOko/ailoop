@@ -86,9 +86,9 @@ where
                                 name: name.clone(),
                                 args_buf: prepopulated_args.clone().unwrap_or_default(),
                             });
-                            yield StreamChunk::ToolCallStarted { id: id.clone(), name };
+                            yield StreamChunk::ToolCallStarted { call_id: id.clone(), name };
                             if let Some(delta) = prepopulated_args {
-                                yield StreamChunk::ToolCallArgsDelta { id, delta };
+                                yield StreamChunk::ToolCallArgsDelta { call_id: id, delta };
                             }
                         }
                         AnthropicBlock::Thinking { thinking, signature } => {
@@ -120,7 +120,7 @@ where
                         if let Some(BlockState::ToolUse { id, args_buf, .. }) = blocks.get_mut(&index) {
                             args_buf.push_str(&partial_json);
                             yield StreamChunk::ToolCallArgsDelta {
-                                id: id.clone(),
+                                call_id: id.clone(),
                                 delta: partial_json,
                             };
                         }
@@ -350,28 +350,32 @@ mod tests {
             other => panic!("expected ReasoningFinished, got {other:?}"),
         }
         match iter.next().expect("tool call start") {
-            StreamChunk::ToolCallStarted { id, name } => {
+            StreamChunk::ToolCallStarted { call_id: id, name } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(name, "get_weather");
             }
             other => panic!("expected ToolCallStarted, got {other:?}"),
         }
         match iter.next().expect("args delta 1") {
-            StreamChunk::ToolCallArgsDelta { id, delta } => {
+            StreamChunk::ToolCallArgsDelta { call_id: id, delta } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(delta, "{\"location\":");
             }
             other => panic!("expected ToolCallArgsDelta, got {other:?}"),
         }
         match iter.next().expect("args delta 2") {
-            StreamChunk::ToolCallArgsDelta { id, delta } => {
+            StreamChunk::ToolCallArgsDelta { call_id: id, delta } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(delta, "\"SF\"}");
             }
             other => panic!("expected ToolCallArgsDelta, got {other:?}"),
         }
         match iter.next().expect("tool call end") {
-            StreamChunk::ToolCallFinished { id, name, args } => {
+            StreamChunk::ToolCallFinished {
+                call_id: id,
+                name,
+                args,
+            } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(name, "get_weather");
                 assert_eq!(args, json!({"location": "SF"}));
@@ -593,14 +597,14 @@ mod tests {
             other => panic!("expected TextDelta, got {other:?}"),
         }
         match iter.next().expect("tool call started") {
-            StreamChunk::ToolCallStarted { id, name } => {
+            StreamChunk::ToolCallStarted { call_id: id, name } => {
                 assert_eq!(id, "toolu_cached");
                 assert_eq!(name, "get_weather");
             }
             other => panic!("expected ToolCallStarted, got {other:?}"),
         }
         match iter.next().expect("args delta from prepopulated input") {
-            StreamChunk::ToolCallArgsDelta { id, delta } => {
+            StreamChunk::ToolCallArgsDelta { call_id: id, delta } => {
                 assert_eq!(id, "toolu_cached");
                 // Serialization is deterministic for a single-key object.
                 assert_eq!(delta, r#"{"location":"SF"}"#);
@@ -608,7 +612,11 @@ mod tests {
             other => panic!("expected ToolCallArgsDelta, got {other:?}"),
         }
         match iter.next().expect("tool call finished") {
-            StreamChunk::ToolCallFinished { id, name, args } => {
+            StreamChunk::ToolCallFinished {
+                call_id: id,
+                name,
+                args,
+            } => {
                 assert_eq!(id, "toolu_cached");
                 assert_eq!(name, "get_weather");
                 assert_eq!(args, json!({"location": "SF"}));
@@ -747,7 +755,7 @@ mod tests {
             .iter()
             .find_map(|c| match c {
                 StreamChunk::ToolCallMalformed {
-                    id,
+                    call_id: id,
                     name,
                     raw,
                     error,

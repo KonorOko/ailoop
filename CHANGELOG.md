@@ -409,6 +409,17 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- The tool call id is `call_id` everywhere. `AssistantBlock::ToolCall`
+  and the `StreamChunk::ToolCallStarted` / `ToolCallArgsDelta` /
+  `ToolCallFinished` / `ToolCallMalformed` variants called it `id`,
+  while `UserBlock::ToolResult`, `StreamChunk::ToolResult`,
+  `ToolCallInfo`, `ApprovalRequest` and `AbortReason::ToolTerminated`
+  called the same value `call_id`, so matching a call to its result
+  meant translating field names. `AssistantBlock::ToolCall` now
+  serializes the field as `call_id`; deserialization still accepts
+  `id`, so snapshots saved with 1.0.0-rc.3 load unchanged (an rc.3
+  build cannot read snapshots written by this version).
+
 - The modules of `ailoop-core` (`config`, `ids`, `message`,
   `middleware`, `provider_error`, `request`, `retry`, `stream`),
   `ailoop-history` (`compaction`, `errors`, `history`, `history_store`,
@@ -754,6 +765,19 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Rename `id` to `call_id` when matching or building tool call blocks
+and chunks:
+
+```rust
+// Before (1.0.0-rc.3)
+if let StreamChunk::ToolCallFinished { id, name, args } = chunk { /* .. */ }
+AssistantBlock::ToolCall { id, name, args, .. } => { /* .. */ }
+
+// After
+if let StreamChunk::ToolCallFinished { call_id, name, args } = chunk { /* .. */ }
+AssistantBlock::ToolCall { call_id, name, args, .. } => { /* .. */ }
+```
 
 Import from the crate root (or from `ailoop`) instead of a module
 path:

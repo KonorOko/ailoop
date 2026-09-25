@@ -78,7 +78,12 @@ pub trait Tokenizer: Send + Sync {
                 for block in blocks {
                     match block {
                         AssistantBlock::Text { text, .. } => total += self.count_text(text),
-                        AssistantBlock::ToolCall { id, name, args, .. } => {
+                        AssistantBlock::ToolCall {
+                            call_id: id,
+                            name,
+                            args,
+                            ..
+                        } => {
                             total += self.count_text(id)
                                 + self.count_text(name)
                                 + self.count_text(&args.to_string());
