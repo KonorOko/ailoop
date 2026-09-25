@@ -156,6 +156,11 @@ pub struct RunOptions {
     /// fresh UUID v4. Set this when an outer system needs to correlate
     /// the run with its own trace id.
     pub run_id: Option<RunId>,
+    /// Run-scoped middlewares appended after the builder's chain
+    /// (after `ApprovalMiddleware`). Internal: used by
+    /// [`crate::SubAgentTool`] to install its wrap-up middleware for a
+    /// single child run without touching the public ordering contract.
+    pub(crate) extra_middlewares: Vec<Arc<dyn ChatMiddleware>>,
 }
 
 impl RunOptions {
@@ -432,6 +437,7 @@ where
 
         let mut config = RunConfig::default();
         config.middlewares = self.middlewares.clone();
+        config.middlewares.extend(options.extra_middlewares);
         config.run_id = Some(run_id.clone());
         config.timeout = options.timeout;
         config.cancellation = options.cancellation;

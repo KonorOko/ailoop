@@ -10,6 +10,26 @@ and this project adheres to
 
 ### Added
 
+- `SubAgentConfig::wrap_up(WrapUp)`: an opt-in graceful cutoff for
+  `SubAgentTool`. Today, when a child run hits its `timeout` or
+  `max_iterations`, the parent gets `"sub-agent aborted (…)"` with
+  `is_error: true`, and whatever the child found after its last text
+  block is lost. With `wrap_up`, the child's last turn before the hard
+  cutoff is forced to be a summary: it runs on the last allowed
+  iteration, or on the first request after `timeout *
+  WrapUp::time_fraction` (default `0.8`). That request sets
+  `tool_choice` to `ToolChoice::None_` but keeps the tool definitions,
+  so the prompt cache survives. It also appends `WrapUp::instruction`
+  (default `DEFAULT_WRAP_UP_INSTRUCTION`) to the last user message.
+  The instruction only goes into that request, never into the child's
+  history. If the summary finishes, the parent receives
+  `"[partial: sub-agent reached its time budget]\n<summary>"` (or
+  `iteration budget`) with `is_error: false`. The signal lives in the
+  text because the parent model only sees the tool result. The hard
+  timeout is still absolute: if it fires before the summary is done,
+  the result is the usual abort with `is_error: true`. Without
+  `wrap_up`, behavior is unchanged. `WrapUp` and
+  `DEFAULT_WRAP_UP_INSTRUCTION` are re-exported from `ailoop`.
 - `ProviderError` trait (in `ailoop-core`, re-exported from `ailoop`)
   with `is_context_overflow()`, which defaults to `false`. It answers
   "did the provider reject this prompt because it does not fit the
