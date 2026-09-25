@@ -213,12 +213,12 @@ async fn history_is_rolled_back_after_err() {
         broken_turn(),
     ]);
     chat.run("first").await.expect("first run succeeds");
-    let before = debug(chat.history_messages());
+    let before = debug(chat.messages());
 
     let err = chat.run("second").await.expect_err("third step fails");
     assert_two_complete_steps(&err);
 
-    let history = chat.history_messages();
+    let history = chat.messages();
     assert_eq!(history.len(), before.len() + 1, "prior turns + kickoff");
     assert_eq!(debug(&history[..before.len()]), before);
     assert!(matches!(history.last(), Some(Message::User { .. })));
@@ -234,9 +234,9 @@ async fn reapplying_partial_messages_leaves_a_valid_history() {
     ]);
 
     let err = chat.run("go").await.expect_err("third step fails");
-    chat.history_extend(err.partial_messages().iter().cloned());
+    chat.extend_messages(err.partial_messages().iter().cloned());
 
-    let history = chat.history_messages();
+    let history = chat.messages();
     assert_eq!(history.len(), 5, "kickoff + two completed steps");
     assert_eq!(debug(&history[1..]), debug(err.partial_messages()));
     assert_no_orphans(history);
@@ -249,7 +249,7 @@ async fn reapplying_partial_messages_leaves_a_valid_history() {
         vec![6],
         "the next request carries the re-applied steps"
     );
-    assert_no_orphans(chat.history_messages());
+    assert_no_orphans(chat.messages());
     assert_eq!(calls.load(Ordering::SeqCst), 2, "no tool ran twice");
 }
 
@@ -266,7 +266,7 @@ async fn error_in_first_step_has_no_partial_messages() {
         assert!(matches!(err.kind(), EngineError::Model(_)), "{err:?}");
         assert!(err.partial_messages().is_empty(), "{err:?}");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert_eq!(chat.history_messages().len(), 1, "only the kickoff");
+        assert_eq!(chat.messages().len(), 1, "only the kickoff");
         assert_eq!(*spy.run_errors.lock().unwrap(), vec![Vec::<Message>::new()]);
     }
 }

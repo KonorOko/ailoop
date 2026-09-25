@@ -117,7 +117,7 @@ pub enum EngineError<E: std::error::Error> {
 /// if let Err(err) = chat.run("deploy the service").await {
 ///     eprintln!("run failed: {err}");
 ///     let parts = err.into_parts();
-///     chat.history_extend(parts.partial_messages);
+///     chat.extend_messages(parts.partial_messages);
 /// }
 /// # }
 /// ```

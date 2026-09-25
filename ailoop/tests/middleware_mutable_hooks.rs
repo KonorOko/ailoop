@@ -448,7 +448,7 @@ async fn replacing_run_finished_variant_is_ignored() {
         outcome.finish_reason
     );
     assert_eq!(outcome.final_text.as_deref(), Some("hello"));
-    assert_eq!(conv.history_messages().len(), 2);
+    assert_eq!(conv.messages().len(), 2);
 }
 
 #[tokio::test]

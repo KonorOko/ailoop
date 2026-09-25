@@ -230,7 +230,7 @@ async fn gate_continuation_is_committed_to_conversation_history() {
 
     assert!(matches!(outcome.finish_reason, FinishReason::EndTurn));
     assert_eq!(outcome.final_text.as_deref(), Some("really done"));
-    let history = chat.history_messages();
+    let history = chat.messages();
     assert_eq!(
         history.len(),
         4,

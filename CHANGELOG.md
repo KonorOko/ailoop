@@ -125,9 +125,9 @@ and this project adheres to
   response arrives before that step's tools run, so no executed tool
   is missing. The rollback guarantee is unchanged; the list is a copy
   the caller can keep or drop.
-- `Conversation::history_extend(messages)`: append several messages
-  without running, like `history_push`. Use it to keep the steps of a
-  failed run: `chat.history_extend(err.partial_messages().iter().cloned())`.
+- `Conversation::extend_messages(messages)`: append several messages
+  without running, like `push_message`. Use it to keep the steps of a
+  failed run: `chat.extend_messages(err.partial_messages().iter().cloned())`.
 - `StreamChunk::ToolCallMalformed { id, name, raw, error }`: closes a
   streamed tool call whose argument text is not a JSON object, in place
   of `ToolCallFinished`. `StreamChunk::tool_call_from_raw_args(id, name,
@@ -408,6 +408,13 @@ and this project adheres to
   "Tool calls within a step" on `ChatMiddleware`.
 
 ### Changed (BREAKING)
+
+- `Conversation::history_messages()` is `messages()` and
+  `Conversation::history_push(message)` is `push_message(message)`
+  (the new `history_extend` is `extend_messages`). The `history_`
+  prefix named the internal `History` field rather than what the
+  methods do, and `messages()` matches `History::messages()` and
+  `ConversationSnapshot::messages`.
 
 - `ConversationBuilder` setters drop the `with_` prefix:
   `with_history` → `history`, `with_capabilities` → `capabilities`,
@@ -800,6 +807,18 @@ and this project adheres to
 
 ### Migration
 
+Rename the `Conversation` history accessors:
+
+```rust
+// Before (1.0.0-rc.3)
+let msgs = chat.history_messages();
+chat.history_push(Message::user("seed"));
+
+// After
+let msgs = chat.messages();
+chat.push_message(Message::user("seed"));
+```
+
 Drop `with_` from the `ConversationBuilder` setters:
 
 ```rust
@@ -1064,7 +1083,7 @@ match chat.run("go").await {
 
 // New: keep the steps that completed before the failure
 if let Err(err) = chat.run("go").await {
-    chat.history_extend(err.partial_messages().iter().cloned());
+    chat.extend_messages(err.partial_messages().iter().cloned());
 }
 ```
 

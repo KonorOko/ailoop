@@ -141,8 +141,8 @@ where
     M::Error: ailoop::ProviderError,
 {
     for i in 0..2 {
-        chat.history_push(Message::user(format!("{i}{}", "q".repeat(399))));
-        chat.history_push(Message::assistant_text(format!("{i}{}", "a".repeat(399))));
+        chat.push_message(Message::user(format!("{i}{}", "q".repeat(399))));
+        chat.push_message(Message::assistant_text(format!("{i}{}", "a".repeat(399))));
     }
 }
 
@@ -261,7 +261,7 @@ async fn compacts_between_iterations_when_enabled() {
     };
     assert_eq!(new_messages.len(), 3, "tool_use, tool_result, final text");
 
-    let history = chat.history_messages();
+    let history = chat.messages();
     assert_eq!(history.len(), 4, "kickoff + pair + final text");
     assert!(matches!(&history[0], Message::User { .. }));
     assert_no_orphans(history);
@@ -280,7 +280,7 @@ async fn does_not_compact_between_iterations_by_default() {
     let chunks = collect(&mut chat, "go").await;
     assert!(compacted_counts(&chunks).is_empty());
     assert_eq!(*sizes.lock().unwrap(), vec![5, 7]);
-    assert_eq!(chat.history_messages().len(), 8);
+    assert_eq!(chat.messages().len(), 8);
 }
 
 /// The provider rejects the first request as too long; the engine
@@ -310,7 +310,7 @@ async fn overflow_compacts_and_retries_once() {
     assert_eq!(counters.chat_requests.load(Ordering::SeqCst), 2);
     assert_eq!(counters.run_errors.load(Ordering::SeqCst), 0);
 
-    let history = chat.history_messages();
+    let history = chat.messages();
     assert_eq!(history.len(), 2, "kickoff + reply");
     assert!(matches!(&history[1], Message::Assistant { .. }));
 }
@@ -337,7 +337,7 @@ async fn overflow_after_tool_call_keeps_pairs_intact() {
     assert_eq!(outcome.new_messages.len(), 3);
     assert_eq!(*sizes.lock().unwrap(), vec![5, 7, 3]);
 
-    let history = chat.history_messages();
+    let history = chat.messages();
     assert_eq!(history.len(), 4);
     assert_no_orphans(history);
 }
@@ -357,11 +357,7 @@ async fn persistent_overflow_is_a_typed_error_and_rolls_back() {
         .build()
         .unwrap();
     seed_prior_turns(&mut chat);
-    let before: Vec<String> = chat
-        .history_messages()
-        .iter()
-        .map(|m| format!("{m:?}"))
-        .collect();
+    let before: Vec<String> = chat.messages().iter().map(|m| format!("{m:?}")).collect();
 
     let err = chat.run("go").await.expect_err("overflow persists");
     match err.into_kind() {
@@ -373,7 +369,7 @@ async fn persistent_overflow_is_a_typed_error_and_rolls_back() {
     assert_eq!(*sizes.lock().unwrap(), vec![5, 7, 3]);
     assert_eq!(counters.run_errors.load(Ordering::SeqCst), 1);
 
-    let history = chat.history_messages();
+    let history = chat.messages();
     assert_eq!(history.len(), 5, "prior turns + kickoff");
     let after: Vec<String> = history.iter().take(4).map(|m| format!("{m:?}")).collect();
     assert_eq!(after, before, "prior turns restored verbatim");
@@ -395,7 +391,7 @@ async fn overflow_with_nothing_to_compact_fails_without_retry() {
         "{err:?}"
     );
     assert_eq!(*sizes.lock().unwrap(), vec![1]);
-    assert_eq!(chat.history_messages().len(), 1);
+    assert_eq!(chat.messages().len(), 1);
 }
 
 #[tokio::test]
@@ -411,7 +407,7 @@ async fn overflow_is_a_model_error_when_recovery_is_off() {
     let err = chat.run("go").await.expect_err("no recovery");
     assert!(matches!(err.kind(), EngineError::Model(_)), "{err:?}");
     assert_eq!(*sizes.lock().unwrap(), vec![5]);
-    assert_eq!(chat.history_messages().len(), 5);
+    assert_eq!(chat.messages().len(), 5);
 }
 
 /// Dropping the stream mid-run discards the run's changes, including a
@@ -436,5 +432,5 @@ async fn dropping_the_stream_mid_run_rolls_back_history() {
         }
     }
 
-    assert_eq!(chat.history_messages().len(), 5, "prior turns + kickoff");
+    assert_eq!(chat.messages().len(), 5, "prior turns + kickoff");
 }

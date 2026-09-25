@@ -181,7 +181,7 @@ async fn deferred_tool_called_without_activation_does_not_run() {
     assert_eq!(*approvals.lock().unwrap(), 0, "rejected before the gate");
     assert!(hooks.0.lock().unwrap().is_empty(), "no tool hook fires");
 
-    let content = result_for(chat.history_messages(), "toolu_1");
+    let content = result_for(chat.messages(), "toolu_1");
     assert_not_found(&content, "delete_file");
     assert!(
         content
@@ -215,7 +215,7 @@ async fn tool_activated_at_runtime_runs() {
 
     assert!(matches!(outcome.finish_reason, FinishReason::EndTurn));
     assert_eq!(*executed.lock().unwrap(), 1);
-    let content = result_for(chat.history_messages(), "toolu_2");
+    let content = result_for(chat.messages(), "toolu_2");
     assert!(!content.is_error);
     assert_eq!(content.collect_text(), "done");
 }
@@ -248,7 +248,7 @@ async fn capability_filtered_tool_never_runs() {
     assert!(matches!(outcome.finish_reason, FinishReason::EndTurn));
     assert_eq!(*executed.lock().unwrap(), 0, "filtered tool must never run");
 
-    let messages = chat.history_messages();
+    let messages = chat.messages();
     assert_not_found(&result_for(messages, "toolu_1"), "delete_file");
     let activation = result_for(messages, "toolu_2");
     assert!(activation.is_error, "activate must fail: {activation:?}");

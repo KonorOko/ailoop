@@ -252,7 +252,7 @@ async fn max_iterations_produces_max_iterations_and_keeps_partial_work() {
 
     // Kickoff + the run's new messages land in history.
     assert_eq!(
-        chat.history_messages().len(),
+        chat.messages().len(),
         1 + outcome.new_messages.len(),
         "partial work must be persisted to history"
     );

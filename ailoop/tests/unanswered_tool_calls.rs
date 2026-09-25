@@ -201,7 +201,7 @@ async fn timeout_during_first_call_answers_both_calls() {
         assert_not_run(content, &AbortReason::Timeout(timeout).to_string());
     }
     assert_eq!(chunks.ids(), ["toolu_a", "toolu_b"]);
-    check_pairing(chat.history_messages()).unwrap();
+    check_pairing(chat.messages()).unwrap();
 }
 
 #[tokio::test]
@@ -233,7 +233,7 @@ async fn cancellation_during_first_call_answers_both_calls() {
         assert_not_run(content, "cancelled by caller");
     }
     assert_eq!(chunks.ids(), ["toolu_a", "toolu_b"]);
-    check_pairing(chat.history_messages()).unwrap();
+    check_pairing(chat.messages()).unwrap();
 }
 
 /// Streams one finished tool call, then never ends.
@@ -284,7 +284,7 @@ async fn abort_mid_stream_answers_finished_tool_calls() {
     assert_eq!(results[0].0, "toolu_a");
     assert!(results[0].1.is_error);
     assert_eq!(chunks.ids(), ["toolu_a"]);
-    check_pairing(chat.history_messages()).unwrap();
+    check_pairing(chat.messages()).unwrap();
 }
 
 /// Rejects a request whose history leaves a `tool_use` unanswered, the
@@ -341,7 +341,7 @@ async fn conversation_continues_after_terminate_mid_step() {
         outcome.finish_reason,
         FinishReason::Aborted(AbortReason::ToolTerminated { .. })
     ));
-    check_pairing(chat.history_messages()).unwrap();
+    check_pairing(chat.messages()).unwrap();
 
     let next = chat
         .run("go on")

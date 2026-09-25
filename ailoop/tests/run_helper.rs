@@ -49,19 +49,18 @@ async fn run_returns_final_text_for_text_only_turn() {
     assert_eq!(outcome.usage.output_tokens, 7);
 
     // History must contain the user input and the assistant turn.
-    let assistant_text: Option<String> =
-        chat.history_messages().iter().rev().find_map(|m| match m {
-            Message::Assistant { blocks } => {
-                let mut s = String::new();
-                for b in blocks {
-                    if let AssistantBlock::Text { text: t, .. } = b {
-                        s.push_str(t);
-                    }
+    let assistant_text: Option<String> = chat.messages().iter().rev().find_map(|m| match m {
+        Message::Assistant { blocks } => {
+            let mut s = String::new();
+            for b in blocks {
+                if let AssistantBlock::Text { text: t, .. } = b {
+                    s.push_str(t);
                 }
-                Some(s)
             }
-            _ => None,
-        });
+            Some(s)
+        }
+        _ => None,
+    });
     assert_eq!(assistant_text.as_deref(), Some("hello world"));
 }
 
@@ -234,8 +233,8 @@ async fn run_drains_history_compacted_prelude_without_clobbering_outcome() {
     // this test. Stuff enough text to overshoot it.
     let big = "x".repeat(200);
     for _ in 0..15 {
-        chat.history_push(Message::user(big.clone()));
-        chat.history_push(Message::assistant_text(big.clone()));
+        chat.push_message(Message::user(big.clone()));
+        chat.push_message(Message::assistant_text(big.clone()));
     }
 
     let outcome = chat.run("trigger run").await.expect("run");
@@ -280,7 +279,7 @@ async fn run_extends_history_exactly_once_per_call() {
     assert_eq!(outcome.final_text.as_deref(), Some("second"));
 
     // Two user inputs + two assistant replies = 4 messages total.
-    let history = chat.history_messages();
+    let history = chat.messages();
     let user_count = history
         .iter()
         .filter(|m| matches!(m, Message::User { .. }))

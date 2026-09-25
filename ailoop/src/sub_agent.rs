@@ -1536,7 +1536,7 @@ mod tests {
 
         let conv = tool.conversation.lock().await;
         assert!(
-            !history_mentions(conv.history_messages(), "WRAP UP NOW"),
+            !history_mentions(conv.messages(), "WRAP UP NOW"),
             "the wrap-up instruction is request-only"
         );
     }

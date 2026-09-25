@@ -251,7 +251,7 @@ where
     /// in tests and for callers who want to inspect or persist the
     /// conversation state outside of [`Conversation::run`] /
     /// [`Conversation::stream`].
-    pub fn history_messages(&self) -> &[Message] {
+    pub fn messages(&self) -> &[Message] {
         self.history.messages()
     }
 
@@ -260,12 +260,12 @@ where
     /// need to overflow the compaction budget before issuing a real
     /// turn). Compaction is **not** triggered here — that happens on
     /// the next [`Conversation::run`] / [`Conversation::stream`] call.
-    pub fn history_push(&mut self, message: Message) {
+    pub fn push_message(&mut self, message: Message) {
         self.history.add_message(message);
     }
 
     /// Append several messages to history without going through a run,
-    /// in order. Same contract as [`Self::history_push`]: compaction
+    /// in order. Same contract as [`Self::push_message`]: compaction
     /// waits for the next run.
     ///
     /// The main use is keeping the steps a failed run completed: a run
@@ -278,11 +278,11 @@ where
     /// # async fn demo<M>(chat: &mut ailoop::Conversation<M>)
     /// # where M: ailoop::CompletionModel, M::Error: ailoop::ProviderError {
     /// if let Err(err) = chat.run("migrate the database").await {
-    ///     chat.history_extend(err.partial_messages().iter().cloned());
+    ///     chat.extend_messages(err.partial_messages().iter().cloned());
     /// }
     /// # }
     /// ```
-    pub fn history_extend(&mut self, messages: impl IntoIterator<Item = Message>) {
+    pub fn extend_messages(&mut self, messages: impl IntoIterator<Item = Message>) {
         for message in messages {
             self.history.add_message(message);
         }
@@ -439,7 +439,7 @@ where
     ///
     /// History is extended with the run's `new_messages` exactly once,
     /// keyed off the terminal `RunFinished` chunk — pair this with
-    /// [`Conversation::history_messages`] only after the stream has
+    /// [`Conversation::messages`] only after the stream has
     /// fully drained.
     ///
     /// If [`History::compact_if_needed`] fires before the
@@ -457,7 +457,7 @@ where
     /// pre-run compaction, if any, ran). On `Err`, the steps the run
     /// completed before failing travel in
     /// [`RunError::partial_messages`]; append them with
-    /// [`Self::history_extend`] to keep them.
+    /// [`Self::extend_messages`] to keep them.
     pub async fn stream(
         &mut self,
         input: impl Into<Message>,
@@ -2233,9 +2233,9 @@ mod tests {
         let mut chat = Conversation::builder(one_turn_model())
             .build()
             .expect("builder should succeed");
-        chat.history_push(Message::user("anchor"));
+        chat.push_message(Message::user("anchor"));
         chat.history.pin_last();
-        chat.history_push(Message::assistant_text("ack"));
+        chat.push_message(Message::assistant_text("ack"));
 
         let snapshot = chat.snapshot();
         assert_eq!(snapshot.pinned, vec![true, false]);
@@ -2243,7 +2243,7 @@ mod tests {
         let resumed = ConversationBuilder::from_snapshot(one_turn_model(), snapshot)
             .build()
             .expect("builder should succeed");
-        assert_eq!(resumed.history_messages().len(), 2);
+        assert_eq!(resumed.messages().len(), 2);
         assert!(resumed.history.is_pinned(0));
         assert!(!resumed.history.is_pinned(1));
     }
@@ -2268,7 +2268,7 @@ mod tests {
             .expect("builder should succeed");
         chat.run("hi").await.expect("run should succeed");
 
-        match &chat.history_messages()[0] {
+        match &chat.messages()[0] {
             Message::User { blocks } => {
                 assert_eq!(blocks.len(), 1);
                 match &blocks[0] {
@@ -2293,7 +2293,7 @@ mod tests {
             .await
             .expect("run should succeed");
 
-        match &chat.history_messages()[0] {
+        match &chat.messages()[0] {
             Message::User { blocks } => match &blocks[0] {
                 UserBlock::Text { text, .. } => assert_eq!(text, "hi"),
                 other => panic!("expected Text block, got {other:?}"),
@@ -2323,7 +2323,7 @@ mod tests {
         .await
         .expect("run should succeed");
 
-        match &chat.history_messages()[0] {
+        match &chat.messages()[0] {
             Message::User { blocks } => {
                 assert_eq!(blocks.len(), 2);
                 match &blocks[0] {
@@ -2359,7 +2359,7 @@ mod tests {
         .await
         .expect("run should succeed");
 
-        match &chat.history_messages()[0] {
+        match &chat.messages()[0] {
             Message::User { blocks } => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UserBlock::Image { .. }));
@@ -2386,7 +2386,7 @@ mod tests {
             .expect("builder should succeed");
         chat.run(blocks).await.expect("run should succeed");
 
-        match &chat.history_messages()[0] {
+        match &chat.messages()[0] {
             Message::User { blocks } => {
                 assert_eq!(blocks.len(), 2);
                 assert!(matches!(blocks[0], UserBlock::Text { .. }));
