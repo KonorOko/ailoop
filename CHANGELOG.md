@@ -10,6 +10,14 @@ and this project adheres to
 
 ### Added
 
+- `DEFAULT_MAX_ITERATIONS` (`usize`, 25) and `DEFAULT_MAX_TOKENS`
+  (`u32`, 4096), re-exported from `ailoop`. They name the defaults
+  `RunConfig::default()` uses (and `ChatRequest::default()` for
+  `max_tokens`), which were bare literals, so code that derives its own
+  limits from them (for example "twice the default" for a sub-agent)
+  follows any future change instead of copying the number. Same style
+  as `DEFAULT_HISTORY_MAX_TOKENS`. The values do not change.
+
 - `HookAction` and `ToolDecision` derive `Debug`, and `FinishReason`
   derives `PartialEq` and `Eq`. A middleware unit test can now print the
   decision it got back and write

@@ -11,6 +11,11 @@ fn reexports_compile() {
     let _ = ToolResultBlock::text("ok");
     let _ = ContinueDecision::continue_with("keep going");
     let _ = ContinueDecision::default();
+    assert_eq!(
+        RunConfig::default().max_iterations,
+        ailoop::DEFAULT_MAX_ITERATIONS
+    );
+    assert_eq!(RunConfig::default().max_tokens, ailoop::DEFAULT_MAX_TOKENS);
 }
 
 /// The hook context structs are built from the facade alone, the way a

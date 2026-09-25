@@ -80,7 +80,7 @@ impl Default for ChatRequest {
             top_p: None,
             top_k: None,
             stop_sequences: Vec::new(),
-            max_tokens: 4096,
+            max_tokens: crate::config::DEFAULT_MAX_TOKENS,
             tool_choice: None,
             parallel_tool_use: None,
             reasoning_effort: None,
