@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use ailoop::{
-    ChatMiddleware, Conversation, FinishReason, Message, RunId, StepId, StreamChunk, ToolContext,
+    ChatMiddleware, Conversation, FinishReason, Message, StreamChunk, ToolCallInfo, ToolContext,
     ToolDecision, ToolDefinition, ToolDyn, ToolResultContent, ToolTag, Usage, UserBlock,
 };
 use ailoop_core::testing::ScriptedModel;
@@ -72,14 +72,8 @@ struct HookLog(Mutex<Vec<String>>);
 
 #[async_trait]
 impl ChatMiddleware for HookLog {
-    async fn on_before_tool_call(
-        &self,
-        _run_id: &RunId,
-        _step_id: &StepId,
-        name: &str,
-        _args: &Value,
-    ) -> ToolDecision {
-        self.0.lock().unwrap().push(name.to_string());
+    async fn on_before_tool_call(&self, call: &ToolCallInfo, _args: &Value) -> ToolDecision {
+        self.0.lock().unwrap().push(call.name.clone());
         ToolDecision::Continue
     }
 }

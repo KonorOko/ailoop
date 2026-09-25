@@ -67,8 +67,8 @@ pub use ailoop_core::{
     ChatRequest, CompletionClient, CompletionModel, ContinueDecision, FinishReason, HookAction,
     Message, ProviderError, ReasoningEffort, RetryClassification, RetryConfig, Retryable,
     RetryingModel, RunConfig, RunId, Source, StepId, StreamChunk, SystemBlock, SystemPrompt,
-    Tokenizer, ToolChoice, ToolDecision, ToolDefinition, ToolResultBlock, ToolResultContent,
-    ToolTag, Usage, UserBlock,
+    Tokenizer, ToolCallInfo, ToolChoice, ToolDecision, ToolDefinition, ToolResultBlock,
+    ToolResultContent, ToolTag, Usage, UserBlock,
 };
 pub use ailoop_derive::{ToolJsonType, ailoop_tool};
 pub use ailoop_history::{

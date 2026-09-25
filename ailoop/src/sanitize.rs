@@ -2,8 +2,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use ailoop_core::{
-    AssistantBlock, ChatMiddleware, ChatRequest, Message, RunId, StepId, ToolResultContent,
-    UserBlock,
+    AssistantBlock, ChatMiddleware, ChatRequest, Message, RunId, StepId, ToolCallInfo,
+    ToolResultContent, UserBlock,
 };
 use serde_json::Value;
 
@@ -193,22 +193,20 @@ impl ChatMiddleware for Sanitize {
         }
     }
 
-    async fn on_before_tool_call_mut(&self, _: &RunId, _: &StepId, name: &str, args: &mut Value) {
+    async fn on_before_tool_call_mut(&self, call: &ToolCallInfo, args: &mut Value) {
         for r in &self.tool_args {
-            r(name, args);
+            r(&call.name, args);
         }
     }
 
     async fn on_after_tool_call_mut(
         &self,
-        _: &RunId,
-        _: &StepId,
-        name: &str,
+        call: &ToolCallInfo,
         _args: &Value,
         result: &mut ToolResultContent,
     ) {
         for r in &self.tool_result {
-            r(name, result);
+            r(&call.name, result);
         }
     }
 }

@@ -10,6 +10,31 @@ and this project adheres to
 
 ### Added
 
+- `ToolCallInfo` (re-exported from `ailoop`): the identity of one tool
+  call, passed to every tool hook of `ChatMiddleware`. Public fields
+  `run_id`, `step_id`, `call_id` (the provider-assigned id, the same as
+  `id` on `ToolCallFinished` and `call_id` on `ToolResult`) and `name`.
+  It is `#[non_exhaustive]` so more per-call data can be added without
+  breaking middlewares; `ToolCallInfo::new` builds one to unit-test a
+  hook.
+
+- `ToolContext::call_id()`: the id of the call being dispatched, so a
+  tool can correlate its own logs or side effects with the
+  `ToolResult` chunk and the middleware hooks. `ToolContext::detached`
+  mints a synthetic one.
+
+- `ApprovalRequest::call_id` and `ApprovalRequest::with_call_id`.
+  `ApprovalMiddleware` fills it, so an approval UI or verifier can
+  tell apart two identical calls in one step and match its decision
+  to the `ToolResult` chunk. `ApprovalRequest::new` leaves it empty.
+
+- `JsonTracer` writes `call_id` on `before_tool_call` and
+  `after_tool_call` lines, and `TracingMiddleware` adds a `call_id`
+  field to its "tool call starting" / "tool call finished" events.
+  Before, those events could not be matched to `tool_call_finished` /
+  `tool_result`, or to each other when a step called the same tool
+  twice. Additive within `schema: 1`.
+
 - `RunError::usage()`: what a failed run spent before the error, counted
   like `RunFinished.usage` (finished provider turns plus usage reported
   by tools, sub-agents included). Before, a run ending in `Err` lost its
@@ -346,6 +371,26 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- The four tool hooks of `ChatMiddleware` take a `&ToolCallInfo` in
+  place of `run_id, step_id, name`: `on_before_tool_call(call, args)`,
+  `on_before_tool_call_mut(call, args)`,
+  `on_after_tool_call(call, args, result)` and
+  `on_after_tool_call_mut(call, args, result)`. The hooks never saw the
+  provider's call id, so a middleware could not pair an
+  `on_after_tool_call` with its `on_before_tool_call`: two calls to the
+  same tool with the same arguments in one step were
+  indistinguishable. The order between the calls of a step is not
+  guaranteed (they may run concurrently in a later release), so
+  per-call state has to be keyed by `(run_id, call_id)`, and the
+  "Tool calls within a step" section of `ChatMiddleware` now says so.
+  A struct rather than one more `&str` parameter lets later per-call
+  data be added without breaking the trait again after 1.0. The
+  engine's behaviour is unchanged.
+- `ToolContext::new` takes the call id after `step_id`:
+  `ToolContext::new(run_id, step_id, call_id, activation, cancellation)`.
+  Only the engine builds contexts for real dispatches; an optional
+  setter would have left an empty id possible there.
+
 - The engine only runs tools in the run's active set. A call to a
   registered but inactive tool (deferred with `initial_active_tools`
   and not yet activated) no longer runs it: the model gets the same
@@ -564,6 +609,60 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Tool hooks take a `&ToolCallInfo`; read the run, step, call id and
+tool name from its fields:
+
+```rust
+use ailoop::ToolCallInfo;
+
+// Before
+async fn on_before_tool_call(
+    &self,
+    run_id: &RunId,
+    step_id: &StepId,
+    name: &str,
+    args: &Value,
+) -> ToolDecision {
+    if name == "rm" { self.seen(run_id); }
+    ToolDecision::Continue
+}
+async fn on_after_tool_call(
+    &self,
+    run_id: &RunId,
+    step_id: &StepId,
+    name: &str,
+    args: &Value,
+    result: &ToolResultContent,
+) {}
+
+// After
+async fn on_before_tool_call(&self, call: &ToolCallInfo, args: &Value) -> ToolDecision {
+    if call.name == "rm" { self.seen(&call.run_id); }
+    ToolDecision::Continue
+}
+async fn on_after_tool_call(
+    &self,
+    call: &ToolCallInfo,
+    args: &Value,
+    result: &ToolResultContent,
+) {}
+```
+
+`on_before_tool_call_mut` and `on_after_tool_call_mut` change the same
+way. Per-call state that paired `before` and `after` by position
+should be keyed by `(call.run_id.clone(), call.call_id.clone())`
+instead. To call a hook directly in a test, build the argument with
+`ToolCallInfo::new(run_id, step_id, "toolu_1", "rm")`.
+
+`ToolContext::new` takes the call id:
+
+```rust
+// Before
+ToolContext::new(run_id, step_id, activation, cancellation)
+// After
+ToolContext::new(run_id, step_id, "toolu_1", activation, cancellation)
+```
 
 A model can no longer call a deferred tool it has not activated. If
 you relied on that, activate the tool before the model calls it (from

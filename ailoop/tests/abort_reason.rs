@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use ailoop::{
     AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
-    Conversation, FinishReason, HookAction, Message, RunConfig, RunId, RunOptions, StepId,
-    StreamChunk, ToolDecision, ToolDefinition, ToolResultContent, Usage, UserBlock,
+    Conversation, FinishReason, HookAction, Message, RunConfig, RunId, RunOptions, StreamChunk,
+    ToolCallInfo, ToolDecision, ToolDefinition, ToolResultContent, Usage, UserBlock,
 };
 use ailoop_core::testing::{ScriptedError, ScriptedModel};
 use ailoop_tools::{ToolContext, ToolDyn};
@@ -159,13 +159,7 @@ async fn tool_terminate_produces_tool_terminated_with_tool_name() {
 
     #[async_trait]
     impl ChatMiddleware for DenyTools {
-        async fn on_before_tool_call(
-            &self,
-            _run_id: &RunId,
-            _step_id: &StepId,
-            _tool_name: &str,
-            _args: &Value,
-        ) -> ToolDecision {
+        async fn on_before_tool_call(&self, _call: &ToolCallInfo, _args: &Value) -> ToolDecision {
             ToolDecision::Terminate {
                 reason: "tool not allowed".into(),
             }

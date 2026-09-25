@@ -1,8 +1,8 @@
 //! Per-dispatch context handed to every [`Tool`](crate::Tool) /
 //! [`ToolDyn`] call.
 //!
-//! [`ToolContext`] carries the [`RunId`] and [`StepId`] of the current
-//! dispatch plus a [`ToolActivation`] handle into the per-run active
+//! [`ToolContext`] carries the [`RunId`], [`StepId`] and call id of the
+//! current dispatch plus a [`ToolActivation`] handle into the per-run active
 //! tool set. Handlers that need to mutate which tools are visible on
 //! the next turn (deferred-tools / dynamic tool loading patterns) call
 //! the activation methods directly — no shared `Arc<Mutex<...>>`
@@ -50,6 +50,7 @@ pub enum ToolActivationError {
 pub struct ToolContext {
     run_id: RunId,
     step_id: StepId,
+    call_id: String,
     activation: ToolActivation,
     cancellation: CancellationToken,
     usage: UsageSink,
@@ -62,12 +63,14 @@ impl ToolContext {
     pub fn new(
         run_id: RunId,
         step_id: StepId,
+        call_id: impl Into<String>,
         activation: ToolActivation,
         cancellation: CancellationToken,
     ) -> Self {
         Self {
             run_id,
             step_id,
+            call_id: call_id.into(),
             activation,
             cancellation,
             usage: UsageSink::new(),
@@ -89,8 +92,10 @@ impl ToolContext {
     /// [`ToolRegistry::tool_call`](crate::ToolRegistry::tool_call)
     /// invocations and unit tests where no engine is in the loop.
     pub fn detached() -> Self {
+        let run_id = RunId::new();
         Self {
-            run_id: RunId::new(),
+            call_id: format!("detached-{run_id}"),
+            run_id,
             step_id: StepId::new(),
             activation: ToolActivation::detached(),
             cancellation: CancellationToken::new(),
@@ -106,6 +111,14 @@ impl ToolContext {
     /// `StepId` of the step this dispatch belongs to.
     pub fn step_id(&self) -> &StepId {
         &self.step_id
+    }
+
+    /// Provider-assigned id of the tool call being dispatched: the same
+    /// value as `call_id` on the [`ToolCallInfo`](ailoop_core::ToolCallInfo)
+    /// the middleware tool hooks receive and on the `ToolResult` chunk.
+    /// Synthetic for [`Self::detached`].
+    pub fn call_id(&self) -> &str {
+        &self.call_id
     }
 
     /// Handle into the per-run active tool set.
@@ -461,6 +474,26 @@ mod tests {
     }
 
     #[test]
+    fn call_id_returns_the_id_supplied_to_new() {
+        let ctx = ToolContext::new(
+            RunId::new(),
+            StepId::new(),
+            "toolu_42",
+            ToolActivation::detached(),
+            CancellationToken::new(),
+        );
+        assert_eq!(ctx.call_id(), "toolu_42");
+    }
+
+    #[test]
+    fn detached_context_has_a_synthetic_call_id() {
+        let a = ToolContext::detached();
+        let b = ToolContext::detached();
+        assert!(!a.call_id().is_empty());
+        assert_ne!(a.call_id(), b.call_id());
+    }
+
+    #[test]
     fn detached_context_exposes_never_cancelled_token() {
         let ctx = ToolContext::detached();
         assert!(!ctx.cancellation().is_cancelled());
@@ -472,6 +505,7 @@ mod tests {
         let ctx = ToolContext::new(
             RunId::new(),
             StepId::new(),
+            "toolu_x",
             ToolActivation::detached(),
             token.clone(),
         );
@@ -488,6 +522,7 @@ mod tests {
         let ctx = ToolContext::new(
             RunId::new(),
             StepId::new(),
+            "toolu_x",
             ToolActivation::detached(),
             token.clone(),
         );

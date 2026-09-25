@@ -3,7 +3,9 @@
 
 use std::collections::HashMap;
 
-use ailoop_core::{ChatMiddleware, FinishReason, Message, RunId, StepId, ToolDecision, Usage};
+use ailoop_core::{
+    ChatMiddleware, FinishReason, Message, RunId, ToolCallInfo, ToolDecision, Usage,
+};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -49,15 +51,9 @@ impl MaxToolCalls {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for MaxToolCalls {
-    async fn on_before_tool_call(
-        &self,
-        run_id: &RunId,
-        _step_id: &StepId,
-        _name: &str,
-        _args: &Value,
-    ) -> ToolDecision {
+    async fn on_before_tool_call(&self, call: &ToolCallInfo, _args: &Value) -> ToolDecision {
         let mut guard = self.counts.lock().await;
-        let counter = guard.entry(run_id.clone()).or_insert(0);
+        let counter = guard.entry(call.run_id.clone()).or_insert(0);
         *counter += 1;
         if *counter > self.max {
             let n = *counter;
@@ -93,6 +89,7 @@ impl ChatMiddleware for MaxToolCalls {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ailoop_core::StepId;
     use serde_json::json;
     use std::sync::Arc;
 
@@ -104,7 +101,10 @@ mod tests {
         let step_id = StepId::new();
         for _ in 0..3 {
             let decision = mw
-                .on_before_tool_call(&run_id, &step_id, "any", &json!({}))
+                .on_before_tool_call(
+                    &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "any"),
+                    &json!({}),
+                )
                 .await;
             assert!(
                 matches!(decision, ToolDecision::Continue),
@@ -121,13 +121,19 @@ mod tests {
         let step_id = StepId::new();
         for _ in 0..2 {
             assert!(matches!(
-                mw.on_before_tool_call(&run_id, &step_id, "t", &json!({}))
-                    .await,
+                mw.on_before_tool_call(
+                    &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "t"),
+                    &json!({})
+                )
+                .await,
                 ToolDecision::Continue
             ));
         }
         match mw
-            .on_before_tool_call(&run_id, &step_id, "t", &json!({}))
+            .on_before_tool_call(
+                &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "t"),
+                &json!({}),
+            )
             .await
         {
             ToolDecision::Terminate { reason } => {
@@ -147,7 +153,10 @@ mod tests {
         let run_id = RunId::new();
         let step_id = StepId::new();
         match mw
-            .on_before_tool_call(&run_id, &step_id, "t", &json!({}))
+            .on_before_tool_call(
+                &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "t"),
+                &json!({}),
+            )
             .await
         {
             ToolDecision::Terminate { .. } => {}
@@ -167,20 +176,32 @@ mod tests {
         // Saturate run A.
         for _ in 0..2 {
             assert!(matches!(
-                mw.on_before_tool_call(&run_a, &step, "t", &json!({})).await,
+                mw.on_before_tool_call(
+                    &ToolCallInfo::new(run_a.clone(), step.clone(), "toolu_test", "t"),
+                    &json!({})
+                )
+                .await,
                 ToolDecision::Continue
             ));
         }
 
         // Run B is unaffected.
         assert!(matches!(
-            mw.on_before_tool_call(&run_b, &step, "t", &json!({})).await,
+            mw.on_before_tool_call(
+                &ToolCallInfo::new(run_b.clone(), step.clone(), "toolu_test", "t"),
+                &json!({})
+            )
+            .await,
             ToolDecision::Continue
         ));
 
         // Run A's next call still trips.
         assert!(matches!(
-            mw.on_before_tool_call(&run_a, &step, "t", &json!({})).await,
+            mw.on_before_tool_call(
+                &ToolCallInfo::new(run_a.clone(), step.clone(), "toolu_test", "t"),
+                &json!({})
+            )
+            .await,
             ToolDecision::Terminate { .. }
         ));
     }
@@ -192,8 +213,11 @@ mod tests {
         let mw = MaxToolCalls::new(5);
         let run_id = RunId::new();
         let step = StepId::new();
-        mw.on_before_tool_call(&run_id, &step, "t", &json!({}))
-            .await;
+        mw.on_before_tool_call(
+            &ToolCallInfo::new(run_id.clone(), step.clone(), "toolu_test", "t"),
+            &json!({}),
+        )
+        .await;
         assert_eq!(mw.counts.lock().await.len(), 1);
         mw.on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
             .await;

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use ailoop_core::{
     ChatMiddleware, ChatRequest, FinishReason, Message, ReasoningEffort, RunId, StepId,
-    SystemBlock, SystemPrompt, ToolChoice, ToolDecision, ToolTag, Usage,
+    SystemBlock, SystemPrompt, ToolCallInfo, ToolChoice, ToolDecision, ToolTag, Usage,
 };
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -254,6 +254,11 @@ pub struct ApprovalRequest {
     pub run_id: RunId,
     /// Step (model turn) that produced the call.
     pub step_id: StepId,
+    /// Provider-assigned id of the call, the same as `call_id` on
+    /// [`ToolCallInfo`] and on the `ToolResult` chunk. Empty unless set
+    /// with [`with_call_id`](Self::with_call_id);
+    /// [`ApprovalMiddleware`] always fills it.
+    pub call_id: String,
     /// Wire name of the tool.
     pub tool_name: String,
     /// Arguments the tool will run with, after every earlier
@@ -274,18 +279,26 @@ pub struct ApprovalRequest {
 }
 
 impl ApprovalRequest {
-    /// A request with empty `tags` and `messages`; set them with
+    /// A request with empty `call_id`, `tags` and `messages`; set them
+    /// with [`with_call_id`](Self::with_call_id),
     /// [`with_tags`](Self::with_tags) and
     /// [`with_messages`](Self::with_messages).
     pub fn new(run_id: RunId, step_id: StepId, tool_name: impl Into<String>, args: Value) -> Self {
         Self {
             run_id,
             step_id,
+            call_id: String::new(),
             tool_name: tool_name.into(),
             args,
             tags: Arc::from([]),
             messages: Arc::from([]),
         }
+    }
+
+    /// Replace `call_id`.
+    pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
+        self.call_id = call_id.into();
+        self
     }
 
     /// Replace `tags`.
@@ -428,29 +441,29 @@ impl ChatMiddleware for ApprovalMiddleware {
         self.contexts().insert(run_id.clone(), messages);
     }
 
-    async fn on_before_tool_call(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        name: &str,
-        args: &Value,
-    ) -> ToolDecision {
-        if !self.should_gate(name) {
+    async fn on_before_tool_call(&self, call: &ToolCallInfo, args: &Value) -> ToolDecision {
+        if !self.should_gate(&call.name) {
             return ToolDecision::Continue;
         }
         let messages = self
             .contexts()
-            .get(run_id)
+            .get(&call.run_id)
             .cloned()
             .unwrap_or_else(|| Arc::from([]));
         let tags = self
             .tags
-            .get(name)
+            .get(&call.name)
             .cloned()
             .unwrap_or_else(|| Arc::from([]));
-        let req = ApprovalRequest::new(run_id.clone(), step_id.clone(), name, args.clone())
-            .with_tags(tags)
-            .with_messages(messages);
+        let req = ApprovalRequest::new(
+            call.run_id.clone(),
+            call.step_id.clone(),
+            &call.name,
+            args.clone(),
+        )
+        .with_call_id(&call.call_id)
+        .with_tags(tags)
+        .with_messages(messages);
         (self.callback)(req).await
     }
 

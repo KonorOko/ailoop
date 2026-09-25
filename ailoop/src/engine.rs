@@ -7,7 +7,7 @@ use crate::errors::{EngineError, RunError};
 use ailoop_core::{
     AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
     ContinueDecision, FinishReason, HookAction, Message, RunConfig, RunId, StepId, StreamChunk,
-    ToolDecision, ToolResultContent, Usage, UserBlock,
+    ToolCallInfo, ToolDecision, ToolResultContent, Usage, UserBlock,
 };
 use ailoop_history::{CompactionError, CompactionReport, History};
 use ailoop_tools::{
@@ -745,6 +745,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         continue;
                     }
                 };
+                let call = ToolCallInfo::new(run_id.clone(), step_id.clone(), id.clone(), name.clone());
 
                 // Input-transform phase: every `_mut` runs before any
                 // gating decision so a sanitizer can rewrite args before
@@ -753,7 +754,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 let mut abort_reason = None;
                 for mw in &config.middlewares {
                     if let Err(reason) = race_abort(
-                        mw.on_before_tool_call_mut(&run_id, &step_id, &name, &mut args),
+                        mw.on_before_tool_call_mut(&call, &mut args),
                         &mut abort_fut,
                     ).await {
                         abort_reason = Some(reason);
@@ -773,7 +774,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 }
 
                 let decision = match race_abort(
-                    run_tool_chain(&config.middlewares, &run_id, &step_id, &name, &args),
+                    run_tool_chain(&config.middlewares, &call, &args),
                     &mut abort_fut,
                 ).await {
                     Ok(d) => d,
@@ -795,6 +796,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         let ctx = ToolContext::new(
                             run_id.clone(),
                             step_id.clone(),
+                            id.clone(),
                             ToolActivation::new(catalog.clone(), active_snapshot.clone()),
                             tool_cancellation.clone(),
                         )
@@ -847,7 +849,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 // `ToolResult` chunk all see the same mutated result.
                 for mw in &config.middlewares {
                     if let Err(reason) = race_abort(
-                        mw.on_after_tool_call_mut(&run_id, &step_id, &name, &args, &mut content),
+                        mw.on_after_tool_call_mut(&call, &args, &mut content),
                         &mut abort_fut,
                     ).await {
                         // Same persistence discipline as the observer
@@ -868,7 +870,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
 
                 for mw in &config.middlewares {
                     if let Err(reason) = race_abort(
-                        mw.on_after_tool_call(&run_id, &step_id, &name, &args, &content),
+                        mw.on_after_tool_call(&call, &args, &content),
                         &mut abort_fut,
                     ).await {
                         // Preserve the just-completed tool's result so
@@ -1037,13 +1039,11 @@ fn unavailable_tool(name: &str, tools: &ToolActivation) -> ToolResultContent {
 
 async fn run_tool_chain(
     chain: &[Arc<dyn ChatMiddleware>],
-    run_id: &RunId,
-    step_id: &StepId,
-    name: &str,
+    call: &ToolCallInfo,
     args: &Value,
 ) -> ToolDecision {
     for mw in chain {
-        match mw.on_before_tool_call(run_id, step_id, name, args).await {
+        match mw.on_before_tool_call(call, args).await {
             ToolDecision::Continue => continue,
             terminate_or_skip => return terminate_or_skip,
         }
@@ -1447,9 +1447,7 @@ mod tests {
         impl ChatMiddleware for TerminateOnSecondToolMw {
             async fn on_before_tool_call(
                 &self,
-                _run_id: &RunId,
-                _step_id: &StepId,
-                _name: &str,
+                _call: &ToolCallInfo,
                 _args: &Value,
             ) -> ToolDecision {
                 let n = self.calls.fetch_add(1, Ordering::SeqCst);

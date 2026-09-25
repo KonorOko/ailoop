@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ailoop_core::{
-    ChatMiddleware, FinishReason, Message, RunId, StepId, StreamChunk, ToolDecision, Usage,
+    ChatMiddleware, FinishReason, Message, RunId, StepId, StreamChunk, ToolCallInfo, ToolDecision,
+    Usage,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -207,21 +208,16 @@ impl ChatMiddleware for AntiLoop {
         }
     }
 
-    async fn on_before_tool_call(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        name: &str,
-        args: &Value,
-    ) -> ToolDecision {
+    async fn on_before_tool_call(&self, call: &ToolCallInfo, args: &Value) -> ToolDecision {
+        let name = call.name.as_str();
         let mut guard = self.inner.lock().await;
-        let state = guard.runs.entry(run_id.clone()).or_default();
+        let state = guard.runs.entry(call.run_id.clone()).or_default();
 
         // First tool call of this step closes out the assistant's text
         // turn and updates the text streak. Subsequent tool calls in
         // the same step skip this work.
-        if state.last_step_processed.as_ref() != Some(step_id) {
-            state.last_step_processed = Some(step_id.clone());
+        if state.last_step_processed.as_ref() != Some(&call.step_id) {
+            state.last_step_processed = Some(call.step_id.clone());
             let current_text = std::mem::take(&mut state.text_buffer);
             if current_text.is_empty() {
                 state.last_text = None;

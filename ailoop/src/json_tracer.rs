@@ -38,7 +38,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ailoop_core::{
     AbortReason, ChatMiddleware, ChatRequest, FinishReason, HookAction, Message, RunConfig, RunId,
-    StepId, StreamChunk, ToolDecision, ToolResultContent, Usage,
+    StepId, StreamChunk, ToolCallInfo, ToolDecision, ToolResultContent, Usage,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -391,17 +391,12 @@ impl ChatMiddleware for JsonTracer {
         self.emit("run_error", p).await;
     }
 
-    async fn on_before_tool_call(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        name: &str,
-        args: &Value,
-    ) -> ToolDecision {
+    async fn on_before_tool_call(&self, call: &ToolCallInfo, args: &Value) -> ToolDecision {
         let mut p = serde_json::Map::new();
-        p.insert("run_id".into(), json!(run_id.to_string()));
-        p.insert("step_id".into(), json!(step_id.to_string()));
-        p.insert("name".into(), json!(name));
+        p.insert("run_id".into(), json!(call.run_id.to_string()));
+        p.insert("step_id".into(), json!(call.step_id.to_string()));
+        p.insert("call_id".into(), json!(call.call_id));
+        p.insert("name".into(), json!(call.name));
         if self.verbose {
             p.insert("args".into(), args.clone());
         }
@@ -411,16 +406,15 @@ impl ChatMiddleware for JsonTracer {
 
     async fn on_after_tool_call(
         &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        name: &str,
+        call: &ToolCallInfo,
         args: &Value,
         result: &ToolResultContent,
     ) {
         let mut p = serde_json::Map::new();
-        p.insert("run_id".into(), json!(run_id.to_string()));
-        p.insert("step_id".into(), json!(step_id.to_string()));
-        p.insert("name".into(), json!(name));
+        p.insert("run_id".into(), json!(call.run_id.to_string()));
+        p.insert("step_id".into(), json!(call.step_id.to_string()));
+        p.insert("call_id".into(), json!(call.call_id));
+        p.insert("name".into(), json!(call.name));
         p.insert("outcome".into(), json!(tool_result_outcome(result)));
         if self.verbose {
             p.insert("args".into(), args.clone());
@@ -472,13 +466,14 @@ mod tests {
             .on_run_started(&run_id, &[Message::user("hi")], &RunConfig::default())
             .await;
         tracer
-            .on_before_tool_call(&run_id, &step_id, "echo", &Value::Null)
+            .on_before_tool_call(
+                &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "echo"),
+                &Value::Null,
+            )
             .await;
         tracer
             .on_after_tool_call(
-                &run_id,
-                &step_id,
-                "echo",
+                &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "echo"),
                 &Value::Null,
                 &ToolResultContent::text("ok"),
             )
@@ -572,13 +567,14 @@ mod tests {
         let args = json!({ "city": "Lima" });
 
         tracer
-            .on_before_tool_call(&run_id, &step_id, "weather", &args)
+            .on_before_tool_call(
+                &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "weather"),
+                &args,
+            )
             .await;
         tracer
             .on_after_tool_call(
-                &run_id,
-                &step_id,
-                "weather",
+                &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "weather"),
                 &args,
                 &ToolResultContent::text("sunny"),
             )
@@ -665,6 +661,85 @@ mod tests {
             any_with_run_id,
             "no line carried run_id `{run_id_str}`; saw: {lines:?}"
         );
+    }
+
+    struct Echo;
+
+    #[async_trait::async_trait]
+    impl ailoop_tools::ToolDyn for Echo {
+        fn name(&self) -> String {
+            "echo".into()
+        }
+        fn tool_definition(&self) -> ailoop_core::ToolDefinition {
+            ailoop_core::ToolDefinition::new(
+                "echo",
+                "stub",
+                json!({"type":"object","properties":{},"required":[]}),
+                vec![],
+            )
+        }
+        async fn call(&self, _: Value, _ctx: &ailoop_tools::ToolContext) -> ToolResultContent {
+            ToolResultContent::text("ok")
+        }
+    }
+
+    /// `before_tool_call` / `after_tool_call` carry the same `call_id`
+    /// as `tool_call_finished` and `tool_result`, so a reader can pair
+    /// them.
+    #[tokio::test]
+    async fn tool_call_lines_carry_call_id() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trace.ndjson");
+        let tracer: Arc<dyn ChatMiddleware> =
+            Arc::new(JsonTracer::new(&path).expect("open should succeed"));
+
+        let model = ScriptedModel::new([
+            vec![
+                StreamChunk::ToolCallStarted {
+                    id: "toolu_1".into(),
+                    name: "echo".into(),
+                },
+                StreamChunk::ToolCallFinished {
+                    id: "toolu_1".into(),
+                    name: "echo".into(),
+                    args: json!({}),
+                },
+                StreamChunk::TurnFinished {
+                    reason: FinishReason::ToolUse,
+                    usage: Usage::default(),
+                    service_tier: None,
+                },
+            ],
+            vec![StreamChunk::TurnFinished {
+                reason: FinishReason::EndTurn,
+                usage: Usage::default(),
+                service_tier: None,
+            }],
+        ]);
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(Echo)).unwrap();
+        let mut config = RunConfig::default();
+        config.middlewares = vec![Arc::clone(&tracer)];
+
+        let stream = crate::engine::run_chat(&model, vec![Message::user("hi")], &registry, config)
+            .await
+            .expect("run_chat should start");
+        let _: Vec<_> = stream.collect().await;
+        drop(tracer);
+
+        let lines = read_lines(&path);
+        for kind in [
+            "tool_call_finished",
+            "before_tool_call",
+            "after_tool_call",
+            "tool_result",
+        ] {
+            let line = lines
+                .iter()
+                .find(|l| l["kind"] == kind)
+                .unwrap_or_else(|| panic!("missing `{kind}` in {lines:?}"));
+            assert_eq!(line["call_id"], json!("toolu_1"), "{kind}");
+        }
     }
 
     #[tokio::test]

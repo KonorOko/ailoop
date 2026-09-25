@@ -55,11 +55,16 @@ use crate::RunConfig;
 /// - does not assume an `on_after_tool_call` belongs to the most recent
 ///   `on_before_tool_call`, or that the calls before it in the model's
 ///   order have already run;
+/// - keys per-call state by `(run_id, call_id)` from the
+///   [`ToolCallInfo`] every tool hook receives, instead of keeping a
+///   single "current call" slot. Two calls to the same tool with the
+///   same arguments in one step are told apart only by their
+///   `call_id`, which also matches the `id` / `call_id` on
+///   [`StreamChunk::ToolCallFinished`] and [`StreamChunk::ToolResult`];
 /// - keeps per-run state keyed by [`RunId`] (and per-step state by
-///   [`StepId`]) instead of in a single "current call" slot, and
-///   guards it with a lock, since hooks take `&self`. Per-call state
-///   should be keyed by the call id where one is available, as on
-///   [`StreamChunk::ToolCallFinished`] and [`StreamChunk::ToolResult`].
+///   [`StepId`]), guards all of it with a lock, since hooks take
+///   `&self`, and drops a run's entries in [`Self::on_run_finished`] /
+///   [`Self::on_run_error`].
 #[async_trait::async_trait]
 #[allow(unused_variables)]
 pub trait ChatMiddleware: Send + Sync {
@@ -233,13 +238,7 @@ pub trait ChatMiddleware: Send + Sync {
     ///
     /// Calls of the same step may reach this hook in any order, or
     /// concurrently; see [Tool calls within a step](Self#tool-calls-within-a-step).
-    async fn on_before_tool_call(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        name: &str,
-        args: &Value,
-    ) -> ToolDecision {
+    async fn on_before_tool_call(&self, call: &ToolCallInfo, args: &Value) -> ToolDecision {
         ToolDecision::Continue
     }
     /// Mutating counterpart to [`Self::on_before_tool_call`]. Engines invoke
@@ -248,23 +247,14 @@ pub trait ChatMiddleware: Send + Sync {
     /// (sanitization, redaction, defaulting) run as a phase ahead of
     /// gating decisions. Gating still belongs in `on_before_tool_call`;
     /// this hook only rewrites `args`.
-    async fn on_before_tool_call_mut(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        name: &str,
-        args: &mut Value,
-    ) {
-    }
+    async fn on_before_tool_call_mut(&self, call: &ToolCallInfo, args: &mut Value) {}
     /// Fired after the engine has executed a tool but before the
     /// result is yielded to the stream consumer or recorded in
     /// history. Read-only; for output rewriting use
     /// [`Self::on_after_tool_call_mut`].
     async fn on_after_tool_call(
         &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        name: &str,
+        call: &ToolCallInfo,
         args: &Value,
         result: &ToolResultContent,
     ) {
@@ -277,12 +267,53 @@ pub trait ChatMiddleware: Send + Sync {
     /// next turn and what the engine emits in `StreamChunk::ToolResult`.
     async fn on_after_tool_call_mut(
         &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        name: &str,
+        call: &ToolCallInfo,
         args: &Value,
         result: &mut ToolResultContent,
     ) {
+    }
+}
+
+/// Identity of one tool call, passed to every tool hook of
+/// [`ChatMiddleware`].
+///
+/// `call_id` is the provider-assigned id of the call: the same value
+/// as `id` on [`StreamChunk::ToolCallFinished`] and `call_id` on
+/// [`StreamChunk::ToolResult`], so a middleware can pair the hooks of
+/// one call with each other and with the stream. Providers give every
+/// call of a step its own id; key per-call state by `(run_id, call_id)`.
+///
+/// The arguments and result travel as separate hook parameters, since
+/// the `_mut` hooks borrow them mutably.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ToolCallInfo {
+    /// Run the call belongs to.
+    pub run_id: RunId,
+    /// Step (model turn) that produced the call.
+    pub step_id: StepId,
+    /// Provider-assigned tool call id.
+    pub call_id: String,
+    /// Tool name as the model called it.
+    pub name: String,
+}
+
+impl ToolCallInfo {
+    /// Build the identity of a tool call. The engine does this for
+    /// every call it dispatches; use it directly to unit-test a
+    /// middleware's tool hooks.
+    pub fn new(
+        run_id: RunId,
+        step_id: StepId,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            run_id,
+            step_id,
+            call_id: call_id.into(),
+            name: name.into(),
+        }
     }
 }
 

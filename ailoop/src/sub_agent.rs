@@ -851,6 +851,7 @@ mod tests {
         let ctx = ToolContext::new(
             RunId::new(),
             StepId::new(),
+            "toolu_parent",
             ToolActivation::detached(),
             parent_token.clone(),
         );
