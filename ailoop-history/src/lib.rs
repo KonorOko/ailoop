@@ -24,7 +24,7 @@
 //! - [`CompactionStrategy`] — trait implemented by reduction
 //!   algorithms; ships with [`TruncateStrategy`] and
 //!   [`SummarizeStrategy`].
-//! - [`CompactionOutput`], [`CompactionReport`], [`CompactionError`],
+//! - [`CompactionOutput`], [`CompactionStats`], [`CompactionError`],
 //!   [`FromMessagesError`] — the surrounding vocabulary.
 //! - [`HistoryStore`] — async persistence trait. [`InMemoryHistoryStore`]
 //!   and [`JsonFileHistoryStore`] cover tests and single-file durable
@@ -51,7 +51,7 @@ pub use compaction::{
     TruncateStrategy,
 };
 pub use errors::{CompactionError, FromMessagesError};
-pub use history::{CompactionReport, History, HistoryBuilder};
+pub use history::{CompactionStats, History, HistoryBuilder};
 pub use history_store::{
     HistoryStore, InMemoryHistoryStore, JsonFileHistoryStore, JsonFileHistoryStoreError,
 };

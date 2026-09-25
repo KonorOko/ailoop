@@ -409,6 +409,13 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `CompactionReport` is `CompactionStats`. It sat next to
+  `CompactionOutput` with a near-synonym name for a different shape:
+  `CompactionOutput` is what a `CompactionStrategy` returns (the new
+  messages and pin mask), while this type is the before/after counts
+  and strategy name `History::compact_if_needed` / `force_compact`
+  report.
+
 - `PromptSection::with_name(name, content)` is
   `PromptSection::named(name, content)`: it is a constructor, next to
   `PromptSection::new(content)`, and `with_*` is kept for methods that
@@ -828,6 +835,16 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Rename `CompactionReport`:
+
+```rust
+// Before (1.0.0-rc.3)
+let report: Option<CompactionReport> = history.compact_if_needed().await?;
+
+// After
+let stats: Option<CompactionStats> = history.compact_if_needed().await?;
+```
 
 Build named prompt sections with `named`:
 

@@ -14,7 +14,7 @@ use crate::{
 /// [reserved tokens](HistoryBuilder::reserved_tokens)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct CompactionReport {
+pub struct CompactionStats {
     /// Message count before compaction ran.
     pub before: usize,
     /// Message count after compaction ran. `after < before` whenever
@@ -278,7 +278,7 @@ impl History {
     ///
     /// [`CompactionStrategy`]: crate::CompactionStrategy
     /// [`StreamChunk::HistoryCompacted`]: ailoop_core::StreamChunk::HistoryCompacted
-    pub async fn compact_if_needed(&mut self) -> Result<Option<CompactionReport>, CompactionError> {
+    pub async fn compact_if_needed(&mut self) -> Result<Option<CompactionStats>, CompactionError> {
         if !self.needs_compaction() {
             return Ok(None);
         }
@@ -301,7 +301,7 @@ impl History {
     /// Use it when the estimate said the history fits but the provider
     /// disagreed — for example after a context-window overflow error,
     /// which is how `Conversation` recovers from one. Returns the same
-    /// [`CompactionReport`] as
+    /// [`CompactionStats`] as
     /// [`compact_if_needed`](Self::compact_if_needed) and the same
     /// errors, including [`CompactionError::NotEnoughHistory`] when the
     /// history is no longer than `preserve_n_last`.
@@ -313,7 +313,7 @@ impl History {
     /// when that matters.
     ///
     /// [`CompactionStrategy`]: crate::CompactionStrategy
-    pub async fn force_compact(&mut self) -> Result<CompactionReport, CompactionError> {
+    pub async fn force_compact(&mut self) -> Result<CompactionStats, CompactionError> {
         let before = self.messages.len();
         let output = self
             .strategy
@@ -328,7 +328,7 @@ impl History {
         let strategy = self.strategy.name();
         self.messages = output.messages;
         self.pinned = output.pinned;
-        Ok(CompactionReport {
+        Ok(CompactionStats {
             before,
             after,
             strategy,

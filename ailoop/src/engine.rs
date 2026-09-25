@@ -11,7 +11,7 @@ use ailoop_core::{
     RunId, RunStartInfo, StepId, StepInfo, StreamChunk, ToolCallInfo, ToolDecision,
     ToolResultContent, TurnEndInfo, Usage, UserBlock,
 };
-use ailoop_history::{CompactionError, CompactionReport, History};
+use ailoop_history::{CompactionError, CompactionStats, History};
 use ailoop_tools::{ToolActivation, ToolContext, ToolRegistry, ToolRegistryError, UsageSink};
 use async_stream::try_stream;
 use futures::{StreamExt, stream::BoxStream};
@@ -378,7 +378,7 @@ impl<'a> RunMessages<'a> {
 async fn compact(
     history: &mut History,
     force: bool,
-) -> Result<Option<(CompactionReport, bool)>, CompactionError> {
+) -> Result<Option<(CompactionStats, bool)>, CompactionError> {
     let before = history.estimated_tokens();
     let report = if force {
         history.force_compact().await?
@@ -397,7 +397,7 @@ async fn compact(
 async fn history_compacted_chunk(
     middlewares: &[Arc<dyn ChatMiddleware>],
     run_id: &RunId,
-    report: CompactionReport,
+    report: CompactionStats,
 ) -> StreamChunk {
     let mut chunk = StreamChunk::history_compacted(
         run_id.clone(),
