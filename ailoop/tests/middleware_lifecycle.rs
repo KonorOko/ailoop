@@ -112,6 +112,7 @@ impl ChatMiddleware for RecordingMiddleware {
         &self,
         _run_id: &RunId,
         _err: &(dyn std::error::Error + Send + Sync),
+        _usage: &Usage,
         _: &[Message],
     ) {
         self.push("on_run_error");

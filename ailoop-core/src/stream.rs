@@ -390,12 +390,18 @@ impl fmt::Display for AbortReason {
 /// stream (see the variant docs for the rationale). Fields not
 /// surfaced by a given provider stay at `0`.
 ///
+/// A run that ends in `Err` has no `RunFinished`; its spend up to the
+/// failure travels in `RunError::usage` and in the `usage` argument of
+/// [`crate::ChatMiddleware::on_run_error`], counted the same way. The
+/// turn that failed is not in it: a response cut off by an error never
+/// reports its usage.
+///
 /// Use [`StreamChunk::RunFinished::usage`] for end-of-run totals;
 /// reach for the middleware path when per-turn metrics matter — a
 /// context-size indicator built from the final turn's `input_tokens`,
 /// per-turn latency or service-tier attribution, online tokenizer
 /// calibration, and similar uses.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Usage {
     /// Total prompt tokens charged this turn (cached + uncached).

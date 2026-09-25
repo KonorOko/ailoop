@@ -468,6 +468,7 @@ impl ChatMiddleware for ApprovalMiddleware {
         &self,
         run_id: &RunId,
         _err: &(dyn std::error::Error + Send + Sync),
+        _usage: &Usage,
         _partial_messages: &[Message],
     ) {
         self.contexts().remove(run_id);
@@ -509,7 +510,7 @@ mod tests {
         assert_eq!(mw.tracked_runs(), 2);
 
         let err = std::io::Error::other("boom");
-        mw.on_run_error(&run_id, &err, &[]).await;
+        mw.on_run_error(&run_id, &err, &Usage::default(), &[]).await;
         assert_eq!(mw.tracked_runs(), 1, "only the failed run is dropped");
     }
 }

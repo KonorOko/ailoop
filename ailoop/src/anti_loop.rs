@@ -311,6 +311,7 @@ impl ChatMiddleware for AntiLoop {
         &self,
         run_id: &RunId,
         _err: &(dyn std::error::Error + Send + Sync),
+        _usage: &Usage,
         _partial_messages: &[Message],
     ) {
         let mut guard = self.inner.lock().await;

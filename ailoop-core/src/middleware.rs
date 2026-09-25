@@ -189,17 +189,36 @@ pub trait ChatMiddleware: Send + Sync {
     /// `RunConfig.timeout` go through [`Self::on_run_finished`]
     /// instead — they are not errors.
     ///
+    /// `usage` is what the run spent before failing, the same value the
+    /// caller gets from `RunError::usage`: every provider turn that
+    /// finished (each one a [`StreamChunk::TurnFinished`]) plus the
+    /// usage tools reported through `ToolContext::report_usage`,
+    /// sub-agents included. It follows the rules of
+    /// [`StreamChunk::RunFinished::usage`] with one gap: a turn that
+    /// fails mid-stream never reports its usage, so its tokens are not
+    /// counted even though the provider may bill them. Summing
+    /// `TurnFinished` in [`Self::on_chunk`] only recovers the run's own
+    /// turns; this value also has the delegated spend.
+    ///
     /// `partial_messages` holds the messages of the steps the run
     /// completed before failing, the same list the caller receives in
     /// the returned error. Every `tool_use` in it has its `tool_result`,
     /// and the step that failed is left out. It is empty when the first
     /// step failed. The conversation history is still rolled back; use
     /// this to record the work that already happened, for example tools
-    /// with side effects.
+    /// with side effects. `usage` can include the failed step (its turn
+    /// finished before, say, a tool registry error) while
+    /// `partial_messages` does not: one is what was spent, the other
+    /// what is safe to keep.
+    ///
+    /// Only fired for runs that started. An error raised before the
+    /// run starts, such as `Conversation` compacting the history before
+    /// the first step, reaches the caller without any hook.
     async fn on_run_error(
         &self,
         run_id: &RunId,
         err: &(dyn std::error::Error + Send + Sync),
+        usage: &Usage,
         partial_messages: &[Message],
     ) {
     }

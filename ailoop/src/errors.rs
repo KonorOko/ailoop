@@ -1,4 +1,4 @@
-use ailoop_core::Message;
+use ailoop_core::{Message, Usage};
 use ailoop_prompts::PromptError;
 use ailoop_tools::errors::ToolRegistryError;
 
@@ -82,8 +82,9 @@ pub enum EngineError<E: std::error::Error> {
     ContextOverflow(E),
 }
 
-/// A run that ended in `Err`: the cause ([`EngineError`]) plus the
-/// messages of every step the run completed before it failed.
+/// A run that ended in `Err`: the cause ([`EngineError`]), what the
+/// run spent, and the messages of every step the run completed before
+/// it failed.
 ///
 /// Returned by [`Conversation::run`] / [`Conversation::stream`] (and
 /// their `_with_options` variants), yielded as the error item of
@@ -121,9 +122,26 @@ pub enum EngineError<E: std::error::Error> {
 /// # }
 /// ```
 ///
+/// # Usage
+///
+/// [`usage`](Self::usage) is what the run spent before failing,
+/// counted like [`StreamChunk::RunFinished::usage`] on a run that ends
+/// in `Ok`: every provider turn that finished plus the usage tools
+/// reported through [`ToolContext::report_usage`], sub-agents included.
+/// The turn that failed is not counted: a response cut off by an error
+/// never reports its usage, although the provider may still bill it.
+///
+/// The usage can cover more than the partial messages. When a turn
+/// finishes and the step then fails (for example a tool registry
+/// error), the turn and anything its tools reported are counted, but
+/// the step is left out of the partial messages.
+///
+/// An error raised before the run starts (history compaction before the
+/// first step in [`Conversation`]) has zero usage.
+///
 /// `RunError` converts into [`EngineError`] with `?`, dropping the
-/// partial messages, so code that propagates `EngineError` keeps
-/// compiling.
+/// partial messages and the usage, so code that propagates
+/// `EngineError` keeps compiling.
 ///
 /// [`Conversation`]: crate::Conversation
 /// [`Conversation::run`]: crate::Conversation::run
@@ -131,17 +149,21 @@ pub enum EngineError<E: std::error::Error> {
 /// [`RunStream`]: crate::RunStream
 /// [`run_chat`]: crate::advanced::run_chat
 /// [`StreamChunk::StepFinished`]: ailoop_core::StreamChunk::StepFinished
+/// [`StreamChunk::RunFinished::usage`]: ailoop_core::StreamChunk::RunFinished::usage
+/// [`ToolContext::report_usage`]: ailoop_tools::ToolContext::report_usage
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct RunError<E: std::error::Error> {
     kind: EngineError<E>,
+    usage: Usage,
     partial_messages: Vec<Message>,
 }
 
 impl<E: std::error::Error> RunError<E> {
-    pub(crate) fn new(kind: EngineError<E>, partial_messages: Vec<Message>) -> Self {
+    pub(crate) fn new(kind: EngineError<E>, usage: Usage, partial_messages: Vec<Message>) -> Self {
         Self {
             kind,
+            usage,
             partial_messages,
         }
     }
@@ -157,13 +179,21 @@ impl<E: std::error::Error> RunError<E> {
         self.kind
     }
 
+    /// What the run spent before failing: finished turns plus usage
+    /// reported by tools. The failed turn is not counted. See the
+    /// [type docs](Self#usage).
+    pub fn usage(&self) -> Usage {
+        self.usage
+    }
+
     /// Messages of the steps completed before the failure. See the
     /// [type docs](Self#partial-messages).
     pub fn partial_messages(&self) -> &[Message] {
         &self.partial_messages
     }
 
-    /// Splits the error into its cause and its partial messages.
+    /// Splits the error into its cause and its partial messages. Read
+    /// [`usage`](Self::usage) first if you need it.
     pub fn into_parts(self) -> (EngineError<E>, Vec<Message>) {
         (self.kind, self.partial_messages)
     }
@@ -183,11 +213,11 @@ impl<E: std::error::Error> std::error::Error for RunError<E> {
     }
 }
 
-/// Wraps an error raised before any step ran: the partial list is
-/// empty.
+/// Wraps an error raised before any step ran: the usage is zero and
+/// the partial list is empty.
 impl<E: std::error::Error> From<EngineError<E>> for RunError<E> {
     fn from(kind: EngineError<E>) -> Self {
-        Self::new(kind, Vec::new())
+        Self::new(kind, Usage::default(), Vec::new())
     }
 }
 

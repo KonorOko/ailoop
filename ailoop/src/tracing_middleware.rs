@@ -182,12 +182,15 @@ impl ChatMiddleware for TracingMiddleware {
         &self,
         run_id: &RunId,
         err: &(dyn std::error::Error + Send + Sync),
+        usage: &Usage,
         partial_messages: &[Message],
     ) {
         tracing::error!(
             target: "ailoop.run",
             run_id = %run_id,
             error = %err,
+            input_tokens = usage.input_tokens,
+            output_tokens = usage.output_tokens,
             partial_messages = partial_messages.len(),
             "run errored",
         );

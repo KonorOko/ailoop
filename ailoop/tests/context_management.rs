@@ -98,6 +98,7 @@ impl ChatMiddleware for Counters {
         &self,
         _: &RunId,
         _: &(dyn std::error::Error + Send + Sync),
+        _: &Usage,
         _: &[Message],
     ) {
         self.run_errors.fetch_add(1, Ordering::SeqCst);

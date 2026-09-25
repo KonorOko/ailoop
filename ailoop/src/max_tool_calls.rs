@@ -83,6 +83,7 @@ impl ChatMiddleware for MaxToolCalls {
         &self,
         run_id: &RunId,
         _err: &(dyn std::error::Error + Send + Sync),
+        _usage: &Usage,
         _partial_messages: &[Message],
     ) {
         self.counts.lock().await.remove(run_id);
