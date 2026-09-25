@@ -190,7 +190,9 @@ pub enum StreamChunk {
     /// **after** [`Self::ToolCallFinished`] and before the next
     /// provider turn picks up the result. Also emitted, with an error
     /// reply synthesized by the engine, for every
-    /// [`Self::ToolCallMalformed`].
+    /// [`Self::ToolCallMalformed`], and for every call a run aborted
+    /// before running (`"Tool not run: the run was aborted (<reason>)"`),
+    /// so each call of a step gets exactly one `ToolResult`.
     ToolResult {
         /// Run that owns the tool call.
         run_id: RunId,
@@ -215,9 +217,10 @@ pub enum StreamChunk {
         /// recursively). On aborts, what was spent up to the cutoff.
         /// See [`Usage`] for how to split own vs. delegated spend.
         usage: Usage,
-        /// All messages this run added to history. On abort, partial
-        /// tool results are preserved so the next run sees a
-        /// consistent shape.
+        /// All messages this run added to history. Every `tool_use` in
+        /// it has its `tool_result`, aborts included: calls that
+        /// completed keep their result, and calls the abort stopped
+        /// get an error result, so the history can be sent again.
         new_messages: Vec<Message>,
     },
     /// History compaction ran on behalf of this run. Carries message

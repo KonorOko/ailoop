@@ -523,6 +523,24 @@ and this project adheres to
 
 ### Fixed
 
+- A run that aborted part-way through a step left tool calls without a
+  `tool_result`. When a tool's `ToolDecision::Terminate`, a timeout, a
+  cancellation or an abort inside a tool hook stopped the run, only the
+  calls that had already finished were answered. The call that stopped
+  the run and the calls after it stayed as `tool_use` blocks with no
+  result in `RunFinished.new_messages`. The same happened to calls the
+  model had finished streaming when the run aborted mid-turn.
+  `Conversation` kept that history, so the next request was rejected
+  by the provider (HTTP 400). Now every call of the step is answered,
+  in the model's order. Calls that completed keep their result. The
+  others get an `is_error` result reading
+  `"Tool not run: the run was aborted (<reason>)"`, where `<reason>` is
+  the `AbortReason` as text (for `Terminate`, its `reason`). A call
+  with malformed arguments keeps its usual error. Each of these
+  results is also emitted as a `ToolResult` chunk before `RunFinished`,
+  so every `ToolCallFinished` gets its `ToolResult`. No tool hook fires
+  for them, because the tool never ran.
+
 - **Security:** tools hidden from the model could still run. The
   engine looked the called name up in the whole catalog, not in the
   active set, so:
