@@ -915,7 +915,20 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     ///    registration order.
     /// 3. The system-prompt assembly middleware is appended last on
     ///    the request side so it sees the request after every other
-    ///    middleware has touched it.
+    ///    middleware has touched it (in particular the final
+    ///    `req.tools`, which decides the per-tool-group sections). It
+    ///    *composes* rather than overwrites: if a user middleware set
+    ///    `req.system_prompt`, the request that reaches the model
+    ///    carries the builder prompt first and the user's after it.
+    ///    A [`SystemPrompt::Plain`](ailoop_core::SystemPrompt::Plain)
+    ///    overlay is joined with a blank line; a
+    ///    [`SystemPrompt::Blocks`](ailoop_core::SystemPrompt::Blocks)
+    ///    overlay yields `Blocks`, with the builder prompt as a leading
+    ///    block and the user's blocks (including their
+    ///    `cache_control`) kept as-is. If the builder prompt renders
+    ///    empty, the user's prompt passes through untouched. Because
+    ///    this runs after them, user middlewares never observe the
+    ///    builder prompt in `on_chat_request`.
     /// 4. If any [`with_approval*`](Self::with_approval) variant was
     ///    called, an internal `ApprovalMiddleware` is appended after
     ///    the system-prompt one. Tool-name resolution for the

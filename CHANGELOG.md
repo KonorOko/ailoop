@@ -92,6 +92,22 @@ and this project adheres to
   `ToolContext::detached()`, whose signature is unchanged (it mints a
   fresh never-cancelled token internally).
 
+### Fixed
+
+- A `system_prompt` set by a user middleware in `on_chat_request` is no
+  longer silently discarded. The internal system-prompt middleware runs
+  after user middlewares (it has to, so tool-group sections reflect the
+  final `req.tools`) and used to overwrite `req.system_prompt` with the
+  builder prompt. It now composes: the builder prompt goes first — a
+  stable prefix that keeps prompt-cache hits — and the user's prompt is
+  appended after it. `Plain + Plain` is joined with a blank line; a
+  `SystemPrompt::Blocks` overlay produces `Blocks`, with the builder
+  prompt as a leading block and the user's blocks (and their
+  `cache_control` breakpoints) preserved as-is. When the builder prompt
+  renders empty, the user's prompt reaches the model untouched. User
+  middlewares still do not observe the builder prompt in
+  `on_chat_request`, since it is assembled after them.
+
 ### Migration
 
 ```rust
