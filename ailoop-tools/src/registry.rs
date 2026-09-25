@@ -97,10 +97,10 @@ pub trait Tool: Send + Sync + Sized {
 /// [`Tool`] + the blanket impl: typed args, no manual JSON parsing.
 #[async_trait::async_trait]
 pub trait ToolDyn: Send + Sync {
-    /// Wire-visible name. The blanket impl returns
-    /// `T::NAME.to_string()`; manual impls (MCP) return the engine-
-    /// facing composed name (e.g. `mcp__time__get_current_time`).
-    fn name(&self) -> String;
+    /// Wire-visible name. The blanket impl returns `T::NAME`; manual
+    /// impls (MCP) return the engine-facing composed name (e.g.
+    /// `mcp__time__get_current_time`), usually a field of the tool.
+    fn name(&self) -> &str;
     /// Tool definition the engine forwards to the provider.
     fn tool_definition(&self) -> ToolDefinition;
     /// Dispatch a tool call. Errors that originate inside the tool
@@ -120,8 +120,8 @@ pub trait ToolDyn: Send + Sync {
 
 #[async_trait::async_trait]
 impl<T: Tool> ToolDyn for T {
-    fn name(&self) -> String {
-        T::NAME.to_string()
+    fn name(&self) -> &str {
+        T::NAME
     }
 
     fn tool_definition(&self) -> ToolDefinition {
@@ -196,6 +196,10 @@ impl ToolRegistry {
     /// at the start of each run and hands it to every per-dispatch
     /// [`ToolActivation`](crate::ToolActivation) so that `list_*` reads are cheap and don't
     /// reach back into the registry.
+    ///
+    /// Engine plumbing, hidden from the docs and not covered by semver:
+    /// its signature may change in any release.
+    #[doc(hidden)]
     pub fn catalog_arc(&self) -> Arc<IndexMap<String, Arc<dyn ToolDyn>>> {
         Arc::new(self.tools.clone())
     }
@@ -205,6 +209,10 @@ impl ToolRegistry {
     /// hands to every [`ToolActivation`](crate::ToolActivation) for this run; mutations
     /// inside a tool handler are visible to the engine on the next
     /// turn without touching the underlying registry.
+    ///
+    /// Engine plumbing, hidden from the docs and not covered by semver:
+    /// its signature may change in any release.
+    #[doc(hidden)]
     pub fn snapshot_active(&self) -> Arc<Mutex<IndexSet<String>>> {
         Arc::new(Mutex::new(self.active_tools.clone()))
     }
@@ -262,7 +270,7 @@ impl ToolRegistry {
     /// Add `tool_name` to the active set. Returns
     /// [`ToolRegistryError::NotFound`] when the tool was never
     /// registered. No-op when the tool is already active.
-    pub fn activate_tool(&mut self, tool_name: &str) -> Result<(), ToolRegistryError> {
+    pub fn activate(&mut self, tool_name: &str) -> Result<(), ToolRegistryError> {
         if !self.tools.contains_key(tool_name) {
             return Err(ToolRegistryError::NotFound(tool_name.to_string()));
         }
@@ -272,10 +280,10 @@ impl ToolRegistry {
 
     /// Remove `tool_name` from the active set. Silent no-op for an
     /// unknown name (asymmetric with
-    /// [`activate_tool`](Self::activate_tool), which errors): the
+    /// [`activate`](Self::activate), which errors): the
     /// "tool is no longer active" state is the same whether the tool
     /// exists or not, so the call is idempotent.
-    pub fn deactivate_tool(&mut self, tool_name: &str) -> Result<(), ToolRegistryError> {
+    pub fn deactivate(&mut self, tool_name: &str) -> Result<(), ToolRegistryError> {
         self.active_tools.shift_remove(tool_name);
         Ok(())
     }
@@ -348,7 +356,7 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ailoop_core::request::{ToolDefinition, ToolTag};
+    use ailoop_core::{ToolDefinition, ToolTag};
     use serde::Deserialize;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -436,8 +444,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolDyn for TaggedTool {
-        fn name(&self) -> String {
-            self.name.into()
+        fn name(&self) -> &str {
+            self.name
         }
 
         fn tool_definition(&self) -> ToolDefinition {
@@ -481,7 +489,7 @@ mod tests {
             }))
             .unwrap();
 
-        registry.deactivate_tool("fetch").unwrap();
+        registry.deactivate("fetch").unwrap();
         assert!(names(registry.active_tools()).is_empty());
         assert_eq!(names(registry.inactive_tools()), vec!["fetch"]);
     }
@@ -564,14 +572,14 @@ mod tests {
                 .register(Arc::new(TaggedTool { name, tags }))
                 .unwrap();
         }
-        registry.deactivate_tool("lookup").unwrap();
+        registry.deactivate("lookup").unwrap();
 
         registry.retain_by_tags(&[ToolTag::ReadOnly]);
 
         assert_eq!(names(registry.all_tools()), vec!["fetch", "lookup"]);
         assert_eq!(names(registry.active_tools()), vec!["fetch"]);
         assert!(matches!(
-            registry.activate_tool("rm"),
+            registry.activate("rm"),
             Err(ToolRegistryError::NotFound(_))
         ));
     }

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use ailoop::{
     AssistantBlock, ChatMiddleware, ChatRequest, Conversation, EngineError, FinishReason, Message,
-    RunConfig, RunError, RunId, StepId, StreamChunk, ToolContext, ToolDefinition, ToolDyn,
+    RunConfig, RunError, RunErrorInfo, StepInfo, StreamChunk, ToolContext, ToolDefinition, ToolDyn,
     ToolRegistry, ToolResultContent, Usage, UserBlock, advanced::run_chat,
 };
 use ailoop_core::testing::{ScriptedError, ScriptedModel, ScriptedTurn};
@@ -24,8 +24,8 @@ struct Counter {
 
 #[async_trait]
 impl ToolDyn for Counter {
-    fn name(&self) -> String {
-        "bump".into()
+    fn name(&self) -> &str {
+        "bump"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new("bump", "stub", json!({"type":"object"}), vec![])
@@ -45,20 +45,14 @@ struct Spy {
 
 #[async_trait]
 impl ChatMiddleware for Spy {
-    async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         self.request_sizes.lock().unwrap().push(req.messages.len());
     }
-    async fn on_run_error(
-        &self,
-        _: &RunId,
-        _: &(dyn std::error::Error + Send + Sync),
-        _: &Usage,
-        partial_messages: &[Message],
-    ) {
+    async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
         self.run_errors
             .lock()
             .unwrap()
-            .push(partial_messages.to_vec());
+            .push(run.partial_messages.to_vec());
     }
 }
 
@@ -76,11 +70,11 @@ fn tool_turn(id: &str) -> ScriptedTurn {
             delta: format!("calling {id}"),
         }),
         Ok(StreamChunk::ToolCallStarted {
-            id: id.into(),
+            call_id: id.into(),
             name: "bump".into(),
         }),
         Ok(StreamChunk::ToolCallFinished {
-            id: id.into(),
+            call_id: id.into(),
             name: "bump".into(),
             args: json!({}),
         }),
@@ -125,7 +119,7 @@ fn assert_no_orphans(messages: &[Message]) {
         match msg {
             Message::Assistant { blocks } => {
                 for b in blocks {
-                    if let AssistantBlock::ToolCall { id, .. } = b {
+                    if let AssistantBlock::ToolCall { call_id: id, .. } = b {
                         let answered = matches!(messages.get(i + 1), Some(Message::User { blocks })
                             if blocks.iter().any(|b| matches!(b,
                                 UserBlock::ToolResult { call_id, .. } if call_id == id)));
@@ -139,7 +133,7 @@ fn assert_no_orphans(messages: &[Message]) {
                         let called = i > 0
                             && matches!(&messages[i - 1], Message::Assistant { blocks }
                                 if blocks.iter().any(|b| matches!(b,
-                                    AssistantBlock::ToolCall { id, .. } if id == call_id)));
+                                    AssistantBlock::ToolCall { call_id: id, .. } if id == call_id)));
                         assert!(called, "tool_result {call_id} at {i} has no tool_use");
                     }
                 }
@@ -157,7 +151,7 @@ fn tool_call_ids(messages: &[Message]) -> Vec<String> {
             _ => &[],
         })
         .filter_map(|b| match b {
-            AssistantBlock::ToolCall { id, .. } => Some(id.clone()),
+            AssistantBlock::ToolCall { call_id: id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect()
@@ -219,12 +213,12 @@ async fn history_is_rolled_back_after_err() {
         broken_turn(),
     ]);
     chat.run("first").await.expect("first run succeeds");
-    let before = debug(chat.history_messages());
+    let before = debug(chat.messages());
 
     let err = chat.run("second").await.expect_err("third step fails");
     assert_two_complete_steps(&err);
 
-    let history = chat.history_messages();
+    let history = chat.messages();
     assert_eq!(history.len(), before.len() + 1, "prior turns + kickoff");
     assert_eq!(debug(&history[..before.len()]), before);
     assert!(matches!(history.last(), Some(Message::User { .. })));
@@ -240,9 +234,9 @@ async fn reapplying_partial_messages_leaves_a_valid_history() {
     ]);
 
     let err = chat.run("go").await.expect_err("third step fails");
-    chat.history_extend(err.partial_messages().iter().cloned());
+    chat.extend_messages(err.partial_messages().iter().cloned());
 
-    let history = chat.history_messages();
+    let history = chat.messages();
     assert_eq!(history.len(), 5, "kickoff + two completed steps");
     assert_eq!(debug(&history[1..]), debug(err.partial_messages()));
     assert_no_orphans(history);
@@ -255,7 +249,7 @@ async fn reapplying_partial_messages_leaves_a_valid_history() {
         vec![6],
         "the next request carries the re-applied steps"
     );
-    assert_no_orphans(chat.history_messages());
+    assert_no_orphans(chat.messages());
     assert_eq!(calls.load(Ordering::SeqCst), 2, "no tool ran twice");
 }
 
@@ -272,7 +266,7 @@ async fn error_in_first_step_has_no_partial_messages() {
         assert!(matches!(err.kind(), EngineError::Model(_)), "{err:?}");
         assert!(err.partial_messages().is_empty(), "{err:?}");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert_eq!(chat.history_messages().len(), 1, "only the kickoff");
+        assert_eq!(chat.messages().len(), 1, "only the kickoff");
         assert_eq!(*spy.run_errors.lock().unwrap(), vec![Vec::<Message>::new()]);
     }
 }

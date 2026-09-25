@@ -49,9 +49,8 @@ pub fn build_body(deployment: &str, req: &ChatRequest) -> Result<Value, AzureOpe
     if let Some(choice) = &req.tool_choice {
         body.insert("tool_choice".into(), to_chat_tool_choice(choice));
     }
-    // Chat Completions exposes the inverse: `parallel_tool_calls` (default true).
-    if let Some(disable) = req.disable_parallel_tool_use {
-        body.insert("parallel_tool_calls".into(), json!(!disable));
+    if let Some(parallel) = req.parallel_tool_use {
+        body.insert("parallel_tool_calls".into(), json!(parallel));
     }
 
     if let Some(effort) = req.reasoning_effort
@@ -194,7 +193,12 @@ fn append_assistant_blocks(out: &mut Vec<Value>, blocks: &[AssistantBlock]) {
     for block in blocks {
         match block {
             AssistantBlock::Text { text, .. } => text_parts.push(text.as_str()),
-            AssistantBlock::ToolCall { id, name, args, .. } => {
+            AssistantBlock::ToolCall {
+                call_id: id,
+                name,
+                args,
+                ..
+            } => {
                 // Chat Completions requires `arguments` as a JSON-encoded
                 // string, not an object.
                 let arguments = serde_json::to_string(args).unwrap_or_else(|_| "{}".into());
@@ -237,7 +241,7 @@ fn to_chat_tool_choice(choice: &ToolChoice) -> Value {
             "type": "function",
             "function": { "name": name },
         }),
-        ToolChoice::None_ => json!("none"),
+        ToolChoice::None => json!("none"),
         // ToolChoice is `#[non_exhaustive]`; future variants fall back
         // to the provider default.
         _ => json!("auto"),
@@ -556,28 +560,28 @@ mod tests {
     #[test]
     fn maps_tool_choice_none_as_string() {
         let mut req = base_req();
-        req.tool_choice = Some(ToolChoice::None_);
+        req.tool_choice = Some(ToolChoice::None);
         let body = build_body("dep", &req).unwrap();
         assert_eq!(body["tool_choice"], json!("none"));
     }
 
     /// Anthropic carries the flag inside `tool_choice`; Chat Completions
-    /// exposes its inverse (`parallel_tool_calls`) as a top-level field.
-    /// Setting `disable_parallel_tool_use = true` must produce
+    /// exposes it as a top-level `parallel_tool_calls`. Setting
+    /// `parallel_tool_use = false` must produce
     /// `parallel_tool_calls = false`, independent of `tool_choice`.
     #[test]
-    fn disable_parallel_emits_parallel_tool_calls_false() {
+    fn serial_tool_use_emits_parallel_tool_calls_false() {
         let mut req = base_req();
-        req.disable_parallel_tool_use = Some(true);
+        req.parallel_tool_use = Some(false);
         let body = build_body("dep", &req).unwrap();
         assert_eq!(body["parallel_tool_calls"], json!(false));
         assert!(body.get("tool_choice").is_none());
     }
 
     #[test]
-    fn disable_parallel_false_emits_parallel_tool_calls_true() {
+    fn parallel_tool_use_emits_parallel_tool_calls_true() {
         let mut req = base_req();
-        req.disable_parallel_tool_use = Some(false);
+        req.parallel_tool_use = Some(true);
         let body = build_body("dep", &req).unwrap();
         assert_eq!(body["parallel_tool_calls"], json!(true));
     }

@@ -33,14 +33,14 @@
 
 #![deny(missing_docs)]
 
-pub mod config;
-pub mod ids;
-pub mod message;
-pub mod middleware;
-pub mod provider_error;
-pub mod request;
-pub mod retry;
-pub mod stream;
+mod config;
+mod ids;
+mod message;
+mod middleware;
+mod provider_error;
+mod request;
+mod retry;
+mod stream;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 mod tokenizer;
@@ -52,7 +52,10 @@ pub use message::{
     AssistantBlock, CacheControl, Message, Source, SystemBlock, SystemPrompt, ToolResultBlock,
     ToolResultContent, UserBlock,
 };
-pub use middleware::{ChatMiddleware, ContinueDecision, HookAction, ToolCallInfo, ToolDecision};
+pub use middleware::{
+    ChatMiddleware, ContinueDecision, HookAction, RunErrorInfo, RunFinishedInfo, RunStartInfo,
+    StepInfo, ToolCallInfo, ToolDecision, TurnEndInfo,
+};
 pub use provider_error::ProviderError;
 pub use request::{ChatRequest, ReasoningEffort, ToolChoice, ToolDefinition, ToolTag};
 pub use retry::{RetryClassification, RetryConfig, Retryable, RetryingModel};

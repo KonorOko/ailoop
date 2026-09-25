@@ -1,6 +1,6 @@
 //! The engine only runs tools in the run's active set. A deferred tool
 //! the model names without activating it, or a tool removed by
-//! `with_capabilities`, gets an in-band "not found" error result and
+//! `capabilities`, gets an in-band "not found" error result and
 //! the run goes on.
 
 use std::sync::{Arc, Mutex};
@@ -20,8 +20,8 @@ struct EnableTool {
 
 #[async_trait]
 impl ToolDyn for EnableTool {
-    fn name(&self) -> String {
-        "enable_tool".into()
+    fn name(&self) -> &str {
+        "enable_tool"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -49,8 +49,8 @@ struct Recording {
 
 #[async_trait]
 impl ToolDyn for Recording {
-    fn name(&self) -> String {
-        self.name.into()
+    fn name(&self) -> &str {
+        self.name
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -81,11 +81,11 @@ impl ChatMiddleware for HookLog {
 fn tool_turn(id: &str, name: &str, args: Value) -> Vec<StreamChunk> {
     vec![
         StreamChunk::ToolCallStarted {
-            id: id.into(),
+            call_id: id.into(),
             name: name.into(),
         },
         StreamChunk::ToolCallFinished {
-            id: id.into(),
+            call_id: id.into(),
             name: name.into(),
             args,
         },
@@ -163,7 +163,7 @@ async fn deferred_tool_called_without_activation_does_not_run() {
         }))
         .initial_active_tools(["enable_tool"])
         .middleware(hooks.clone())
-        .with_approval(move |_req| {
+        .approval(move |_req| {
             *approvals_cb.lock().unwrap() += 1;
             async { ToolDecision::Continue }
         })
@@ -181,7 +181,7 @@ async fn deferred_tool_called_without_activation_does_not_run() {
     assert_eq!(*approvals.lock().unwrap(), 0, "rejected before the gate");
     assert!(hooks.0.lock().unwrap().is_empty(), "no tool hook fires");
 
-    let content = result_for(chat.history_messages(), "toolu_1");
+    let content = result_for(chat.messages(), "toolu_1");
     assert_not_found(&content, "delete_file");
     assert!(
         content
@@ -215,7 +215,7 @@ async fn tool_activated_at_runtime_runs() {
 
     assert!(matches!(outcome.finish_reason, FinishReason::EndTurn));
     assert_eq!(*executed.lock().unwrap(), 1);
-    let content = result_for(chat.history_messages(), "toolu_2");
+    let content = result_for(chat.messages(), "toolu_2");
     assert!(!content.is_error);
     assert_eq!(content.collect_text(), "done");
 }
@@ -239,7 +239,7 @@ async fn capability_filtered_tool_never_runs() {
             tags: vec![ToolTag::Destructive],
             executed: executed.clone(),
         }))
-        .with_capabilities(&[ToolTag::ReadOnly])
+        .capabilities(&[ToolTag::ReadOnly])
         .build()
         .expect("build");
 
@@ -248,7 +248,7 @@ async fn capability_filtered_tool_never_runs() {
     assert!(matches!(outcome.finish_reason, FinishReason::EndTurn));
     assert_eq!(*executed.lock().unwrap(), 0, "filtered tool must never run");
 
-    let messages = chat.history_messages();
+    let messages = chat.messages();
     assert_not_found(&result_for(messages, "toolu_1"), "delete_file");
     let activation = result_for(messages, "toolu_2");
     assert!(activation.is_error, "activate must fail: {activation:?}");

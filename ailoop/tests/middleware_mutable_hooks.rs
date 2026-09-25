@@ -16,7 +16,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use ailoop::{Conversation, Message, ToolDefinition, ToolResultContent, advanced::run_chat};
+use ailoop::{
+    Conversation, Message, RunStartInfo, ToolDefinition, ToolResultContent, advanced::run_chat,
+};
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{ChatMiddleware, FinishReason, RunConfig, StreamChunk, ToolCallInfo, Usage};
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
@@ -154,8 +156,8 @@ struct EchoArgs;
 
 #[async_trait::async_trait]
 impl ToolDyn for EchoArgs {
-    fn name(&self) -> String {
-        "echo".into()
+    fn name(&self) -> &str {
+        "echo"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -210,11 +212,11 @@ async fn on_before_tool_call_mut_mutation_visible_to_tool_and_observer() {
 
     let turn1 = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "echo".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "echo".into(),
             args: json!({"secret": "abc"}),
         },
@@ -314,11 +316,11 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
 
     let turn1 = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "echo".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "echo".into(),
             args: json!({}),
         },
@@ -446,7 +448,7 @@ async fn replacing_run_finished_variant_is_ignored() {
         outcome.finish_reason
     );
     assert_eq!(outcome.final_text.as_deref(), Some("hello"));
-    assert_eq!(conv.history_messages().len(), 2);
+    assert_eq!(conv.messages().len(), 2);
 }
 
 #[tokio::test]
@@ -455,12 +457,7 @@ async fn replacing_run_finished_variant_is_ignored_on_abort() {
 
     #[async_trait::async_trait]
     impl ChatMiddleware for Deny {
-        async fn on_run_started(
-            &self,
-            _run_id: &ailoop::RunId,
-            _messages: &[Message],
-            _config: &RunConfig,
-        ) -> ailoop::HookAction {
+        async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> ailoop::HookAction {
             ailoop::HookAction::Terminate {
                 reason: "stop".into(),
             }

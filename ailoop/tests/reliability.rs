@@ -9,11 +9,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use ailoop::{Message, ToolDefinition, ToolResultContent, advanced::run_chat};
+use ailoop::{
+    Message, RunFinishedInfo, RunStartInfo, ToolDefinition, ToolResultContent, advanced::run_chat,
+};
 use ailoop_core::testing::{ScriptedError, ScriptedModel};
 use ailoop_core::{
     AbortReason, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason,
-    HookAction, RunConfig, RunId, StreamChunk, ToolCallInfo, ToolDecision, Usage,
+    HookAction, RunConfig, StreamChunk, ToolCallInfo, ToolDecision, Usage,
 };
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use async_trait::async_trait;
@@ -57,8 +59,8 @@ struct CancelOnSecondCall {
 
 #[async_trait]
 impl ToolDyn for CancelOnSecondCall {
-    fn name(&self) -> String {
-        "cancel_on_second".into()
+    fn name(&self) -> &str {
+        "cancel_on_second"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -92,15 +94,9 @@ struct RunFinishedRecorder {
 
 #[async_trait]
 impl ChatMiddleware for RunFinishedRecorder {
-    async fn on_run_finished(
-        &self,
-        _run_id: &RunId,
-        reason: &FinishReason,
-        _usage: &Usage,
-        _new_messages: &[Message],
-    ) {
+    async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
         self.finished.fetch_add(1, Ordering::SeqCst);
-        *self.last_reason.lock().unwrap() = Some(reason.clone());
+        *self.last_reason.lock().unwrap() = Some(run.reason.clone());
     }
 }
 
@@ -229,20 +225,20 @@ async fn abort_during_tool_loop_preserves_prior_tool_results() {
     // in `RunFinished.new_messages` so history is consistent on resume.
     let turn = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_a".into(),
+            call_id: "toolu_a".into(),
             name: "cancel_on_second".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_a".into(),
+            call_id: "toolu_a".into(),
             name: "cancel_on_second".into(),
             args: json!({}),
         },
         StreamChunk::ToolCallStarted {
-            id: "toolu_b".into(),
+            call_id: "toolu_b".into(),
             name: "cancel_on_second".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_b".into(),
+            call_id: "toolu_b".into(),
             name: "cancel_on_second".into(),
             args: json!({}),
         },
@@ -287,7 +283,7 @@ async fn abort_during_tool_loop_preserves_prior_tool_results() {
         })
         .flat_map(|blocks| blocks.iter())
         .filter_map(|b| match b {
-            AssistantBlock::ToolCall { id, .. } => Some(id.as_str()),
+            AssistantBlock::ToolCall { call_id: id, .. } => Some(id.as_str()),
             _ => None,
         })
         .collect();
@@ -354,8 +350,8 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
     struct UnusedTool;
     #[async_trait]
     impl ToolDyn for UnusedTool {
-        fn name(&self) -> String {
-            "noop".into()
+        fn name(&self) -> &str {
+            "noop"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(
@@ -372,11 +368,11 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
 
     let turn = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_x".into(),
+            call_id: "toolu_x".into(),
             name: "noop".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_x".into(),
+            call_id: "toolu_x".into(),
             name: "noop".into(),
             args: json!({}),
         },
@@ -424,8 +420,8 @@ async fn tool_context_cancellation_mirrors_run_config() {
 
     #[async_trait]
     impl ToolDyn for ObserverTool {
-        fn name(&self) -> String {
-            "observer".into()
+        fn name(&self) -> &str {
+            "observer"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(
@@ -449,11 +445,11 @@ async fn tool_context_cancellation_mirrors_run_config() {
 
     let turn = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_obs".into(),
+            call_id: "toolu_obs".into(),
             name: "observer".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_obs".into(),
+            call_id: "toolu_obs".into(),
             name: "observer".into(),
             args: json!({}),
         },
@@ -508,12 +504,7 @@ async fn hook_action_terminate_still_fires_on_run_finished() {
 
     #[async_trait]
     impl ChatMiddleware for AbortingMw {
-        async fn on_run_started(
-            &self,
-            _run_id: &RunId,
-            _messages: &[Message],
-            _config: &RunConfig,
-        ) -> HookAction {
+        async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> HookAction {
             HookAction::Terminate {
                 reason: "no go".into(),
             }
@@ -534,7 +525,7 @@ async fn hook_action_terminate_still_fires_on_run_finished() {
 
     assert_eq!(recorder.finished.load(Ordering::SeqCst), 1);
     match recorder.last_reason.lock().unwrap().as_ref() {
-        Some(FinishReason::Aborted(AbortReason::Terminated { reason })) => {
+        Some(FinishReason::Aborted(AbortReason::Terminated { reason, .. })) => {
             assert_eq!(reason, "no go")
         }
         other => panic!("expected Aborted reason, got {other:?}"),

@@ -142,9 +142,9 @@ pub enum UserBlock {
     },
     /// Result of a tool invocation paired with the assistant
     /// [`AssistantBlock::ToolCall`] of the previous turn (matched by
-    /// id).
+    /// `call_id`).
     ToolResult {
-        /// Matches the `id` on the originating [`AssistantBlock::ToolCall`].
+        /// Matches the `call_id` on the originating [`AssistantBlock::ToolCall`].
         call_id: String,
         /// The tool's reply. `content.is_error` flags tool-reported
         /// failures separately from the block list, so an error reply
@@ -268,12 +268,14 @@ pub enum AssistantBlock {
         cache_control: Option<CacheControl>,
     },
     /// A tool invocation request from the model. Pair with a
-    /// [`UserBlock::ToolResult`] in the next user turn that matches
-    /// `id` to `call_id`.
+    /// [`UserBlock::ToolResult`] in the next user turn with the same
+    /// `call_id`.
     ToolCall {
         /// Provider-assigned id; mirrors back as `call_id` on the
-        /// matching [`UserBlock::ToolResult`].
-        id: String,
+        /// matching [`UserBlock::ToolResult`]. Snapshots written before
+        /// 1.0.0-rc.4 serialized it as `id`, which still deserializes.
+        #[serde(alias = "id")]
+        call_id: String,
         /// Tool name as registered in the [`crate::ChatRequest::tools`]
         /// list.
         name: String,
@@ -321,12 +323,12 @@ impl AssistantBlock {
 
     /// Build an [`AssistantBlock::ToolCall`] with no cache breakpoint.
     pub fn tool_call(
-        id: impl Into<String>,
+        call_id: impl Into<String>,
         name: impl Into<String>,
         args: serde_json::Value,
     ) -> Self {
         Self::ToolCall {
-            id: id.into(),
+            call_id: call_id.into(),
             name: name.into(),
             args,
             cache_control: None,
@@ -699,7 +701,12 @@ mod tests {
                     other => panic!("expected Text, got {other:?}"),
                 }
                 match &blocks[1] {
-                    AssistantBlock::ToolCall { id, name, args, .. } => {
+                    AssistantBlock::ToolCall {
+                        call_id: id,
+                        name,
+                        args,
+                        ..
+                    } => {
                         assert_eq!(id, "c1");
                         assert_eq!(name, "fetch");
                         assert_eq!(args, &json!({"q": "x"}));
@@ -709,6 +716,19 @@ mod tests {
             }
             other => panic!("expected Assistant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tool_call_serializes_call_id_and_reads_legacy_id() {
+        let block = AssistantBlock::tool_call("c1", "fetch", json!({}));
+        let value = serde_json::to_value(&block).unwrap();
+        assert_eq!(value["ToolCall"]["call_id"], "c1");
+        assert!(value["ToolCall"].get("id").is_none());
+
+        // Snapshots written before 1.0.0-rc.4 used `id`.
+        let legacy = json!({"ToolCall": {"id": "c1", "name": "fetch", "args": {}}});
+        let block: AssistantBlock = serde_json::from_value(legacy).unwrap();
+        assert_eq!(block, AssistantBlock::tool_call("c1", "fetch", json!({})));
     }
 
     #[test]

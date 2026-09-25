@@ -73,12 +73,7 @@ pub trait ChatMiddleware: Send + Sync {
     /// [`HookAction::Terminate`] to abort early; the engine surfaces
     /// the reason as [`crate::FinishReason::Aborted`] and still fires
     /// [`Self::on_run_finished`] so observability is consistent.
-    async fn on_run_started(
-        &self,
-        run_id: &RunId,
-        messages: &[Message],
-        config: &RunConfig,
-    ) -> HookAction {
+    async fn on_run_started(&self, run: &RunStartInfo<'_>) -> HookAction {
         HookAction::Continue
     }
     /// Fired once per step, after the engine has assembled the
@@ -107,7 +102,7 @@ pub trait ChatMiddleware: Send + Sync {
     /// only exception is the context-overflow recovery of a
     /// `Conversation`, which rebuilds the request and calls it again
     /// with the same `step_id`.
-    async fn on_chat_request(&self, run_id: &RunId, step_id: &StepId, req: &mut ChatRequest) {}
+    async fn on_chat_request(&self, step: &StepInfo, req: &mut ChatRequest) {}
     /// Fired for every [`StreamChunk`] the engine emits, including
     /// chunks the engine itself synthesizes
     /// (`RunStarted`/`StepStarted`/`StepFinished`/`ToolResult`/
@@ -132,20 +127,14 @@ pub trait ChatMiddleware: Send + Sync {
     /// [`StreamChunk::RunFinished`]. Always fires — including aborted
     /// runs and runs terminated by middleware — so observers see a
     /// consistent close, unless the run fails ([`Self::on_run_error`])
-    /// or its stream is dropped first ([`Self::on_run_dropped`]). `new_messages` covers everything the engine
-    /// added to history this run. When the run was aborted mid-step,
+    /// or its stream is dropped first ([`Self::on_run_dropped`]).
+    /// `run.new_messages` covers everything the engine added to history
+    /// this run. When the run was aborted mid-step,
     /// every `tool_use` in it still has its `tool_result`: completed
     /// calls keep theirs, the rest get a synthesized error.
     ///
     /// [`StreamChunk::RunFinished`]: crate::StreamChunk::RunFinished
-    async fn on_run_finished(
-        &self,
-        run_id: &RunId,
-        reason: &FinishReason,
-        usage: &Usage,
-        new_messages: &[Message],
-    ) {
-    }
+    async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {}
     /// Fired when a turn ends with nothing left for the engine to do —
     /// the model stopped for any reason other than
     /// [`FinishReason::ToolUse`] — right before the engine would finish
@@ -154,10 +143,10 @@ pub trait ChatMiddleware: Send + Sync {
     /// where a middleware verifies the result and sends the model back
     /// to work when the check fails.
     ///
-    /// `reason` is the turn's finish reason ([`FinishReason::EndTurn`],
+    /// `turn.reason` is the turn's finish reason ([`FinishReason::EndTurn`],
     /// [`FinishReason::MaxTokens`], [`FinishReason::StopSequence`] or
     /// [`FinishReason::Other`]); a gate usually acts only on `EndTurn`.
-    /// Never fired for [`FinishReason::Aborted`]. `new_messages` is
+    /// Never fired for [`FinishReason::Aborted`]. `turn.new_messages` is
     /// everything the run has added so far, including this turn's
     /// assistant message.
     ///
@@ -187,13 +176,7 @@ pub trait ChatMiddleware: Send + Sync {
     /// `Continue` with no blocks counts as [`ContinueDecision::Stop`]:
     /// continuing without a new user message would send a request
     /// that ends on the assistant's own turn.
-    async fn on_turn_end(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        reason: &FinishReason,
-        new_messages: &[Message],
-    ) -> ContinueDecision {
+    async fn on_turn_end(&self, turn: &TurnEndInfo<'_>) -> ContinueDecision {
         ContinueDecision::Stop
     }
     /// Fired when a run terminates with a transport / setup-time
@@ -203,7 +186,7 @@ pub trait ChatMiddleware: Send + Sync {
     /// `RunConfig.timeout` go through [`Self::on_run_finished`]
     /// instead — they are not errors.
     ///
-    /// `usage` is what the run spent before failing, the same value the
+    /// `run.usage` is what the run spent before failing, the same value the
     /// caller gets from `RunError::usage`: every provider turn that
     /// finished (each one a [`StreamChunk::TurnFinished`]) plus the
     /// usage tools reported through `ToolContext::report_usage`,
@@ -214,7 +197,7 @@ pub trait ChatMiddleware: Send + Sync {
     /// `TurnFinished` in [`Self::on_chunk`] only recovers the run's own
     /// turns; this value also has the delegated spend.
     ///
-    /// `partial_messages` holds the messages of the steps the run
+    /// `run.partial_messages` holds the messages of the steps the run
     /// completed before failing, the same list the caller receives in
     /// the returned error. Every `tool_use` in it has its `tool_result`,
     /// and the step that failed is left out. It is empty when the first
@@ -228,14 +211,7 @@ pub trait ChatMiddleware: Send + Sync {
     /// Only fired for runs that started. An error raised before the
     /// run starts, such as `Conversation` compacting the history before
     /// the first step, reaches the caller without any hook.
-    async fn on_run_error(
-        &self,
-        run_id: &RunId,
-        err: &(dyn std::error::Error + Send + Sync),
-        usage: &Usage,
-        partial_messages: &[Message],
-    ) {
-    }
+    async fn on_run_error(&self, run: &RunErrorInfo<'_>) {}
     /// Fired when the caller drops a run's stream before the run
     /// closed: a `select!` that picks another branch, an outer timeout,
     /// a client that disconnects. Neither [`Self::on_run_finished`] nor
@@ -304,6 +280,163 @@ pub trait ChatMiddleware: Send + Sync {
         args: &Value,
         result: &mut ToolResultContent,
     ) {
+    }
+}
+
+/// Context passed to [`ChatMiddleware::on_run_started`].
+///
+/// Borrows from the engine for the duration of the hook. The struct is
+/// `#[non_exhaustive]` so later releases can add fields without
+/// breaking middlewares; build one with [`Self::new`] to unit-test a
+/// hook.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct RunStartInfo<'a> {
+    /// Id of the run that is starting.
+    pub run_id: &'a RunId,
+    /// Messages the first request is built from: the conversation
+    /// history, ending with the kickoff message.
+    pub messages: &'a [Message],
+    /// The run's configuration, including
+    /// [`RunConfig::max_iterations`].
+    pub config: &'a RunConfig,
+}
+
+impl<'a> RunStartInfo<'a> {
+    /// Build the context of a starting run.
+    pub fn new(run_id: &'a RunId, messages: &'a [Message], config: &'a RunConfig) -> Self {
+        Self {
+            run_id,
+            messages,
+            config,
+        }
+    }
+}
+
+/// Identity of one step (model turn), passed to
+/// [`ChatMiddleware::on_chat_request`].
+///
+/// The request travels as a separate hook parameter, since the hook
+/// borrows it mutably.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StepInfo {
+    /// Run the step belongs to.
+    pub run_id: RunId,
+    /// The step itself; the same `step_id` the engine puts on
+    /// [`StreamChunk::StepStarted`].
+    pub step_id: StepId,
+}
+
+impl StepInfo {
+    /// Build the identity of a step.
+    pub fn new(run_id: RunId, step_id: StepId) -> Self {
+        Self { run_id, step_id }
+    }
+}
+
+/// Context passed to [`ChatMiddleware::on_run_finished`].
+///
+/// Carries the same values as the run's terminal
+/// [`StreamChunk::RunFinished`]. `#[non_exhaustive]`; build one with
+/// [`Self::new`] to unit-test a hook.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct RunFinishedInfo<'a> {
+    /// Id of the run that finished.
+    pub run_id: &'a RunId,
+    /// Why the run ended; aborts arrive as [`FinishReason::Aborted`].
+    pub reason: &'a FinishReason,
+    /// Total usage of the run, sub-agents included.
+    pub usage: &'a Usage,
+    /// Everything the run added to history.
+    pub new_messages: &'a [Message],
+}
+
+impl<'a> RunFinishedInfo<'a> {
+    /// Build the context of a finished run.
+    pub fn new(
+        run_id: &'a RunId,
+        reason: &'a FinishReason,
+        usage: &'a Usage,
+        new_messages: &'a [Message],
+    ) -> Self {
+        Self {
+            run_id,
+            reason,
+            usage,
+            new_messages,
+        }
+    }
+}
+
+/// Context passed to [`ChatMiddleware::on_turn_end`].
+///
+/// `#[non_exhaustive]`; build one with [`Self::new`] to unit-test a
+/// hook.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct TurnEndInfo<'a> {
+    /// Run the turn belongs to.
+    pub run_id: &'a RunId,
+    /// Step (model turn) that just ended.
+    pub step_id: &'a StepId,
+    /// The turn's finish reason; never [`FinishReason::Aborted`] or
+    /// [`FinishReason::ToolUse`].
+    pub reason: &'a FinishReason,
+    /// Everything the run has added so far, including this turn's
+    /// assistant message.
+    pub new_messages: &'a [Message],
+}
+
+impl<'a> TurnEndInfo<'a> {
+    /// Build the context of an ended turn.
+    pub fn new(
+        run_id: &'a RunId,
+        step_id: &'a StepId,
+        reason: &'a FinishReason,
+        new_messages: &'a [Message],
+    ) -> Self {
+        Self {
+            run_id,
+            step_id,
+            reason,
+            new_messages,
+        }
+    }
+}
+
+/// Context passed to [`ChatMiddleware::on_run_error`].
+///
+/// `#[non_exhaustive]`; build one with [`Self::new`] to unit-test a
+/// hook.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct RunErrorInfo<'a> {
+    /// Id of the run that failed.
+    pub run_id: &'a RunId,
+    /// The error returned to the caller.
+    pub error: &'a (dyn std::error::Error + Send + Sync),
+    /// What the run spent before failing.
+    pub usage: &'a Usage,
+    /// Messages of the steps the run completed before failing.
+    pub partial_messages: &'a [Message],
+}
+
+impl<'a> RunErrorInfo<'a> {
+    /// Build the context of a failed run.
+    pub fn new(
+        run_id: &'a RunId,
+        error: &'a (dyn std::error::Error + Send + Sync),
+        usage: &'a Usage,
+        partial_messages: &'a [Message],
+    ) -> Self {
+        Self {
+            run_id,
+            error,
+            usage,
+            partial_messages,
+        }
     }
 }
 

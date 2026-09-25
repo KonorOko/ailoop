@@ -7,12 +7,13 @@ use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use ailoop::{
-    Conversation, Message, Sanitize, ToolDefinition, ToolResultContent, advanced::run_chat,
+    Conversation, Message, Sanitize, StepInfo, ToolDefinition, ToolResultContent,
+    advanced::run_chat,
 };
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{
-    AssistantBlock, ChatMiddleware, ChatRequest, FinishReason, RunConfig, RunId, StepId,
-    StreamChunk, Usage, UserBlock,
+    AssistantBlock, ChatMiddleware, ChatRequest, FinishReason, RunConfig, StreamChunk, Usage,
+    UserBlock,
 };
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use futures::StreamExt;
@@ -27,7 +28,7 @@ struct RequestRecorder {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for RequestRecorder {
-    async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         self.captures.lock().unwrap().push(req.messages.clone());
     }
 }
@@ -38,8 +39,8 @@ struct EchoArgs;
 
 #[async_trait::async_trait]
 impl ToolDyn for EchoArgs {
-    fn name(&self) -> String {
-        "echo".into()
+    fn name(&self) -> &str {
+        "echo"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -60,8 +61,8 @@ struct LeakySecret;
 
 #[async_trait::async_trait]
 impl ToolDyn for LeakySecret {
-    fn name(&self) -> String {
-        "leaky".into()
+    fn name(&self) -> &str {
+        "leaky"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -111,11 +112,11 @@ async fn on_user_text_rewrites_outgoing_user_blocks() {
 async fn on_tool_args_rewrites_args_before_tool_invocation() {
     let turn1 = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "echo".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "echo".into(),
             args: json!({"q": "hello"}),
         },
@@ -172,11 +173,11 @@ async fn on_tool_args_rewrites_args_before_tool_invocation() {
 async fn on_tool_result_rewrites_result_before_next_turn() {
     let turn1 = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "leaky".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "leaky".into(),
             args: json!({}),
         },
@@ -266,11 +267,11 @@ async fn on_assistant_text_is_off_by_default() {
             delta: "alice replied".into(),
         },
         StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "echo".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "echo".into(),
             args: json!({}),
         },
@@ -329,11 +330,11 @@ async fn enable_assistant_text_opts_in_to_assistant_rewrites() {
             delta: "alice replied".into(),
         },
         StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "echo".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "echo".into(),
             args: json!({}),
         },
@@ -394,11 +395,11 @@ async fn reasoning_blocks_are_not_sanitized() {
             signature: Some("sig-1".into()),
         },
         StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "echo".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "echo".into(),
             args: json!({}),
         },
@@ -459,8 +460,8 @@ async fn tool_args_callback_can_filter_by_name() {
 
     #[async_trait::async_trait]
     impl ToolDyn for OtherTool {
-        fn name(&self) -> String {
-            "other_tool".into()
+        fn name(&self) -> &str {
+            "other_tool"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(
@@ -480,8 +481,8 @@ async fn tool_args_callback_can_filter_by_name() {
 
     #[async_trait::async_trait]
     impl ToolDyn for Fetch {
-        fn name(&self) -> String {
-            "fetch".into()
+        fn name(&self) -> &str {
+            "fetch"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(
@@ -498,20 +499,20 @@ async fn tool_args_callback_can_filter_by_name() {
 
     let turn1 = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "fetch".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "fetch".into(),
             args: json!({"q": "hello"}),
         },
         StreamChunk::ToolCallStarted {
-            id: "toolu_2".into(),
+            call_id: "toolu_2".into(),
             name: "other_tool".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_2".into(),
+            call_id: "toolu_2".into(),
             name: "other_tool".into(),
             args: json!({"q": "hello"}),
         },

@@ -14,7 +14,7 @@ use crate::{
 /// [reserved tokens](HistoryBuilder::reserved_tokens)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct CompactionReport {
+pub struct CompactionStats {
     /// Message count before compaction ran.
     pub before: usize,
     /// Message count after compaction ran. `after < before` whenever
@@ -221,7 +221,7 @@ impl History {
             Message::Assistant { blocks } => blocks
                 .iter()
                 .filter_map(|b| match b {
-                    AssistantBlock::ToolCall { id, .. } => Some(id.clone()),
+                    AssistantBlock::ToolCall { call_id: id, .. } => Some(id.clone()),
                     _ => None,
                 })
                 .collect(),
@@ -249,7 +249,7 @@ impl History {
                 (true, Message::User { blocks }) => blocks.iter().any(|b| matches!(b,
                     UserBlock::ToolResult { call_id, .. } if target_ids.iter().any(|t| t == call_id))),
                 (false, Message::Assistant { blocks }) => blocks.iter().any(|b| matches!(b,
-                    AssistantBlock::ToolCall { id, .. } if target_ids.iter().any(|t| t == id))),
+                    AssistantBlock::ToolCall { call_id: id, .. } if target_ids.iter().any(|t| t == id))),
                 _ => false,
             };
             if matches {
@@ -278,7 +278,7 @@ impl History {
     ///
     /// [`CompactionStrategy`]: crate::CompactionStrategy
     /// [`StreamChunk::HistoryCompacted`]: ailoop_core::StreamChunk::HistoryCompacted
-    pub async fn compact_if_needed(&mut self) -> Result<Option<CompactionReport>, CompactionError> {
+    pub async fn compact_if_needed(&mut self) -> Result<Option<CompactionStats>, CompactionError> {
         if !self.needs_compaction() {
             return Ok(None);
         }
@@ -301,7 +301,7 @@ impl History {
     /// Use it when the estimate said the history fits but the provider
     /// disagreed — for example after a context-window overflow error,
     /// which is how `Conversation` recovers from one. Returns the same
-    /// [`CompactionReport`] as
+    /// [`CompactionStats`] as
     /// [`compact_if_needed`](Self::compact_if_needed) and the same
     /// errors, including [`CompactionError::NotEnoughHistory`] when the
     /// history is no longer than `preserve_n_last`.
@@ -313,7 +313,7 @@ impl History {
     /// when that matters.
     ///
     /// [`CompactionStrategy`]: crate::CompactionStrategy
-    pub async fn force_compact(&mut self) -> Result<CompactionReport, CompactionError> {
+    pub async fn force_compact(&mut self) -> Result<CompactionStats, CompactionError> {
         let before = self.messages.len();
         let output = self
             .strategy
@@ -328,7 +328,7 @@ impl History {
         let strategy = self.strategy.name();
         self.messages = output.messages;
         self.pinned = output.pinned;
-        Ok(CompactionReport {
+        Ok(CompactionStats {
             before,
             after,
             strategy,
@@ -597,10 +597,9 @@ mod tests {
         for msg in mgr.messages() {
             match msg {
                 Message::Assistant { blocks } => {
-                    if blocks
-                        .iter()
-                        .any(|b| matches!(b, AssistantBlock::ToolCall { id, .. } if id == "c1"))
-                    {
+                    if blocks.iter().any(
+                        |b| matches!(b, AssistantBlock::ToolCall { call_id: id, .. } if id == "c1"),
+                    ) {
                         saw_call = true;
                     }
                 }

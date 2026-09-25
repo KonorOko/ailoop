@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
 use ailoop_core::{
-    ChatMiddleware, FinishReason, Message, RunId, ToolCallInfo, ToolDecision, Usage,
+    ChatMiddleware, RunErrorInfo, RunFinishedInfo, RunId, ToolCallInfo, ToolDecision,
 };
 use serde_json::Value;
 
@@ -76,24 +76,12 @@ impl ChatMiddleware for MaxToolCalls {
         ToolDecision::Continue
     }
 
-    async fn on_run_finished(
-        &self,
-        run_id: &RunId,
-        _reason: &FinishReason,
-        _usage: &Usage,
-        _new_messages: &[Message],
-    ) {
-        self.counts().remove(run_id);
+    async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
+        self.counts().remove(run.run_id);
     }
 
-    async fn on_run_error(
-        &self,
-        run_id: &RunId,
-        _err: &(dyn std::error::Error + Send + Sync),
-        _usage: &Usage,
-        _partial_messages: &[Message],
-    ) {
-        self.counts().remove(run_id);
+    async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
+        self.counts().remove(run.run_id);
     }
 
     fn on_run_dropped(&self, run_id: &RunId) {
@@ -104,7 +92,7 @@ impl ChatMiddleware for MaxToolCalls {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ailoop_core::StepId;
+    use ailoop_core::{FinishReason, StepId, Usage};
     use serde_json::json;
     use std::sync::Arc;
 
@@ -234,8 +222,13 @@ mod tests {
         )
         .await;
         assert_eq!(mw.counts().len(), 1);
-        mw.on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
-            .await;
+        mw.on_run_finished(&RunFinishedInfo::new(
+            &run_id,
+            &FinishReason::EndTurn,
+            &Usage::default(),
+            &[],
+        ))
+        .await;
         assert!(mw.counts().is_empty());
     }
 }

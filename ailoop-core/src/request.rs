@@ -47,12 +47,12 @@ pub struct ChatRequest {
     /// leaves the provider default (typically `Auto`). Mapped to each
     /// provider's wire format by the adapter.
     pub tool_choice: Option<ToolChoice>,
-    /// Forbid the model from emitting more than one `tool_use` block
-    /// per turn. `None` leaves the provider default (parallel allowed).
-    /// Adapters lower this to the field their API expects:
-    /// `tool_choice.disable_parallel_tool_use` for Anthropic,
-    /// `parallel_tool_calls` (negated) for Chat Completions.
-    pub disable_parallel_tool_use: Option<bool>,
+    /// Whether the model may emit more than one tool call per turn.
+    /// `Some(false)` limits it to one; `None` leaves the provider
+    /// default (parallel allowed). Adapters lower this to the field
+    /// their API expects: `parallel_tool_calls` for Chat Completions,
+    /// `tool_choice.disable_parallel_tool_use` (negated) for Anthropic.
+    pub parallel_tool_use: Option<bool>,
 
     /// How hard the model should think before answering. `None` keeps
     /// the provider default (no thinking on Anthropic; the deployment's
@@ -82,7 +82,7 @@ impl Default for ChatRequest {
             stop_sequences: Vec::new(),
             max_tokens: 4096,
             tool_choice: None,
-            disable_parallel_tool_use: None,
+            parallel_tool_use: None,
             reasoning_effort: None,
             additional_params: None,
         }
@@ -105,7 +105,7 @@ impl ChatRequest {
 /// Constraint placed on the model's tool selection for a single
 /// request. Variant naming follows Anthropic's wire vocabulary; the
 /// Chat Completions adapter translates `Any` → `"required"` and
-/// `None_` → `"none"`.
+/// `None` → `"none"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ToolChoice {
@@ -120,9 +120,9 @@ pub enum ToolChoice {
         /// `tools` list.
         name: String,
     },
-    /// Model is forbidden from calling any tool. Trailing underscore
-    /// avoids collision with the keyword `None`.
-    None_,
+    /// Model is forbidden from calling any tool. Always written
+    /// `ToolChoice::None`; it does not shadow [`Option::None`].
+    None,
 }
 
 /// Tool description sent to the provider so the model can decide when
@@ -228,7 +228,7 @@ pub enum ReasoningEffort {
 /// Capability tag attached to a [`ToolDefinition`].
 ///
 /// Tags are the input to the façade's capability filter
-/// (`ConversationBuilder::with_capabilities`) and to the built-in
+/// (`ConversationBuilder::capabilities`) and to the built-in
 /// approval middleware. The `ailoop_derive::ailoop_tool` proc-macro
 /// emits these via the `tags(...)` argument.
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]

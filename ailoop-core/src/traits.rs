@@ -25,13 +25,11 @@ pub trait CompletionClient {
 ///
 /// Implementors map [`ChatRequest`] to the provider's wire format,
 /// open the streaming response, and translate per-chunk events into
-/// [`StreamChunk`]s. Implementations must be `Send + Sync` because
-/// [`RetryingModel`](crate::RetryingModel) and the engine hold them
-/// across `await` boundaries; the trait does not declare these
-/// super-bounds yet — every use site adds them — but new
-/// implementations should satisfy them.
+/// [`StreamChunk`]s. The trait requires `Send + Sync` because
+/// [`RetryingModel`](crate::RetryingModel) and the engine hold models
+/// across `await` boundaries.
 #[async_trait::async_trait]
-pub trait CompletionModel {
+pub trait CompletionModel: Send + Sync {
     /// Error type for the model's transport / setup failures.
     /// Implement [`crate::Retryable`] on it to make the model
     /// composable with [`RetryingModel`](crate::RetryingModel).

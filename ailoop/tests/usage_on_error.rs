@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use ailoop::{
-    ChatMiddleware, Conversation, EngineError, FinishReason, History, Message, RunError, RunId,
+    ChatMiddleware, Conversation, EngineError, FinishReason, History, RunError, RunErrorInfo,
     StreamChunk, SubAgentTool, ToolContext, ToolDefinition, ToolDyn, ToolResultContent, Usage,
 };
 use ailoop_core::testing::{ScriptedError, ScriptedModel, ScriptedTurn};
@@ -28,8 +28,8 @@ struct Reporter {
 
 #[async_trait]
 impl ToolDyn for Reporter {
-    fn name(&self) -> String {
-        "summarize".into()
+    fn name(&self) -> &str {
+        "summarize"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new("summarize", "stub", json!({"type":"object"}), vec![])
@@ -48,14 +48,8 @@ struct Spy {
 
 #[async_trait]
 impl ChatMiddleware for Spy {
-    async fn on_run_error(
-        &self,
-        _: &RunId,
-        _: &(dyn std::error::Error + Send + Sync),
-        usage: &Usage,
-        _: &[Message],
-    ) {
-        self.run_errors.lock().unwrap().push(*usage);
+    async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
+        self.run_errors.lock().unwrap().push(*run.usage);
     }
 }
 
@@ -74,11 +68,11 @@ impl Spy {
 fn call_turn(tool: &str, args: Value, usage: Usage) -> ScriptedTurn {
     Ok(vec![
         Ok(StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: tool.into(),
         }),
         Ok(StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: tool.into(),
             args,
         }),
@@ -197,7 +191,7 @@ async fn pre_run_compaction_error_has_zero_usage_and_no_hook() {
         "never",
         tokens(1, 1),
     )]))
-    .with_history(History::builder(10).preserve_n_last(5))
+    .history(History::builder(10).preserve_n_last(5))
     .middleware(spy.clone())
     .build()
     .expect("build");

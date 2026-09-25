@@ -18,8 +18,8 @@ struct EnableTool;
 
 #[async_trait]
 impl ToolDyn for EnableTool {
-    fn name(&self) -> String {
-        "enable_tool".into()
+    fn name(&self) -> &str {
+        "enable_tool"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -47,8 +47,8 @@ struct Recording {
 
 #[async_trait]
 impl ToolDyn for Recording {
-    fn name(&self) -> String {
-        self.name.into()
+    fn name(&self) -> &str {
+        self.name
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -67,11 +67,11 @@ impl ToolDyn for Recording {
 fn tool_turn(id: &str, name: &str, args: Value) -> Vec<StreamChunk> {
     vec![
         StreamChunk::ToolCallStarted {
-            id: id.into(),
+            call_id: id.into(),
             name: name.into(),
         },
         StreamChunk::ToolCallFinished {
-            id: id.into(),
+            call_id: id.into(),
             name: name.into(),
             args,
         },
@@ -103,7 +103,7 @@ fn activate_then_call(target: &str) -> ScriptedModel {
     ])
 }
 
-/// Runs the scripted activate-then-call flow under `with_approval`
+/// Runs the scripted activate-then-call flow under `approval`
 /// and returns (callback invocations, target executions).
 async fn run_gated(target: &'static str, tags: Vec<ToolTag>) -> (Vec<String>, usize) {
     let executed = Arc::new(Mutex::new(0));
@@ -118,8 +118,8 @@ async fn run_gated(target: &'static str, tags: Vec<ToolTag>) -> (Vec<String>, us
             executed: executed.clone(),
         }))
         .initial_active_tools(["enable_tool"])
-        .with_approval(move |req| {
-            seen_cb.lock().unwrap().push(req.tool_name);
+        .approval(move |req| {
+            seen_cb.lock().unwrap().push(req.name);
             async move {
                 ToolDecision::Skip {
                     reason: "denied".into(),

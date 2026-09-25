@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use ailoop_core::{
     AbortReason, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, Message,
-    ProviderError, RunConfig, RunId, Source, StepId, StreamChunk, ToolChoice, ToolDefinition,
+    ProviderError, RunStartInfo, Source, StepInfo, StreamChunk, ToolChoice, ToolDefinition,
     ToolResultContent, UserBlock,
 };
 use ailoop_tools::{ToolContext, ToolDyn};
@@ -192,12 +192,12 @@ far and state clearly what remains unverified or unfinished.";
 ///   deadline. Without a timeout only the iteration trigger applies.
 ///
 /// Both budgets are read from the child run's effective
-/// [`RunConfig`], so they apply whether they come from
+/// [`RunConfig`](ailoop_core::RunConfig), so they apply whether they come from
 /// [`SubAgentConfig`] or from the child's builder defaults.
 ///
 /// The wrap-up request keeps its tool definitions (so the prompt cache
 /// is not invalidated) but sets `tool_choice` to
-/// [`ToolChoice::None_`], and [`Self::instruction`] is appended as a
+/// [`ToolChoice::None`], and [`Self::instruction`] is appended as a
 /// text block to the request's last user message. The instruction is
 /// request-only: it is never written to the child's history. Once
 /// triggered, every later request of the same run is forced too. The
@@ -299,17 +299,12 @@ struct WrapUpMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for WrapUpMiddleware {
-    async fn on_run_started(
-        &self,
-        _: &RunId,
-        _: &[Message],
-        config: &RunConfig,
-    ) -> ailoop_core::HookAction {
+    async fn on_run_started(&self, run: &RunStartInfo<'_>) -> ailoop_core::HookAction {
         let fraction = self.time_fraction.clamp(0.0, 1.0);
         self.state.lock().expect("wrap-up state").budget = Some(WrapUpBudget {
             started: Instant::now(),
-            soft_deadline: config.timeout.map(|t| t.mul_f64(fraction)),
-            max_iterations: config.max_iterations,
+            soft_deadline: run.config.timeout.map(|t| t.mul_f64(fraction)),
+            max_iterations: run.config.max_iterations,
         });
         ailoop_core::HookAction::Continue
     }
@@ -320,7 +315,7 @@ impl ChatMiddleware for WrapUpMiddleware {
         }
     }
 
-    async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         {
             let mut state = self.state.lock().expect("wrap-up state");
             if state.triggered.is_none() {
@@ -340,7 +335,7 @@ impl ChatMiddleware for WrapUpMiddleware {
             }
         }
 
-        req.tool_choice = Some(ToolChoice::None_);
+        req.tool_choice = Some(ToolChoice::None);
         let instruction = UserBlock::text(self.instruction.clone());
         match req.messages.last_mut() {
             Some(Message::User { blocks }) => blocks.push(instruction),
@@ -443,7 +438,7 @@ fn budget_label(reason: &AbortReason) -> &'static str {
 /// # use std::sync::Arc;
 /// # async fn build<M>(researcher_model: M, parent_model: M)
 /// # -> Result<(), Box<dyn std::error::Error>>
-/// # where M: ailoop::CompletionModel + Send + Sync + 'static, M::Error: ailoop::ProviderError {
+/// # where M: ailoop::CompletionModel + 'static, M::Error: ailoop::ProviderError {
 /// // 1. Build the child conversation (its own model, history, prompt).
 /// let researcher = ailoop::Conversation::builder(researcher_model)
 ///     .system_prompt("You are a focused research sub-agent.")
@@ -471,7 +466,7 @@ fn budget_label(reason: &AbortReason) -> &'static str {
 /// # use std::time::Duration;
 /// # async fn build<M>(researcher_model: M)
 /// # -> Result<(), Box<dyn std::error::Error>>
-/// # where M: ailoop::CompletionModel + Send + Sync + 'static, M::Error: ailoop::ProviderError {
+/// # where M: ailoop::CompletionModel + 'static, M::Error: ailoop::ProviderError {
 /// let researcher = ailoop::Conversation::builder(researcher_model).build()?;
 /// let tool = ailoop::SubAgentTool::with_config(
 ///     "researcher",
@@ -493,7 +488,7 @@ pub struct SubAgentTool<M: CompletionModel> {
 
 impl<M> SubAgentTool<M>
 where
-    M: CompletionModel + Send + Sync + 'static,
+    M: CompletionModel + 'static,
 {
     /// Wrap `conversation` as a tool exposing `name` /
     /// `description` to the parent's [`CompletionModel`]. Use
@@ -537,11 +532,11 @@ where
 #[async_trait::async_trait]
 impl<M> ToolDyn for SubAgentTool<M>
 where
-    M: CompletionModel + Send + Sync + 'static,
+    M: CompletionModel + 'static,
     M::Error: ProviderError,
 {
-    fn name(&self) -> String {
-        self.name.clone()
+    fn name(&self) -> &str {
+        &self.name
     }
 
     fn tool_definition(&self) -> ToolDefinition {
@@ -698,8 +693,8 @@ mod tests {
     use super::*;
     use ailoop_core::testing::{ScriptedError, ScriptedModel};
     use ailoop_core::{
-        CancellationToken, ChatMiddleware, ChatRequest, HookAction, Message, RunConfig, RunId,
-        Source, StepId, StreamChunk, Usage,
+        CancellationToken, ChatMiddleware, ChatRequest, HookAction, Message, RunId, Source, StepId,
+        StreamChunk, Usage,
     };
     use ailoop_tools::{ToolActivation, UsageSink};
     use std::sync::{Arc, Mutex as StdMutex};
@@ -738,7 +733,7 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl ChatMiddleware for Recorder {
-            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
                 self.captures.lock().unwrap().push(req.messages.clone());
             }
         }
@@ -813,7 +808,7 @@ mod tests {
         struct AbortMw;
         #[async_trait::async_trait]
         impl ChatMiddleware for AbortMw {
-            async fn on_run_started(&self, _: &RunId, _: &[Message], _: &RunConfig) -> HookAction {
+            async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> HookAction {
                 HookAction::Terminate {
                     reason: "policy".into(),
                 }
@@ -921,11 +916,11 @@ mod tests {
                 delta: "found two candidates so far".into(),
             },
             StreamChunk::ToolCallStarted {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "lookup".into(),
             },
             StreamChunk::ToolCallFinished {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "lookup".into(),
                 args: json!({}),
             },
@@ -967,7 +962,7 @@ mod tests {
         struct SlowMw;
         #[async_trait::async_trait]
         impl ChatMiddleware for SlowMw {
-            async fn on_run_started(&self, _: &RunId, _: &[Message], _: &RunConfig) -> HookAction {
+            async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> HookAction {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 HookAction::Continue
             }
@@ -1011,7 +1006,7 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl ChatMiddleware for ReqSpy {
-            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
                 *self.captured.lock().unwrap() = Some(req.max_tokens);
             }
         }
@@ -1051,7 +1046,7 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl ChatMiddleware for ReqSpy {
-            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
                 *self.captured.lock().unwrap() = Some(req.max_tokens);
             }
         }
@@ -1096,15 +1091,10 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl ChatMiddleware for ConfigSpy {
-            async fn on_run_started(
-                &self,
-                _: &RunId,
-                _: &[Message],
-                config: &RunConfig,
-            ) -> HookAction {
-                *self.max_iterations.lock().unwrap() = Some(config.max_iterations);
-                *self.max_tokens.lock().unwrap() = Some(config.max_tokens);
-                *self.timeout.lock().unwrap() = Some(config.timeout);
+            async fn on_run_started(&self, run: &RunStartInfo<'_>) -> HookAction {
+                *self.max_iterations.lock().unwrap() = Some(run.config.max_iterations);
+                *self.max_tokens.lock().unwrap() = Some(run.config.max_tokens);
+                *self.timeout.lock().unwrap() = Some(run.config.timeout);
                 HookAction::Continue
             }
         }
@@ -1169,7 +1159,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ChatMiddleware for MessageRecorder {
-        async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+        async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
             self.captures.lock().unwrap().push(req.messages.clone());
         }
     }
@@ -1445,8 +1435,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolDyn for SlowLookup {
-        fn name(&self) -> String {
-            "lookup".into()
+        fn name(&self) -> &str {
+            "lookup"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(
@@ -1465,11 +1455,11 @@ mod tests {
     fn lookup_turn() -> Vec<StreamChunk> {
         vec![
             StreamChunk::ToolCallStarted {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "lookup".into(),
             },
             StreamChunk::ToolCallFinished {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: "lookup".into(),
                 args: json!({}),
             },
@@ -1536,7 +1526,7 @@ mod tests {
             let requests = requests.lock().unwrap();
             assert_eq!(requests.len(), 2);
             assert_eq!(requests[0].tool_choice, None);
-            assert_eq!(requests[1].tool_choice, Some(ToolChoice::None_));
+            assert_eq!(requests[1].tool_choice, Some(ToolChoice::None));
             assert!(
                 requests[1].tools.as_ref().is_some_and(|t| !t.is_empty()),
                 "tool definitions stay on the wrap-up request"
@@ -1546,7 +1536,7 @@ mod tests {
 
         let conv = tool.conversation.lock().await;
         assert!(
-            !history_mentions(conv.history_messages(), "WRAP UP NOW"),
+            !history_mentions(conv.messages(), "WRAP UP NOW"),
             "the wrap-up instruction is request-only"
         );
     }
@@ -1578,7 +1568,7 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].tool_choice, None);
-        assert_eq!(requests[1].tool_choice, Some(ToolChoice::None_));
+        assert_eq!(requests[1].tool_choice, Some(ToolChoice::None));
         assert_eq!(
             last_user_text(&requests[1]).as_deref(),
             Some(DEFAULT_WRAP_UP_INSTRUCTION)
@@ -1640,7 +1630,7 @@ mod tests {
 
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2, "the wrap-up request was sent");
-        assert_eq!(requests[1].tool_choice, Some(ToolChoice::None_));
+        assert_eq!(requests[1].tool_choice, Some(ToolChoice::None));
     }
 
     fn tokens(input: u32, output: u32) -> Usage {
@@ -1664,11 +1654,11 @@ mod tests {
     fn call_turn_with(tool: &str, args: Value, usage: Usage) -> Vec<StreamChunk> {
         vec![
             StreamChunk::ToolCallStarted {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: tool.into(),
             },
             StreamChunk::ToolCallFinished {
-                id: "toolu_1".into(),
+                call_id: "toolu_1".into(),
                 name: tool.into(),
                 args,
             },

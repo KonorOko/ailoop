@@ -40,7 +40,7 @@ impl PromptSection {
     }
 
     /// Build a named section. Renders as `## {name}\n\n{content}\n\n`.
-    pub fn with_name(name: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn named(name: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             name: Some(name.into()),
             content: content.into(),
@@ -49,7 +49,7 @@ impl PromptSection {
 
     /// Load a section's content from `path` (sync `std::fs::read_to_string`).
     /// The resulting section is unnamed; chain with
-    /// [`Self::with_name`] manually if a header is wanted.
+    /// [`Self::named`] manually if a header is wanted.
     ///
     /// Sync I/O is intentional: prompts are typically loaded once at
     /// startup. Failures surface as [`PromptError::LoadFile`] carrying
@@ -107,8 +107,8 @@ impl Prompt {
         Prompt { sections: vec![] }
     }
 
-    /// Borrow the section vector in render order.
-    pub fn sections(&self) -> &Vec<PromptSection> {
+    /// The sections in render order.
+    pub fn sections(&self) -> &[PromptSection] {
         &self.sections
     }
 
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn render_named_section_emits_h2_header() {
         let prompt = Prompt::builder()
-            .section(PromptSection::with_name("Tone", "Be concise."))
+            .section(PromptSection::named("Tone", "Be concise."))
             .build();
 
         assert_eq!(prompt.render(), "## Tone\n\nBe concise.\n\n");
@@ -254,7 +254,7 @@ mod tests {
     fn render_mixes_named_and_unnamed_sections() {
         let prompt = Prompt::builder()
             .section(PromptSection::new("preamble"))
-            .section(PromptSection::with_name("Tone", "Be concise."))
+            .section(PromptSection::named("Tone", "Be concise."))
             .build();
 
         assert_eq!(prompt.render(), "preamble\n\n## Tone\n\nBe concise.\n\n");
@@ -273,7 +273,7 @@ mod tests {
         }
 
         let prompt = Prompt::builder()
-            .section(PromptSection::with_name("Tone", "Be concise."))
+            .section(PromptSection::named("Tone", "Be concise."))
             .section(PromptSection::new("preamble line"))
             .build();
 
@@ -281,14 +281,14 @@ mod tests {
         // Words: ##, Tone, Be, concise., preamble, line = 6
         assert_eq!(prompt.token_count(&WordTokenizer), 6);
         // PromptSection::token_count must NOT include the header.
-        let sec = PromptSection::with_name("Header", "body of section");
+        let sec = PromptSection::named("Header", "body of section");
         assert_eq!(sec.token_count(&WordTokenizer), 3);
     }
 
     #[test]
     fn display_matches_render() {
         let prompt = Prompt::builder()
-            .section(PromptSection::with_name("Tone", "Be concise."))
+            .section(PromptSection::named("Tone", "Be concise."))
             .section(PromptSection::new("trailing"))
             .build();
 

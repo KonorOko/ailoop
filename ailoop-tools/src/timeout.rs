@@ -48,7 +48,7 @@ impl<T: ToolDyn> TimeoutTool<T> {
 
 #[async_trait]
 impl<T: ToolDyn> ToolDyn for TimeoutTool<T> {
-    fn name(&self) -> String {
+    fn name(&self) -> &str {
         self.inner.name()
     }
 
@@ -78,8 +78,8 @@ mod tests {
 
     #[async_trait]
     impl ToolDyn for InstantTool {
-        fn name(&self) -> String {
-            "instant".into()
+        fn name(&self) -> &str {
+            "instant"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(
@@ -98,8 +98,8 @@ mod tests {
 
     #[async_trait]
     impl ToolDyn for SlowTool {
-        fn name(&self) -> String {
-            "slow".into()
+        fn name(&self) -> &str {
+            "slow"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(

@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use ailoop_core::{
-    ChatMiddleware, ChatRequest, FinishReason, Message, ReasoningEffort, RunId, StepId,
-    SystemBlock, SystemPrompt, ToolCallInfo, ToolChoice, ToolDecision, ToolTag, Usage,
+    ChatMiddleware, ChatRequest, Message, ReasoningEffort, RunErrorInfo, RunFinishedInfo, RunId,
+    StepId, StepInfo, SystemBlock, SystemPrompt, ToolCallInfo, ToolChoice, ToolDecision, ToolTag,
 };
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -31,7 +31,7 @@ pub(crate) struct SystemPromptMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for SystemPromptMiddleware {
-    async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         let mut prompt = self.base.clone();
 
         if let Some(tools) = &req.tools {
@@ -101,7 +101,7 @@ pub(crate) struct RequestDefaults {
     pub(crate) top_k: Option<u32>,
     pub(crate) stop_sequences: Vec<String>,
     pub(crate) tool_choice: Option<ToolChoice>,
-    pub(crate) disable_parallel_tool_use: Option<bool>,
+    pub(crate) parallel_tool_use: Option<bool>,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
     pub(crate) additional_params: Option<Value>,
     pub(crate) overlay: Option<RequestOverlay>,
@@ -114,7 +114,7 @@ impl RequestDefaults {
             || self.top_k.is_some()
             || !self.stop_sequences.is_empty()
             || self.tool_choice.is_some()
-            || self.disable_parallel_tool_use.is_some()
+            || self.parallel_tool_use.is_some()
             || self.reasoning_effort.is_some()
             || self.additional_params.is_some()
             || self.overlay.is_some()
@@ -132,7 +132,7 @@ pub(crate) struct RequestDefaultsMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for RequestDefaultsMiddleware {
-    async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         if req.temperature.is_none() {
             req.temperature = self.defaults.temperature;
         }
@@ -148,8 +148,8 @@ impl ChatMiddleware for RequestDefaultsMiddleware {
         if req.tool_choice.is_none() {
             req.tool_choice = self.defaults.tool_choice.clone();
         }
-        if req.disable_parallel_tool_use.is_none() {
-            req.disable_parallel_tool_use = self.defaults.disable_parallel_tool_use;
+        if req.parallel_tool_use.is_none() {
+            req.parallel_tool_use = self.defaults.parallel_tool_use;
         }
         if req.reasoning_effort.is_none() {
             req.reasoning_effort = self.defaults.reasoning_effort;
@@ -167,7 +167,7 @@ impl ChatMiddleware for RequestDefaultsMiddleware {
 ///
 /// Built by [`ApprovalMiddleware`] right before the engine runs the
 /// tool. Fields are public so a callback can read or move them out
-/// directly (`req.tool_name`, `req.args`); the type is
+/// directly (`req.name`, `req.args`); the type is
 /// `#[non_exhaustive]` so new context can be added without breaking
 /// callbacks. Use [`new`](Self::new) plus the `with_*` setters to build
 /// one outside the crate, e.g. to unit-test a verifier.
@@ -179,8 +179,8 @@ impl ChatMiddleware for RequestDefaultsMiddleware {
 /// verifier fits here. Recommended shape:
 ///
 /// 1. **Tags decide what gets reviewed.** Gate only what needs it with
-///    [`with_approval_for_tags`](crate::ConversationBuilder::with_approval_for_tags)
-///    (or the default [`with_approval`](crate::ConversationBuilder::with_approval)
+///    [`approval_for_tags`](crate::ConversationBuilder::approval_for_tags)
+///    (or the default [`approval`](crate::ConversationBuilder::approval)
 ///    for `Destructive` / `WritesFiles`); everything else runs without
 ///    paying for a verifier call.
 /// 2. **The verifier judges the call against the user's intent** and
@@ -243,7 +243,7 @@ impl ChatMiddleware for RequestDefaultsMiddleware {
 /// }
 ///
 /// # fn wire(builder: ailoop::ConversationBuilder<impl ailoop::CompletionModel>) {
-/// let builder = builder.with_approval(gate);
+/// let builder = builder.approval(gate);
 /// # let _ = builder;
 /// # }
 /// ```
@@ -255,50 +255,43 @@ pub struct ApprovalRequest {
     /// Step (model turn) that produced the call.
     pub step_id: StepId,
     /// Provider-assigned id of the call, the same as `call_id` on
-    /// [`ToolCallInfo`] and on the `ToolResult` chunk. Empty unless set
-    /// with [`with_call_id`](Self::with_call_id);
-    /// [`ApprovalMiddleware`] always fills it.
+    /// [`ToolCallInfo`] and on the `ToolResult` chunk.
     pub call_id: String,
     /// Wire name of the tool.
-    pub tool_name: String,
+    pub name: String,
     /// Arguments the tool will run with, after every earlier
     /// middleware's `on_before_tool_call_mut`.
     pub args: Value,
     /// Tags the tool declares. Filled when the gate was installed with
-    /// a `ConversationBuilder::with_approval*` method; empty for
+    /// a `ConversationBuilder::approval*` method; empty for
     /// [`ApprovalMiddleware::approve_all`] and
-    /// [`ApprovalMiddleware::for_named`], which do not see the
+    /// [`ApprovalMiddleware::approve_named`], which do not see the
     /// registry.
     pub tags: Arc<[ToolTag]>,
     /// Context sent to the model on the step that produced this call,
     /// as left by every middleware's `on_chat_request` (it can be
     /// compacted or rewritten relative to the stored history). The call
-    /// being approved is not in it — see `tool_name` / `args`. Shared,
+    /// being approved is not in it — see `name` / `args`. Shared,
     /// not copied, between the gated calls of a step.
     pub messages: Arc<[Message]>,
 }
 
 impl ApprovalRequest {
-    /// A request with empty `call_id`, `tags` and `messages`; set them
-    /// with [`with_call_id`](Self::with_call_id),
+    /// A request for the call `call` with arguments `args`. The run,
+    /// step, call id and tool name come from `call`; `tags` and
+    /// `messages` start empty, set them with
     /// [`with_tags`](Self::with_tags) and
     /// [`with_messages`](Self::with_messages).
-    pub fn new(run_id: RunId, step_id: StepId, tool_name: impl Into<String>, args: Value) -> Self {
+    pub fn new(call: ToolCallInfo, args: Value) -> Self {
         Self {
-            run_id,
-            step_id,
-            call_id: String::new(),
-            tool_name: tool_name.into(),
+            run_id: call.run_id,
+            step_id: call.step_id,
+            call_id: call.call_id,
+            name: call.name,
             args,
             tags: Arc::from([]),
             messages: Arc::from([]),
         }
-    }
-
-    /// Replace `call_id`.
-    pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
-        self.call_id = call_id.into();
-        self
     }
 
     /// Replace `tags`.
@@ -327,9 +320,9 @@ enum GatePolicy {
 /// engine.
 ///
 /// Construct via [`approve_all`](Self::approve_all) for an unconditional
-/// gate, or via [`for_named`](Self::for_named) for an explicit set of
+/// gate, or via [`approve_named`](Self::approve_named) for an explicit set of
 /// tool names. For tag-based gating, use the builder method
-/// `ConversationBuilder::with_approval`.
+/// `ConversationBuilder::approval`.
 ///
 /// The callback receives an [`ApprovalRequest`] with the call and the
 /// context the model saw on that step; see its docs for the
@@ -362,7 +355,7 @@ impl ApprovalMiddleware {
     /// Matching is by exact wire name at call time, independent of
     /// whether the tool is currently active — so listing a deferred
     /// tool here gates it once a handler activates it mid-run.
-    pub fn for_named<I, S, F, Fut>(names: I, callback: F) -> Self
+    pub fn approve_named<I, S, F, Fut>(names: I, callback: F) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -433,12 +426,12 @@ where
 
 #[async_trait::async_trait]
 impl ChatMiddleware for ApprovalMiddleware {
-    async fn on_chat_request(&self, run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, step: &StepInfo, req: &mut ChatRequest) {
         // One copy per step, shared by every gated call of the step.
         // Overwrites the previous step (and a same-step retry after
         // context-overflow recovery).
         let messages: Arc<[Message]> = Arc::from(req.messages.as_slice());
-        self.contexts().insert(run_id.clone(), messages);
+        self.contexts().insert(step.run_id.clone(), messages);
     }
 
     async fn on_before_tool_call(&self, call: &ToolCallInfo, args: &Value) -> ToolDecision {
@@ -455,36 +448,18 @@ impl ChatMiddleware for ApprovalMiddleware {
             .get(&call.name)
             .cloned()
             .unwrap_or_else(|| Arc::from([]));
-        let req = ApprovalRequest::new(
-            call.run_id.clone(),
-            call.step_id.clone(),
-            &call.name,
-            args.clone(),
-        )
-        .with_call_id(&call.call_id)
-        .with_tags(tags)
-        .with_messages(messages);
+        let req = ApprovalRequest::new(call.clone(), args.clone())
+            .with_tags(tags)
+            .with_messages(messages);
         (self.callback)(req).await
     }
 
-    async fn on_run_finished(
-        &self,
-        run_id: &RunId,
-        _reason: &FinishReason,
-        _usage: &Usage,
-        _new_messages: &[Message],
-    ) {
-        self.contexts().remove(run_id);
+    async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
+        self.contexts().remove(run.run_id);
     }
 
-    async fn on_run_error(
-        &self,
-        run_id: &RunId,
-        _err: &(dyn std::error::Error + Send + Sync),
-        _usage: &Usage,
-        _partial_messages: &[Message],
-    ) {
-        self.contexts().remove(run_id);
+    async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
+        self.contexts().remove(run.run_id);
     }
 
     fn on_run_dropped(&self, run_id: &RunId) {
@@ -495,6 +470,7 @@ impl ChatMiddleware for ApprovalMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ailoop_core::{FinishReason, Usage};
 
     fn gate() -> ApprovalMiddleware {
         ApprovalMiddleware::approve_all(|_req| async { ToolDecision::Continue })
@@ -502,7 +478,20 @@ mod tests {
 
     async fn record_step(mw: &ApprovalMiddleware, run_id: &RunId) {
         let mut req = ChatRequest::new(vec![Message::user("hi")], 1024);
-        mw.on_chat_request(run_id, &StepId::new(), &mut req).await;
+        mw.on_chat_request(&StepInfo::new(run_id.clone(), StepId::new()), &mut req)
+            .await;
+    }
+
+    #[test]
+    fn approval_request_new_takes_identity_from_call() {
+        let call = ToolCallInfo::new(RunId::new(), StepId::new(), "toolu_1", "rm");
+        let req = ApprovalRequest::new(call.clone(), serde_json::json!({"path": "/tmp"}));
+        assert_eq!(req.run_id, call.run_id);
+        assert_eq!(req.step_id, call.step_id);
+        assert_eq!(req.call_id, "toolu_1");
+        assert_eq!(req.name, "rm");
+        assert!(req.tags.is_empty());
+        assert!(req.messages.is_empty());
     }
 
     #[tokio::test]
@@ -512,8 +501,13 @@ mod tests {
         record_step(&mw, &run_id).await;
         assert_eq!(mw.tracked_runs(), 1);
 
-        mw.on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
-            .await;
+        mw.on_run_finished(&RunFinishedInfo::new(
+            &run_id,
+            &FinishReason::EndTurn,
+            &Usage::default(),
+            &[],
+        ))
+        .await;
         assert_eq!(mw.tracked_runs(), 0);
     }
 
@@ -527,7 +521,8 @@ mod tests {
         assert_eq!(mw.tracked_runs(), 2);
 
         let err = std::io::Error::other("boom");
-        mw.on_run_error(&run_id, &err, &Usage::default(), &[]).await;
+        mw.on_run_error(&RunErrorInfo::new(&run_id, &err, &Usage::default(), &[]))
+            .await;
         assert_eq!(mw.tracked_runs(), 1, "only the failed run is dropped");
     }
 }

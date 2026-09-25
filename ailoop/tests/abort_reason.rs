@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use ailoop::{
     AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
-    Conversation, FinishReason, HookAction, Message, RunConfig, RunId, RunOptions, StreamChunk,
-    ToolCallInfo, ToolDecision, ToolDefinition, ToolResultContent, Usage, UserBlock,
+    Conversation, FinishReason, HookAction, Message, RunErrorInfo, RunFinishedInfo, RunOptions,
+    RunStartInfo, StreamChunk, ToolCallInfo, ToolDecision, ToolDefinition, ToolResultContent,
+    Usage, UserBlock,
 };
 use ailoop_core::testing::{ScriptedError, ScriptedModel};
 use ailoop_tools::{ToolContext, ToolDyn};
@@ -45,8 +46,8 @@ struct GetWeather;
 
 #[async_trait]
 impl ToolDyn for GetWeather {
-    fn name(&self) -> String {
-        "get_weather".into()
+    fn name(&self) -> &str {
+        "get_weather"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -64,11 +65,11 @@ impl ToolDyn for GetWeather {
 fn tool_turn(id: &str) -> Vec<StreamChunk> {
     vec![
         StreamChunk::ToolCallStarted {
-            id: id.into(),
+            call_id: id.into(),
             name: "get_weather".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: id.into(),
+            call_id: id.into(),
             name: "get_weather".into(),
             args: json!({}),
         },
@@ -124,12 +125,7 @@ async fn hook_terminate_produces_terminated() {
 
     #[async_trait]
     impl ChatMiddleware for Deny {
-        async fn on_run_started(
-            &self,
-            _run_id: &RunId,
-            _messages: &[Message],
-            _config: &RunConfig,
-        ) -> HookAction {
+        async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> HookAction {
             HookAction::Terminate {
                 reason: "quota exhausted".into(),
             }
@@ -145,7 +141,7 @@ async fn hook_terminate_produces_terminated() {
     let outcome = chat.run("hi").await.expect("aborts are Ok");
 
     match outcome.finish_reason {
-        FinishReason::Aborted(ref r @ AbortReason::Terminated { ref reason }) => {
+        FinishReason::Aborted(ref r @ AbortReason::Terminated { ref reason, .. }) => {
             assert_eq!(reason, "quota exhausted");
             assert_eq!(r.to_string(), "quota exhausted");
         }
@@ -180,6 +176,7 @@ async fn tool_terminate_produces_tool_terminated_with_tool_name() {
             ref r @ AbortReason::ToolTerminated {
                 ref tool_name,
                 ref reason,
+                ..
             },
         ) => {
             assert_eq!(tool_name, "get_weather");
@@ -198,23 +195,11 @@ struct LifecycleCounter {
 
 #[async_trait]
 impl ChatMiddleware for LifecycleCounter {
-    async fn on_run_finished(
-        &self,
-        _run_id: &RunId,
-        _reason: &FinishReason,
-        _usage: &Usage,
-        _new_messages: &[Message],
-    ) {
+    async fn on_run_finished(&self, _run: &RunFinishedInfo<'_>) {
         self.finished.fetch_add(1, Ordering::SeqCst);
     }
 
-    async fn on_run_error(
-        &self,
-        _run_id: &RunId,
-        _err: &(dyn std::error::Error + Send + Sync),
-        _usage: &Usage,
-        _: &[Message],
-    ) {
+    async fn on_run_error(&self, _run: &RunErrorInfo<'_>) {
         self.errored.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -267,7 +252,7 @@ async fn max_iterations_produces_max_iterations_and_keeps_partial_work() {
 
     // Kickoff + the run's new messages land in history.
     assert_eq!(
-        chat.history_messages().len(),
+        chat.messages().len(),
         1 + outcome.new_messages.len(),
         "partial work must be persisted to history"
     );

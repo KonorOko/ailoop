@@ -24,11 +24,11 @@ async fn delete_file(_path: String) -> i32 {
 fn tool_turn(id: &str, args: Value) -> Vec<StreamChunk> {
     vec![
         StreamChunk::ToolCallStarted {
-            id: id.into(),
+            call_id: id.into(),
             name: "delete_file".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: id.into(),
+            call_id: id.into(),
             name: "delete_file".into(),
             args,
         },
@@ -65,7 +65,7 @@ async fn approval_request_carries_call_tags_and_user_message() {
 
     let mut chat = Conversation::builder(delete_then_finish("build/"))
         .tool(DeleteFile)
-        .with_approval(move |req| {
+        .approval(move |req| {
             seen_cb.lock().unwrap().push(req);
             async { ToolDecision::Continue }
         })
@@ -77,7 +77,7 @@ async fn approval_request_carries_call_tags_and_user_message() {
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 1, "one gated call");
     let req = &seen[0];
-    assert_eq!(req.tool_name, "delete_file");
+    assert_eq!(req.name, "delete_file");
     assert_eq!(req.args, json!({ "path": "build/" }));
     assert_eq!(&*req.tags, &[ToolTag::Destructive, ToolTag::WritesFiles]);
     assert_eq!(req.run_id, outcome.run_id);
@@ -146,10 +146,13 @@ async fn run_to_finish(
 async fn concurrent_runs_sharing_a_gate_do_not_mix_context() {
     let seen: Arc<Mutex<Vec<ApprovalRequest>>> = Arc::default();
     let seen_cb = seen.clone();
-    let gate = Arc::new(ApprovalMiddleware::for_named(["delete_file"], move |req| {
-        seen_cb.lock().unwrap().push(req);
-        async { ToolDecision::Continue }
-    }));
+    let gate = Arc::new(ApprovalMiddleware::approve_named(
+        ["delete_file"],
+        move |req| {
+            seen_cb.lock().unwrap().push(req);
+            async { ToolDecision::Continue }
+        },
+    ));
 
     let barrier = Arc::new(Barrier::new(2));
     let model_a = BarrierModel {
@@ -188,6 +191,6 @@ async fn concurrent_runs_sharing_a_gate_do_not_mix_context() {
             req.run_id,
             req.messages
         );
-        assert!(req.tags.is_empty(), "for_named does not know tool tags");
+        assert!(req.tags.is_empty(), "approve_named does not know tool tags");
     }
 }

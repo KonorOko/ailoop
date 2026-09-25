@@ -187,7 +187,7 @@ pub struct SummarizeStrategy<M> {
 
 impl<M> SummarizeStrategy<M>
 where
-    M: CompletionModel + Send + Sync + 'static,
+    M: CompletionModel + 'static,
 {
     /// Build a strategy that calls `model` to summarize dropped
     /// history. Defaults: [`DEFAULT_SUMMARIZER_PROMPT`] as the system
@@ -217,7 +217,7 @@ where
     }
 
     async fn summarize(&self, messages: Vec<Message>) -> Result<String, CompactionError> {
-        // Leave `tool_choice` unset rather than `None_`: some providers
+        // Leave `tool_choice` unset rather than `ToolChoice::None`: some providers
         // reject `tool_choice: none` when the request also has no
         // `tools` array, and "no tools" already implies "no tool calls".
         let mut req = ChatRequest::new(messages, self.max_tokens);
@@ -250,7 +250,7 @@ where
 #[async_trait]
 impl<M> CompactionStrategy for SummarizeStrategy<M>
 where
-    M: CompletionModel + Send + Sync + 'static,
+    M: CompletionModel + 'static,
 {
     fn name(&self) -> &'static str {
         "summarize"
@@ -363,9 +363,12 @@ fn flatten_for_summary(msg: &Message) -> Message {
                 .iter()
                 .map(|b| match b {
                     AssistantBlock::Text { text, .. } => AssistantBlock::text(text.clone()),
-                    AssistantBlock::ToolCall { id, name, args, .. } => {
-                        AssistantBlock::text(format!("[tool_call:{id} {name}] {args}"))
-                    }
+                    AssistantBlock::ToolCall {
+                        call_id: id,
+                        name,
+                        args,
+                        ..
+                    } => AssistantBlock::text(format!("[tool_call:{id} {name}] {args}")),
                     AssistantBlock::Reasoning { text, .. } => AssistantBlock::text(text.clone()),
                     AssistantBlock::RedactedReasoning { .. } => {
                         AssistantBlock::text("[redacted reasoning]".to_string())

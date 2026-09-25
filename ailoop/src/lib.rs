@@ -8,7 +8,7 @@
 //!
 //! ```no_run
 //! # async fn run<M>(model: M) -> Result<(), Box<dyn std::error::Error>>
-//! # where M: ailoop::CompletionModel + Send + Sync, M::Error: ailoop::ProviderError {
+//! # where M: ailoop::CompletionModel, M::Error: ailoop::ProviderError {
 //! let mut chat = ailoop::Conversation::builder(model)
 //!     .system_prompt("You are a helpful assistant.")
 //!     .build()?;
@@ -30,8 +30,8 @@
 //! - [`ConversationBuilder`] — builder pattern. Register tools with
 //!   [`tool`](ConversationBuilder::tool) /
 //!   [`tool_dyn`](ConversationBuilder::tool_dyn), gate them with
-//!   [`with_capabilities`](ConversationBuilder::with_capabilities) /
-//!   [`with_approval`](ConversationBuilder::with_approval), and layer
+//!   [`capabilities`](ConversationBuilder::capabilities) /
+//!   [`approval`](ConversationBuilder::approval), and layer
 //!   per-request defaults with [`temperature`](ConversationBuilder::temperature),
 //!   [`max_tokens`](ConversationBuilder::max_tokens), and friends.
 //! - [`RunOutcome`] — what [`Conversation::run`] returns. Aborts surface
@@ -66,9 +66,10 @@ pub use ailoop_core::{
     AbortReason, AssistantBlock, CacheControl, CancellationToken, CharTokenizer, ChatMiddleware,
     ChatRequest, CompletionClient, CompletionModel, ContinueDecision, FinishReason, HookAction,
     Message, ProviderError, ReasoningEffort, RetryClassification, RetryConfig, Retryable,
-    RetryingModel, RunConfig, RunId, Source, StepId, StreamChunk, SystemBlock, SystemPrompt,
-    Tokenizer, ToolCallInfo, ToolChoice, ToolDecision, ToolDefinition, ToolResultBlock,
-    ToolResultContent, ToolTag, Usage, UserBlock,
+    RetryingModel, RunConfig, RunErrorInfo, RunFinishedInfo, RunId, RunStartInfo, Source, StepId,
+    StepInfo, StreamChunk, SystemBlock, SystemPrompt, Tokenizer, ToolCallInfo, ToolChoice,
+    ToolDecision, ToolDefinition, ToolResultBlock, ToolResultContent, ToolTag, TurnEndInfo, Usage,
+    UserBlock,
 };
 pub use ailoop_derive::{ToolJsonType, ailoop_tool};
 pub use ailoop_history::{
@@ -83,14 +84,14 @@ pub use ailoop_prompts::{Prompt, PromptBuilder, PromptSection};
 // into scope by `use ailoop::*;` without conflict.
 pub use ailoop_tools::{
     TimeoutTool, Tool, ToolActivation, ToolActivationError, ToolContext, ToolDyn, ToolJsonType,
-    ToolRegistry, UsageSink, errors::ToolRegistryError,
+    ToolRegistry, ToolRegistryError, UsageSink,
 };
 pub use anti_loop::{AntiLoop, TextPredicate};
 pub use conversation::{
     Conversation, ConversationBuilder, DEFAULT_HISTORY_MAX_TOKENS, RunOptions, RunOutcome,
     RunStream,
 };
-pub use errors::{BuildError, EngineError, RunError};
+pub use errors::{BuildError, EngineError, RunError, RunErrorParts};
 pub use max_tool_calls::MaxToolCalls;
 
 /// Lower-level entry points outside the [`Conversation`] happy path.

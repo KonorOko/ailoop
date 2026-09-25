@@ -17,8 +17,8 @@ struct GetWeather;
 
 #[async_trait::async_trait]
 impl ToolDyn for GetWeather {
-    fn name(&self) -> String {
-        "get_weather".into()
+    fn name(&self) -> &str {
+        "get_weather"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -43,11 +43,11 @@ fn tool_turn(id: &str, args: Value, text: Option<&str>) -> Vec<StreamChunk> {
         chunks.push(StreamChunk::TextDelta { delta: t.into() });
     }
     chunks.push(StreamChunk::ToolCallStarted {
-        id: id.into(),
+        call_id: id.into(),
         name: "get_weather".into(),
     });
     chunks.push(StreamChunk::ToolCallFinished {
-        id: id.into(),
+        call_id: id.into(),
         name: "get_weather".into(),
         args,
     });
@@ -93,6 +93,7 @@ async fn tool_call_loop_aborts_on_third_identical_call() {
         FinishReason::Aborted(AbortReason::ToolTerminated {
             tool_name,
             reason: r,
+            ..
         }) => {
             assert_eq!(tool_name, "get_weather");
             assert!(

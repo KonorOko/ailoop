@@ -25,7 +25,7 @@ use crate::{
 };
 
 /// Default token budget the internal [`History`] is configured
-/// with when [`ConversationBuilder::with_history`] is **not** called.
+/// with when [`ConversationBuilder::history`] is **not** called.
 ///
 /// Sized for a typical 200K-context Claude model with a real tokenizer
 /// wired in (leaves ample headroom for tool definitions, system prompt
@@ -40,7 +40,7 @@ use crate::{
 /// [`HistoryBuilder::reserved_tokens`].
 ///
 /// Override via
-/// [`ConversationBuilder::with_history`](ConversationBuilder::with_history)
+/// [`ConversationBuilder::history`](ConversationBuilder::history)
 /// when your model has a smaller window, when you want compaction to
 /// fire earlier, or when you wire a non-default tokenizer / strategy.
 pub const DEFAULT_HISTORY_MAX_TOKENS: usize = 100_000;
@@ -236,7 +236,7 @@ impl RunOptions {
 
 impl<M> Conversation<M>
 where
-    M: CompletionModel + Send + Sync,
+    M: CompletionModel,
     M::Error: ProviderError,
 {
     /// Start a [`ConversationBuilder`] for `model`. Equivalent to
@@ -251,7 +251,7 @@ where
     /// in tests and for callers who want to inspect or persist the
     /// conversation state outside of [`Conversation::run`] /
     /// [`Conversation::stream`].
-    pub fn history_messages(&self) -> &[Message] {
+    pub fn messages(&self) -> &[Message] {
         self.history.messages()
     }
 
@@ -260,12 +260,12 @@ where
     /// need to overflow the compaction budget before issuing a real
     /// turn). Compaction is **not** triggered here — that happens on
     /// the next [`Conversation::run`] / [`Conversation::stream`] call.
-    pub fn history_push(&mut self, message: Message) {
+    pub fn push_message(&mut self, message: Message) {
         self.history.add_message(message);
     }
 
     /// Append several messages to history without going through a run,
-    /// in order. Same contract as [`Self::history_push`]: compaction
+    /// in order. Same contract as [`Self::push_message`]: compaction
     /// waits for the next run.
     ///
     /// The main use is keeping the steps a failed run completed: a run
@@ -276,13 +276,13 @@ where
     ///
     /// ```no_run
     /// # async fn demo<M>(chat: &mut ailoop::Conversation<M>)
-    /// # where M: ailoop::CompletionModel + Send + Sync, M::Error: ailoop::ProviderError {
+    /// # where M: ailoop::CompletionModel, M::Error: ailoop::ProviderError {
     /// if let Err(err) = chat.run("migrate the database").await {
-    ///     chat.history_extend(err.partial_messages().iter().cloned());
+    ///     chat.extend_messages(err.partial_messages().iter().cloned());
     /// }
     /// # }
     /// ```
-    pub fn history_extend(&mut self, messages: impl IntoIterator<Item = Message>) {
+    pub fn extend_messages(&mut self, messages: impl IntoIterator<Item = Message>) {
         for message in messages {
             self.history.add_message(message);
         }
@@ -304,7 +304,7 @@ where
     /// Names of every tool currently active for this conversation.
     ///
     /// Useful for asserting in tests and for surfacing the effective tool
-    /// set after `with_capabilities` filtering.
+    /// set after `capabilities` filtering.
     pub fn active_tool_names(&self) -> Vec<String> {
         self.tools
             .active_tools()
@@ -375,6 +375,7 @@ where
                 reason,
                 usage,
                 new_messages,
+                ..
             } = chunk?
             {
                 finished = Some((run_id, reason, usage, new_messages));
@@ -438,7 +439,7 @@ where
     ///
     /// History is extended with the run's `new_messages` exactly once,
     /// keyed off the terminal `RunFinished` chunk — pair this with
-    /// [`Conversation::history_messages`] only after the stream has
+    /// [`Conversation::messages`] only after the stream has
     /// fully drained.
     ///
     /// If [`History::compact_if_needed`] fires before the
@@ -456,7 +457,7 @@ where
     /// pre-run compaction, if any, ran). On `Err`, the steps the run
     /// completed before failing travel in
     /// [`RunError::partial_messages`]; append them with
-    /// [`Self::history_extend`] to keep them.
+    /// [`Self::extend_messages`] to keep them.
     pub async fn stream(
         &mut self,
         input: impl Into<Message>,
@@ -521,12 +522,8 @@ where
 
         let prelude: BoxStream<'_, Result<StreamChunk, RunError<M::Error>>> = match report {
             Some(r) => {
-                let mut chunk = StreamChunk::HistoryCompacted {
-                    run_id,
-                    before_count: r.before,
-                    after_count: r.after,
-                    strategy: r.strategy,
-                };
+                let mut chunk =
+                    StreamChunk::history_compacted(run_id, r.before, r.after, r.strategy);
                 let middlewares = self.middlewares.clone();
                 Box::pin(futures::stream::once(async move {
                     for mw in &middlewares {
@@ -562,10 +559,10 @@ struct ApprovalSpec {
 ///
 /// Tools register via [`tool`](Self::tool) (compile-time-known type)
 /// or [`tool_dyn`](Self::tool_dyn) (runtime-discovered). Gating
-/// happens via [`with_capabilities`](Self::with_capabilities) (tag
-/// allow-list) and [`with_approval`](Self::with_approval) /
-/// [`with_approval_for_tags`](Self::with_approval_for_tags) /
-/// [`with_approval_for_all`](Self::with_approval_for_all)
+/// happens via [`capabilities`](Self::capabilities) (tag
+/// allow-list) and [`approval`](Self::approval) /
+/// [`approval_for_tags`](Self::approval_for_tags) /
+/// [`approval_for_all`](Self::approval_for_all)
 /// (per-call human-in-the-loop). Per-request controls (
 /// [`temperature`](Self::temperature), [`max_tokens`](Self::max_tokens),
 /// etc.) are applied as floors — see [`build`](Self::build) for the
@@ -630,7 +627,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// are enforced when the snapshot is constructed or deserialized,
     /// so this constructor is infallible.
     ///
-    /// Compose with [`with_history`](Self::with_history) if you want
+    /// Compose with [`history`](Self::history) if you want
     /// the resumed conversation to use a different budget, reserve,
     /// tokenizer or strategy than the default — the seeded messages and pin mask
     /// are preserved regardless of call order.
@@ -698,7 +695,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         T: ToolDyn + 'static,
     {
         let arc_tool = Arc::new(tool);
-        let name = arc_tool.name();
+        let name = arc_tool.name().to_string();
 
         match PromptSection::from_file(prompt_path) {
             Ok(section) => {
@@ -792,7 +789,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     ///
     /// ```ignore
     /// Conversation::builder(model)
-    ///     .with_history(
+    ///     .history(
     ///         History::builder(200_000)
     ///             .reserved_tokens(20_000)
     ///             .tokenizer(Box::new(my_tokenizer)),
@@ -805,7 +802,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// call order, only the budget / reserve / tokenizer / strategy /
     /// `preserve_n_last` come from this builder. Successive calls
     /// overwrite each other.
-    pub fn with_history(mut self, history: HistoryBuilder) -> Self {
+    pub fn history(mut self, history: HistoryBuilder) -> Self {
         self.history = history;
         self
     }
@@ -881,7 +878,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// If you call this with an empty slice the result is *no* tools.
     ///
     /// Successive calls overwrite the previous filter.
-    pub fn with_capabilities(mut self, capabilities: &[ToolTag]) -> Self {
+    pub fn capabilities(mut self, capabilities: &[ToolTag]) -> Self {
         self.capabilities = Some(capabilities.to_vec());
         self
     }
@@ -900,7 +897,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// like `search_tools` initially, and let the model expand the
     /// active set on demand.
     ///
-    /// Applied at `build()` time *after* [`with_capabilities`](Self::with_capabilities),
+    /// Applied at `build()` time *after* [`capabilities`](Self::capabilities),
     /// so `initial_active_tools` operates on the capability-filtered
     /// set — names not in the filtered catalog are silently ignored.
     /// Successive calls overwrite the previous list.
@@ -927,27 +924,27 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// start deferred (via [`initial_active_tools`](Self::initial_active_tools))
     /// are still gated if a handler activates them mid-run with
     /// [`ToolContext::tools`](ailoop_tools::ToolContext::tools). Tools
-    /// removed by [`with_capabilities`](Self::with_capabilities) can
+    /// removed by [`capabilities`](Self::capabilities) can
     /// never run, so they never reach it. Untagged tools never trigger
     /// the callback.
     ///
     /// [`ToolDecision`]: ailoop_core::ToolDecision
-    pub fn with_approval<F, Fut>(self, callback: F) -> Self
+    pub fn approval<F, Fut>(self, callback: F) -> Self
     where
         F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ailoop_core::ToolDecision> + Send + 'static,
     {
-        self.with_approval_for_tags(&[ToolTag::Destructive, ToolTag::WritesFiles], callback)
+        self.approval_for_tags(&[ToolTag::Destructive, ToolTag::WritesFiles], callback)
     }
 
-    /// Same as [`with_approval`](Self::with_approval) but with a custom
+    /// Same as [`approval`](Self::approval) but with a custom
     /// tag set. The callback fires for tool calls whose declared tags
     /// overlap with `tags`. Pass an empty slice to disable the gate.
     ///
-    /// As with [`with_approval`](Self::with_approval), the gated set is
+    /// As with [`approval`](Self::approval), the gated set is
     /// resolved over every registered tool, so deferred tools activated
     /// at runtime are covered too.
-    pub fn with_approval_for_tags<F, Fut>(mut self, tags: &[ToolTag], callback: F) -> Self
+    pub fn approval_for_tags<F, Fut>(mut self, tags: &[ToolTag], callback: F) -> Self
     where
         F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ailoop_core::ToolDecision> + Send + 'static,
@@ -962,7 +959,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// Run `callback` before every tool call (untagged or otherwise).
     /// Useful for `Conversation::run` flows where every action is
     /// surfaced to the human.
-    pub fn with_approval_for_all<F, Fut>(mut self, callback: F) -> Self
+    pub fn approval_for_all<F, Fut>(mut self, callback: F) -> Self
     where
         F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ailoop_core::ToolDecision> + Send + 'static,
@@ -1041,10 +1038,11 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
-    /// Default `disable_parallel_tool_use` applied to every
-    /// [`ChatRequest`]. See [`Self::temperature`] for precedence rules.
-    pub fn disable_parallel_tool_use(mut self, v: bool) -> Self {
-        self.request_defaults.disable_parallel_tool_use = Some(v);
+    /// Default `parallel_tool_use` applied to every [`ChatRequest`]:
+    /// `false` limits the model to one tool call per turn. See
+    /// [`Self::temperature`] for precedence rules.
+    pub fn parallel_tool_use(mut self, v: bool) -> Self {
+        self.request_defaults.parallel_tool_use = Some(v);
         self
     }
 
@@ -1144,7 +1142,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     ///    empty, the user's prompt passes through untouched. Because
     ///    this runs after them, user middlewares never observe the
     ///    builder prompt in `on_chat_request`.
-    /// 4. If any [`with_approval*`](Self::with_approval) variant was
+    /// 4. If any [`approval*`](Self::approval) variant was
     ///    called, an internal `ApprovalMiddleware` is appended after
     ///    the system-prompt one. Tool-name resolution for the
     ///    capability-tag form happens here, over the whole registered
@@ -1192,12 +1190,12 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         if let Some(initial_active) = self.initial_active {
             tools.deactivate_all();
             for name in initial_active {
-                // `activate_tool` errors only on unknown names; the
+                // `activate` errors only on unknown names; the
                 // documented contract is to silently skip names not in
                 // the (capability-filtered) catalog so that
                 // `initial_active_tools` composes cleanly with
-                // `with_capabilities`.
-                let _ = tools.activate_tool(&name);
+                // `capabilities`.
+                let _ = tools.activate(&name);
             }
         }
 
@@ -1308,8 +1306,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolDyn for FakeTool {
-        fn name(&self) -> String {
-            self.name.into()
+        fn name(&self) -> &str {
+            self.name
         }
         fn tool_definition(&self) -> ailoop_core::ToolDefinition {
             ailoop_core::ToolDefinition::new(
@@ -1367,7 +1365,7 @@ mod tests {
                 name: "untagged",
                 tags: vec![],
             })
-            .with_approval(move |_req| {
+            .approval(move |_req| {
                 let c = counter_cb.clone();
                 async move {
                     c.fetch_add(1, Ordering::SeqCst);
@@ -1397,7 +1395,7 @@ mod tests {
                 name: "delete_file",
                 tags: vec![ToolTag::Destructive],
             })
-            .with_approval_for_tags(&[ToolTag::ReadOnly], move |_req| {
+            .approval_for_tags(&[ToolTag::ReadOnly], move |_req| {
                 let c = counter_cb.clone();
                 async move {
                     c.fetch_add(1, Ordering::SeqCst);
@@ -1422,7 +1420,7 @@ mod tests {
                 name: "untagged",
                 tags: vec![],
             })
-            .with_approval_for_all(move |_req| {
+            .approval_for_all(move |_req| {
                 let c = counter_cb.clone();
                 async move {
                     c.fetch_add(1, Ordering::SeqCst);
@@ -1486,7 +1484,7 @@ mod tests {
                 name: "delete_file",
                 tags: vec![ToolTag::Destructive],
             })
-            .with_approval(|_req| async move {
+            .approval(|_req| async move {
                 ToolDecision::Skip {
                     reason: "user denied".into(),
                 }
@@ -1552,7 +1550,7 @@ mod tests {
         }]]);
 
         let mut chat = Conversation::builder(model)
-            .with_history(History::builder(460))
+            .history(History::builder(460))
             .middleware(Arc::new(TracingMiddleware::new()))
             .build()
             .expect("builder should succeed");
@@ -1594,7 +1592,7 @@ mod tests {
     #[tokio::test]
     async fn stream_emits_history_compacted_with_matching_run_id() {
         let mut chat = Conversation::builder(MockModel)
-            .with_history(History::builder(460))
+            .history(History::builder(460))
             .build()
             .expect("builder should succeed");
 
@@ -1626,6 +1624,7 @@ mod tests {
                 before_count,
                 after_count,
                 strategy,
+                ..
             } => {
                 assert!(after_count < before_count, "compaction must shrink history");
                 assert_eq!(strategy, "truncate");
@@ -1638,7 +1637,7 @@ mod tests {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.unwrap();
             match &chunk {
-                StreamChunk::RunStarted { run_id }
+                StreamChunk::RunStarted { run_id, .. }
                 | StreamChunk::StepStarted { run_id, .. }
                 | StreamChunk::StepFinished { run_id, .. }
                 | StreamChunk::ToolResult { run_id, .. }
@@ -1680,7 +1679,7 @@ mod tests {
     async fn with_history_respects_reserved_tokens() {
         for (reserved, expect_compaction) in [(0, false), (1_800, true)] {
             let mut chat = Conversation::builder(MockModel)
-                .with_history(History::builder(2_000).reserved_tokens(reserved))
+                .history(History::builder(2_000).reserved_tokens(reserved))
                 .build()
                 .expect("builder should succeed");
             chat.history.extend(big_turns());
@@ -1699,7 +1698,7 @@ mod tests {
             let pinned = vec![false; turns.len()];
             let snapshot = ConversationSnapshot::new(turns, pinned).unwrap();
             let mut chat = ConversationBuilder::from_snapshot(MockModel, snapshot)
-                .with_history(History::builder(2_000).reserved_tokens(reserved))
+                .history(History::builder(2_000).reserved_tokens(reserved))
                 .build()
                 .expect("builder should succeed");
             assert_eq!(
@@ -1714,7 +1713,7 @@ mod tests {
     //
     // These exercise the builder shortcuts (`temperature`, `top_p`,
     // `top_k`, `stop_sequences`, `tool_choice`,
-    // `disable_parallel_tool_use`, `max_tokens`, `additional_params`)
+    // `parallel_tool_use`, `max_tokens`, `additional_params`)
     // and the `request_defaults` closure escape hatch. The shape is the
     // same in each test: drive a one-turn `ScriptedModel` through
     // `Conversation::run`, with a `RecordingMiddleware` registered last
@@ -1722,7 +1721,7 @@ mod tests {
     // middleware has run.
 
     use ailoop_core::testing::ScriptedModel;
-    use ailoop_core::{FinishReason, RunId, StepId, ToolChoice, Usage};
+    use ailoop_core::{FinishReason, RunId, RunStartInfo, StepInfo, ToolChoice, Usage};
     use std::sync::Mutex;
 
     #[derive(Clone, Default)]
@@ -1732,7 +1731,7 @@ mod tests {
         top_k: Option<u32>,
         stop_sequences: Vec<String>,
         tool_choice: Option<ToolChoice>,
-        disable_parallel_tool_use: Option<bool>,
+        parallel_tool_use: Option<bool>,
         reasoning_effort: Option<ReasoningEffort>,
         max_tokens: u32,
         additional_params: Option<serde_json::Value>,
@@ -1744,14 +1743,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ChatMiddleware for RecordingMiddleware {
-        async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+        async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
             *self.out.lock().unwrap() = Some(Recorded {
                 temperature: req.temperature,
                 top_p: req.top_p,
                 top_k: req.top_k,
                 stop_sequences: req.stop_sequences.clone(),
                 tool_choice: req.tool_choice.clone(),
-                disable_parallel_tool_use: req.disable_parallel_tool_use,
+                parallel_tool_use: req.parallel_tool_use,
                 reasoning_effort: req.reasoning_effort,
                 max_tokens: req.max_tokens,
                 additional_params: req.additional_params.clone(),
@@ -1777,7 +1776,7 @@ mod tests {
             .top_k(40)
             .stop_sequences(["STOP", "END"])
             .tool_choice(ToolChoice::Any)
-            .disable_parallel_tool_use(true)
+            .parallel_tool_use(false)
             .reasoning_effort(ReasoningEffort::Medium)
             .max_tokens(1234)
             .additional_params(json!({"thinking": {"type": "enabled"}}))
@@ -1795,7 +1794,7 @@ mod tests {
         assert_eq!(rec.top_k, Some(40));
         assert_eq!(rec.stop_sequences, vec!["STOP".to_string(), "END".into()]);
         assert_eq!(rec.tool_choice, Some(ToolChoice::Any));
-        assert_eq!(rec.disable_parallel_tool_use, Some(true));
+        assert_eq!(rec.parallel_tool_use, Some(false));
         assert_eq!(rec.reasoning_effort, Some(ReasoningEffort::Medium));
         assert_eq!(rec.max_tokens, 1234);
         assert_eq!(
@@ -1826,7 +1825,7 @@ mod tests {
         assert_eq!(rec.top_k, None);
         assert!(rec.stop_sequences.is_empty());
         assert_eq!(rec.tool_choice, None);
-        assert_eq!(rec.disable_parallel_tool_use, None);
+        assert_eq!(rec.parallel_tool_use, None);
         assert_eq!(rec.reasoning_effort, None);
         assert_eq!(rec.max_tokens, 4096); // RunConfig::default().max_tokens
         assert_eq!(rec.additional_params, None);
@@ -1840,7 +1839,7 @@ mod tests {
         struct Override;
         #[async_trait::async_trait]
         impl ChatMiddleware for Override {
-            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
                 req.temperature = Some(1.0);
             }
         }
@@ -1937,7 +1936,7 @@ mod tests {
         struct Override;
         #[async_trait::async_trait]
         impl ChatMiddleware for Override {
-            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
                 req.max_tokens = 77;
             }
         }
@@ -1996,7 +1995,7 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl ChatMiddleware for Recorder {
-            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
                 self.captures.lock().unwrap().push(req.messages.clone());
             }
         }
@@ -2116,13 +2115,8 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl ChatMiddleware for ConfigSpy {
-            async fn on_run_started(
-                &self,
-                _run_id: &RunId,
-                _messages: &[Message],
-                config: &RunConfig,
-            ) -> ailoop_core::HookAction {
-                *self.captured.lock().unwrap() = Some(config.max_iterations);
+            async fn on_run_started(&self, run: &RunStartInfo<'_>) -> ailoop_core::HookAction {
+                *self.captured.lock().unwrap() = Some(run.config.max_iterations);
                 ailoop_core::HookAction::Continue
             }
         }
@@ -2149,13 +2143,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ChatMiddleware for MaxIterationsSpy {
-        async fn on_run_started(
-            &self,
-            _run_id: &RunId,
-            _messages: &[Message],
-            config: &RunConfig,
-        ) -> ailoop_core::HookAction {
-            *self.captured.lock().unwrap() = Some(config.max_iterations);
+        async fn on_run_started(&self, run: &RunStartInfo<'_>) -> ailoop_core::HookAction {
+            *self.captured.lock().unwrap() = Some(run.config.max_iterations);
             ailoop_core::HookAction::Continue
         }
     }
@@ -2244,9 +2233,9 @@ mod tests {
         let mut chat = Conversation::builder(one_turn_model())
             .build()
             .expect("builder should succeed");
-        chat.history_push(Message::user("anchor"));
+        chat.push_message(Message::user("anchor"));
         chat.history.pin_last();
-        chat.history_push(Message::assistant_text("ack"));
+        chat.push_message(Message::assistant_text("ack"));
 
         let snapshot = chat.snapshot();
         assert_eq!(snapshot.pinned, vec![true, false]);
@@ -2254,7 +2243,7 @@ mod tests {
         let resumed = ConversationBuilder::from_snapshot(one_turn_model(), snapshot)
             .build()
             .expect("builder should succeed");
-        assert_eq!(resumed.history_messages().len(), 2);
+        assert_eq!(resumed.messages().len(), 2);
         assert!(resumed.history.is_pinned(0));
         assert!(!resumed.history.is_pinned(1));
     }
@@ -2279,7 +2268,7 @@ mod tests {
             .expect("builder should succeed");
         chat.run("hi").await.expect("run should succeed");
 
-        match &chat.history_messages()[0] {
+        match &chat.messages()[0] {
             Message::User { blocks } => {
                 assert_eq!(blocks.len(), 1);
                 match &blocks[0] {
@@ -2304,7 +2293,7 @@ mod tests {
             .await
             .expect("run should succeed");
 
-        match &chat.history_messages()[0] {
+        match &chat.messages()[0] {
             Message::User { blocks } => match &blocks[0] {
                 UserBlock::Text { text, .. } => assert_eq!(text, "hi"),
                 other => panic!("expected Text block, got {other:?}"),
@@ -2334,7 +2323,7 @@ mod tests {
         .await
         .expect("run should succeed");
 
-        match &chat.history_messages()[0] {
+        match &chat.messages()[0] {
             Message::User { blocks } => {
                 assert_eq!(blocks.len(), 2);
                 match &blocks[0] {
@@ -2370,7 +2359,7 @@ mod tests {
         .await
         .expect("run should succeed");
 
-        match &chat.history_messages()[0] {
+        match &chat.messages()[0] {
             Message::User { blocks } => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UserBlock::Image { .. }));
@@ -2397,7 +2386,7 @@ mod tests {
             .expect("builder should succeed");
         chat.run(blocks).await.expect("run should succeed");
 
-        match &chat.history_messages()[0] {
+        match &chat.messages()[0] {
             Message::User { blocks } => {
                 assert_eq!(blocks.len(), 2);
                 assert!(matches!(blocks[0], UserBlock::Text { .. }));

@@ -10,6 +10,9 @@ and this project adheres to
 
 ### Added
 
+- `RunConfig` implements `Debug`. Middlewares are shown as a count,
+  since they are trait objects.
+
 - `ChatMiddleware::on_run_dropped(&self, run_id)`: a third closing
   hook, fired when the caller drops a run's stream before the run
   closed (a `select!` that picks another branch, an outer timeout, a
@@ -50,10 +53,10 @@ and this project adheres to
   `ToolResult` chunk and the middleware hooks. `ToolContext::detached`
   mints a synthetic one.
 
-- `ApprovalRequest::call_id` and `ApprovalRequest::with_call_id`.
-  `ApprovalMiddleware` fills it, so an approval UI or verifier can
-  tell apart two identical calls in one step and match its decision
-  to the `ToolResult` chunk. `ApprovalRequest::new` leaves it empty.
+- `ApprovalRequest::call_id`, so an approval UI or verifier can tell
+  apart two identical calls in one step and match its decision to the
+  `ToolResult` chunk. `ApprovalRequest::new(call, args)` takes the
+  call's `ToolCallInfo`, so the id is always set.
 
 - `JsonTracer` writes `call_id` on `before_tool_call` and
   `after_tool_call` lines, and `TracingMiddleware` adds a `call_id`
@@ -74,7 +77,6 @@ and this project adheres to
   finished turn) even though that step is left out of
   `partial_messages`. Errors raised before the run starts (history
   compaction in `Conversation::stream_with_options`) carry zero usage.
-  `into_parts` is unchanged.
 
 - `Usage` derives `PartialEq` and `Eq`.
 
@@ -85,12 +87,12 @@ and this project adheres to
 
 - `ApprovalRequest` (re-exported from `ailoop`): what an approval
   callback receives for one gated call. Public fields `run_id`,
-  `step_id`, `tool_name`, `args`, `tags` (the tool's declared tags) and
+  `step_id`, `call_id`, `name` (the tool's wire name), `args`, `tags` (the tool's declared tags) and
   `messages` (the context sent to the model on the step that produced
   the call, after every middleware's `on_chat_request`). The type is
   `#[non_exhaustive]` so more context can be added without breaking
-  callbacks; `ApprovalRequest::new` plus `with_tags` / `with_messages`
-  build one outside the crate, e.g. to unit-test a verifier. Its
+  callbacks; `ApprovalRequest::new(ToolCallInfo, args)` plus
+  `with_tags` / `with_messages` build one outside the crate, e.g. to unit-test a verifier. Its
   rustdoc describes a model-based risky-action verifier: tags pick what
   gets reviewed, the verifier allows, denies or escalates to a human,
   it fails closed on error or timeout, and it reads intent from the
@@ -111,7 +113,9 @@ and this project adheres to
 - `RunError<E>` (re-exported from `ailoop`): the error of a failed run.
   It wraps the `EngineError` cause (`kind()`, `into_kind()`) and the
   messages of the steps the run completed before failing
-  (`partial_messages()`, `into_parts()`). Until now those steps were
+  (`partial_messages()`). `into_parts()` returns a `RunErrorParts`
+  with the three owned parts (`kind`, `usage`, `partial_messages`);
+  it is `#[non_exhaustive]`, so destructure it with `..`. Until now those steps were
   lost when a run failed: the history is rolled back on `Err`, so the
   record of tools that already ran (writes, API calls) disappeared and
   the next turn could repeat them. The partial list is exactly the
@@ -121,9 +125,9 @@ and this project adheres to
   response arrives before that step's tools run, so no executed tool
   is missing. The rollback guarantee is unchanged; the list is a copy
   the caller can keep or drop.
-- `Conversation::history_extend(messages)`: append several messages
-  without running, like `history_push`. Use it to keep the steps of a
-  failed run: `chat.history_extend(err.partial_messages().iter().cloned())`.
+- `Conversation::extend_messages(messages)`: append several messages
+  without running, like `push_message`. Use it to keep the steps of a
+  failed run: `chat.extend_messages(err.partial_messages().iter().cloned())`.
 - `StreamChunk::ToolCallMalformed { id, name, raw, error }`: closes a
   streamed tool call whose argument text is not a JSON object, in place
   of `ToolCallFinished`. `StreamChunk::tool_call_from_raw_args(id, name,
@@ -357,6 +361,13 @@ and this project adheres to
 
 ### Changed
 
+- `ToolContext::new`, `ToolActivation::new`, `ToolRegistry::catalog_arc`
+  and `ToolRegistry::snapshot_active` are hidden from the docs and not
+  covered by semver. They are the engine's plumbing: their signatures
+  expose `indexmap` types and have changed twice in this release
+  (`call_id`, `cancellation`). Tools and tests build a context with
+  `ToolContext::detached()`, whose signature is stable.
+
 - `RunFinished.usage`, `RunOutcome.usage` and the `usage` passed to
   `ChatMiddleware::on_run_finished` now mean **everything the run
   spent**: its own provider turns plus usage reported by tools.
@@ -397,6 +408,139 @@ and this project adheres to
   "Tool calls within a step" on `ChatMiddleware`.
 
 ### Changed (BREAKING)
+
+- `CompactionReport` is `CompactionStats`. It sat next to
+  `CompactionOutput` with a near-synonym name for a different shape:
+  `CompactionOutput` is what a `CompactionStrategy` returns (the new
+  messages and pin mask), while this type is the before/after counts
+  and strategy name `History::compact_if_needed` / `force_compact`
+  report.
+
+- `PromptSection::with_name(name, content)` is
+  `PromptSection::named(name, content)`: it is a constructor, next to
+  `PromptSection::new(content)`, and `with_*` is kept for methods that
+  modify a value. `Prompt::sections()` returns `&[PromptSection]`
+  instead of `&Vec<PromptSection>`, so the storage behind it can change
+  without breaking callers.
+
+- `ToolDyn::name` returns `&str` instead of `String`, like
+  `CompletionModel::name`. The registry and the engine read tool names
+  on every request and dispatch, and each call allocated a copy of a
+  name the tool already owns (`T::NAME` for derived tools, a field for
+  MCP and sub-agent tools).
+
+- `ToolRegistry::activate_tool` / `deactivate_tool` are `activate` /
+  `deactivate`, matching `ToolActivation::activate` / `deactivate` (the
+  handle tools use for the same operation at runtime) and the
+  registry's own `activate_by_tags` / `deactivate_by_tags`.
+
+- `ApprovalMiddleware::for_named` is `ApprovalMiddleware::approve_named`,
+  so both constructors say what they gate: `approve_all(callback)` and
+  `approve_named(names, callback)`.
+
+- `Conversation::history_messages()` is `messages()` and
+  `Conversation::history_push(message)` is `push_message(message)`
+  (the new `history_extend` is `extend_messages`). The `history_`
+  prefix named the internal `History` field rather than what the
+  methods do, and `messages()` matches `History::messages()` and
+  `ConversationSnapshot::messages`.
+
+- `ConversationBuilder` setters drop the `with_` prefix:
+  `with_history` → `history`, `with_capabilities` → `capabilities`,
+  `with_approval` → `approval`, `with_approval_for_tags` →
+  `approval_for_tags`, `with_approval_for_all` → `approval_for_all`.
+  Every other setter on the builder (`system_prompt`, `temperature`,
+  `middleware`, `tool_choice`, …) was already a bare noun, as is
+  `HistoryBuilder`'s. The rule for 1.x: builders (types that end in
+  `build()`) use bare nouns; value types configured by chaining
+  (`AntiLoop`, `SummarizeStrategy`, `ApprovalRequest`, message blocks)
+  keep `with_*`.
+
+- `RunId` and `StepId` keep their `Uuid` private. The public tuple
+  field (`RunId(pub Uuid)`) made the representation part of the API, so
+  switching to another id scheme (e.g. UUIDv7 or a string trace id)
+  would have been breaking. Build one from an outer trace id with
+  `RunId::from(uuid)`, and read it back with `as_uuid()` or
+  `Uuid::from(id)`.
+
+- `ChatRequest::disable_parallel_tool_use` is
+  `ChatRequest::parallel_tool_use`, and
+  `ConversationBuilder::disable_parallel_tool_use(bool)` is
+  `ConversationBuilder::parallel_tool_use(bool)`. The flag now states
+  the positive: `Some(false)` limits the model to one tool call per
+  turn, `Some(true)` allows several, and `None` still leaves the
+  provider default. The old name copied Anthropic's wire field, so
+  `disable_…(false)` meant "allow" and every other provider needed a
+  negation; now the Anthropic adapter is the one that negates it, and
+  Chat Completions' `parallel_tool_calls` maps one to one.
+
+- `ToolChoice::None_` is `ToolChoice::None`. The trailing underscore was
+  meant to avoid a clash with `Option::None`, but an enum variant is
+  always reached through its type (`ToolChoice::None`), so there was no
+  clash to avoid, and `Some(ToolChoice::None)` reads as intended.
+
+- The tool call id is `call_id` everywhere. `AssistantBlock::ToolCall`
+  and the `StreamChunk::ToolCallStarted` / `ToolCallArgsDelta` /
+  `ToolCallFinished` / `ToolCallMalformed` variants called it `id`,
+  while `UserBlock::ToolResult`, `StreamChunk::ToolResult`,
+  `ToolCallInfo`, `ApprovalRequest` and `AbortReason::ToolTerminated`
+  called the same value `call_id`, so matching a call to its result
+  meant translating field names. `AssistantBlock::ToolCall` now
+  serializes the field as `call_id`; deserialization still accepts
+  `id`, so snapshots saved with 1.0.0-rc.3 load unchanged (an rc.3
+  build cannot read snapshots written by this version).
+
+- The modules of `ailoop-core` (`config`, `ids`, `message`,
+  `middleware`, `provider_error`, `request`, `retry`, `stream`),
+  `ailoop-history` (`compaction`, `errors`, `history`, `history_store`,
+  `snapshot`) and `ailoop-tools` (`context`, `errors`, `registry`,
+  `schema`, `timeout`) are private. Every public item was already
+  re-exported at the crate root (and from the `ailoop` facade), so each
+  type had two paths, and the module layout was part of the API: moving
+  a type between files would have been a breaking change. Only the root
+  paths remain. `ailoop_core::testing` (behind the `testing` feature)
+  and `ailoop::advanced` stay public.
+
+- `CompletionModel` requires `Send + Sync`. Its docs already said
+  implementations must be both, since the engine and `RetryingModel`
+  hold models across `.await`s, but the trait did not declare it, so
+  every function generic over a model had to spell out
+  `M: CompletionModel + Send + Sync`. The bound now comes with the
+  trait; `M: CompletionModel` is enough. Every model that worked with
+  the engine already met it, so only a model that could never be used
+  by a `Conversation` stops compiling.
+
+- The `StreamChunk` variants the engine emits (`RunStarted`,
+  `StepStarted`, `StepFinished`, `ToolResult`, `RunFinished`,
+  `HistoryCompacted`) are `#[non_exhaustive]`. The enum already was, so
+  new chunks could be added, but a variant's fields could not grow
+  without breaking every match that listed them all, and these are the
+  chunks most likely to carry more context later. Match them with `..`.
+  Code outside `ailoop-core` builds them with the new constructors
+  `StreamChunk::run_started`, `step_started`, `step_finished`,
+  `tool_result`, `run_finished` and `history_compacted`, e.g. to feed a
+  middleware's `on_chunk` in a test. The variants providers emit
+  (`TextDelta`, `ToolCall*`, `Reasoning*`, `TurnFinished`) are
+  unchanged: adapters and `ScriptedModel` scripts keep building them
+  with struct syntax.
+
+- The run-level hooks of `ChatMiddleware` take one context struct in
+  place of positional arguments:
+  `on_run_started(&RunStartInfo)`, `on_chat_request(&StepInfo, req)`,
+  `on_run_finished(&RunFinishedInfo)`, `on_turn_end(&TurnEndInfo)` and
+  `on_run_error(&RunErrorInfo)`. Each positional argument added to a
+  hook broke every middleware that overrode it; this release alone
+  added `usage` and `partial_messages` to `on_run_error` that way. The
+  structs are `#[non_exhaustive]`, so later releases can add fields
+  without breaking implementations. Their fields are public and have
+  the old parameters' names, except `err`, which is now `error`. The
+  borrowed ones (`RunStartInfo`, `RunFinishedInfo`, `TurnEndInfo`,
+  `RunErrorInfo`) borrow from the engine for the duration of the hook,
+  so nothing is cloned. Each has a `new(...)` constructor for
+  unit-testing a middleware. `ChatRequest` stays a separate argument of
+  `on_chat_request` because the hook borrows it mutably, like `args` in
+  the tool hooks. `on_run_dropped(run_id)` and the chunk hooks are
+  unchanged.
 
 - `RunConfig::default().max_iterations` is now 25 (was 10). One
   iteration is one model turn plus the tool calls it triggers. Every
@@ -455,7 +599,7 @@ and this project adheres to
 - Approval callbacks take an `ApprovalRequest` instead of
   `(String, Value)`: `ConversationBuilder::with_approval`,
   `with_approval_for_tags`, `with_approval_for_all`,
-  `ApprovalMiddleware::approve_all` and `ApprovalMiddleware::for_named`.
+  `ApprovalMiddleware::approve_all` and `ApprovalMiddleware::approve_named`.
   A callback that only saw the tool name and arguments could not tell
   a reasonable call from a dangerous one: `rm -rf build/` is fine after
   "clean the build" and alarming after "summarize this file". The
@@ -468,7 +612,7 @@ and this project adheres to
   The messages are copied once per step into an `Arc<[Message]>` shared
   by every gated call of that step, and only when a gate is installed.
   `tags` is filled for gates installed through the builder, which sees
-  the whole tool catalog; `approve_all` and `for_named` leave it
+  the whole tool catalog; `approve_all` and `approve_named` leave it
   empty. The call id is not included yet.
 
 - `Conversation::run`, `run_with_options`, `stream`,
@@ -529,19 +673,23 @@ and this project adheres to
     timeout that fires at the same instant.
   - `Terminated { reason }`: a middleware returned
     `HookAction::Terminate` from `on_run_started`.
-  - `ToolTerminated { tool_name, reason }`: a middleware (`AntiLoop`,
-    `MaxToolCalls`, or your own) returned `ToolDecision::Terminate`. It
-    now also names the refused tool.
+  - `ToolTerminated { tool_name, call_id, reason }`: a middleware
+    (`AntiLoop`, `MaxToolCalls`, or your own) returned
+    `ToolDecision::Terminate`. It now also names the refused tool and
+    carries the refused call's id.
 
-  `AbortReason` is `#[non_exhaustive]`. Its `Display` renders exactly
+  `AbortReason` is `#[non_exhaustive]`, and so are its struct variants
+  `Terminated` and `ToolTerminated`: match them with `..` and build them
+  with `AbortReason::terminated(reason)` /
+  `AbortReason::tool_terminated(tool_name, call_id, reason)`. Its `Display` renders exactly
   the old strings (`"timeout exceeded after 30s"`,
   `"cancelled by caller"`, or the middleware reason verbatim), so text
   shown to users or to a parent model (for example
   `SubAgentTool`'s `"sub-agent aborted: …"`) is unchanged.
   `JsonTracer`'s `run_finished` payload keeps `reason.detail` and
   gains `reason.abort_kind` (`timeout` / `cancelled` / `terminated` /
-  `tool_terminated` / `max_iterations`) plus `reason.tool_name` for
-  tool terminations.
+  `tool_terminated` / `max_iterations`) plus `reason.tool_name` and
+  `reason.call_id` for tool terminations.
 - Reaching `RunConfig::max_iterations` (or `RunOptions::max_iterations`
   / `SubAgentConfig::max_iterations`) is now an abort, not an error.
   The run returns `Ok` with
@@ -628,7 +776,7 @@ and this project adheres to
   actions was silently bypassed. The gated set is now resolved over
   the whole registered catalog, so the callback fires for those tools
   exactly as for tools active from the start. `with_approval_for_all`
-  and `ApprovalMiddleware::for_named` were not affected. **Behavior
+  and `ApprovalMiddleware::approve_named` were not affected. **Behavior
   change:** tools filtered out by `with_capabilities` now also go
   through the callback if they get activated; previously the docs
   stated they never triggered it.
@@ -687,6 +835,204 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Rename `CompactionReport`:
+
+```rust
+// Before (1.0.0-rc.3)
+let report: Option<CompactionReport> = history.compact_if_needed().await?;
+
+// After
+let stats: Option<CompactionStats> = history.compact_if_needed().await?;
+```
+
+Build named prompt sections with `named`:
+
+```rust
+// Before (1.0.0-rc.3)
+PromptSection::with_name("Tone", "Be concise.")
+
+// After
+PromptSection::named("Tone", "Be concise.")
+```
+
+Manual `ToolDyn` impls return a borrowed name:
+
+```rust
+// Before (1.0.0-rc.3)
+fn name(&self) -> String {
+    self.name.clone()
+}
+
+// After
+fn name(&self) -> &str {
+    &self.name
+}
+```
+
+Rename the `ToolRegistry` activation methods:
+
+```rust
+// Before (1.0.0-rc.3)
+registry.activate_tool("search")?;
+registry.deactivate_tool("search")?;
+
+// After
+registry.activate("search")?;
+registry.deactivate("search")?;
+```
+
+Rename `ApprovalMiddleware::for_named`:
+
+```rust
+// Before (1.0.0-rc.3)
+ApprovalMiddleware::for_named(["delete_file"], gate)
+
+// After
+ApprovalMiddleware::approve_named(["delete_file"], gate)
+```
+
+Rename the `Conversation` history accessors:
+
+```rust
+// Before (1.0.0-rc.3)
+let msgs = chat.history_messages();
+chat.history_push(Message::user("seed"));
+
+// After
+let msgs = chat.messages();
+chat.push_message(Message::user("seed"));
+```
+
+Drop `with_` from the `ConversationBuilder` setters:
+
+```rust
+// Before (1.0.0-rc.3)
+Conversation::builder(model)
+    .with_history(History::builder(100_000))
+    .with_capabilities(&[ToolTag::ReadOnly])
+    .with_approval_for_tags(&[ToolTag::Destructive], gate)
+
+// After
+Conversation::builder(model)
+    .history(History::builder(100_000))
+    .capabilities(&[ToolTag::ReadOnly])
+    .approval_for_tags(&[ToolTag::Destructive], gate)
+```
+
+Replace the tuple constructor and `.0` access on `RunId` / `StepId`:
+
+```rust
+// Before (1.0.0-rc.3)
+let run_id = RunId(trace_uuid);
+let uuid = run_id.0;
+
+// After
+let run_id = RunId::from(trace_uuid);
+let uuid = *run_id.as_uuid();
+```
+
+Invert the value when moving to `parallel_tool_use`:
+
+```rust
+// Before (1.0.0-rc.3)
+builder.disable_parallel_tool_use(true);
+req.disable_parallel_tool_use = Some(true);
+
+// After
+builder.parallel_tool_use(false);
+req.parallel_tool_use = Some(false);
+```
+
+Drop the trailing underscore from `ToolChoice::None_`:
+
+```rust
+// Before (1.0.0-rc.3)
+builder.tool_choice(ToolChoice::None_)
+
+// After
+builder.tool_choice(ToolChoice::None)
+```
+
+Rename `id` to `call_id` when matching or building tool call blocks
+and chunks:
+
+```rust
+// Before (1.0.0-rc.3)
+if let StreamChunk::ToolCallFinished { id, name, args } = chunk { /* .. */ }
+AssistantBlock::ToolCall { id, name, args, .. } => { /* .. */ }
+
+// After
+if let StreamChunk::ToolCallFinished { call_id, name, args } = chunk { /* .. */ }
+AssistantBlock::ToolCall { call_id, name, args, .. } => { /* .. */ }
+```
+
+Import from the crate root (or from `ailoop`) instead of a module
+path:
+
+```rust
+// Before (1.0.0-rc.3)
+use ailoop_core::stream::StreamChunk;
+use ailoop_tools::errors::ToolRegistryError;
+
+// After
+use ailoop::{StreamChunk, ToolRegistryError};
+```
+
+Engine-emitted chunks need `..` in patterns and a constructor outside
+`ailoop-core`:
+
+```rust
+// Before (1.0.0-rc.3)
+if let StreamChunk::StepStarted { run_id, step_id, iteration } = &chunk { /* .. */ }
+let chunk = StreamChunk::RunFinished { run_id, reason, usage, new_messages };
+
+// After
+if let StreamChunk::StepStarted { run_id, step_id, iteration, .. } = &chunk { /* .. */ }
+let chunk = StreamChunk::run_finished(run_id, reason, usage, new_messages);
+```
+
+Run-level hooks take a context struct; read the old arguments from its
+fields:
+
+```rust
+use ailoop::{RunErrorInfo, RunFinishedInfo, RunStartInfo, StepInfo, TurnEndInfo};
+
+// Before (1.0.0-rc.3)
+async fn on_run_started(&self, run_id: &RunId, messages: &[Message], config: &RunConfig) -> HookAction {
+    self.start(run_id, config.max_iterations);
+    HookAction::Continue
+}
+async fn on_chat_request(&self, run_id: &RunId, step_id: &StepId, req: &mut ChatRequest) { /* .. */ }
+async fn on_run_finished(&self, run_id: &RunId, reason: &FinishReason, usage: &Usage, new_messages: &[Message]) {
+    self.finish(run_id, usage);
+}
+async fn on_run_error(&self, run_id: &RunId, err: &(dyn Error + Send + Sync)) {
+    self.fail(run_id, err);
+}
+
+// After
+async fn on_run_started(&self, run: &RunStartInfo<'_>) -> HookAction {
+    self.start(run.run_id, run.config.max_iterations);
+    HookAction::Continue
+}
+async fn on_chat_request(&self, step: &StepInfo, req: &mut ChatRequest) {
+    // step.run_id, step.step_id
+}
+async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
+    self.finish(run.run_id, run.usage);
+}
+async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
+    self.fail(run.run_id, run.error); // also run.usage, run.partial_messages
+}
+async fn on_turn_end(&self, turn: &TurnEndInfo<'_>) -> ContinueDecision {
+    // turn.run_id, turn.step_id, turn.reason, turn.new_messages
+    ContinueDecision::Stop
+}
+```
+
+To unit-test a middleware, build the context with its constructor,
+e.g. `RunFinishedInfo::new(&run_id, &FinishReason::EndTurn, &usage, &[])`.
 
 To keep the old cap of 10 iterations, set it explicitly:
 
@@ -793,12 +1139,12 @@ arguments from its fields:
 
 // After
 .with_approval(|req| async move {
-    ask_human(&req.tool_name, &req.args).await
+    ask_human(&req.name, &req.args).await
 })
 ```
 
 The same applies to `with_approval_for_tags`, `with_approval_for_all`,
-`ApprovalMiddleware::approve_all` and `ApprovalMiddleware::for_named`.
+`ApprovalMiddleware::approve_all` and `ApprovalMiddleware::approve_named`.
 
 A failed run returns `RunError`. `?` into `EngineError` still compiles;
 direct matches go through `.kind()`:
@@ -822,7 +1168,7 @@ match chat.run("go").await {
 
 // New: keep the steps that completed before the failure
 if let Err(err) = chat.run("go").await {
-    chat.history_extend(err.partial_messages().iter().cloned());
+    chat.extend_messages(err.partial_messages().iter().cloned());
 }
 ```
 

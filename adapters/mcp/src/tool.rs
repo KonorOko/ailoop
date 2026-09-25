@@ -34,8 +34,8 @@ pub struct McpTool {
 
 #[async_trait::async_trait]
 impl ToolDyn for McpTool {
-    fn name(&self) -> String {
-        self.name_for_engine.clone()
+    fn name(&self) -> &str {
+        &self.name_for_engine
     }
 
     fn tool_definition(&self) -> ToolDefinition {

@@ -14,12 +14,30 @@ use uuid::Uuid;
 /// pass an existing `RunId` when an outer system already has its own
 /// trace identifier to bind to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RunId(pub Uuid);
+pub struct RunId(Uuid);
 
 impl RunId {
     /// Create a fresh `RunId` backed by a new v4 UUID.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// The UUID behind this id.
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+/// Wrap an existing UUID, e.g. a trace id minted by an outer system.
+impl From<Uuid> for RunId {
+    fn from(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+}
+
+impl From<RunId> for Uuid {
+    fn from(id: RunId) -> Self {
+        id.0
     }
 }
 
@@ -45,12 +63,30 @@ impl fmt::Display for RunId {
 /// so middlewares can scope per-step state (e.g. token counts, retries)
 /// without tracking iteration numbers themselves.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct StepId(pub Uuid);
+pub struct StepId(Uuid);
 
 impl StepId {
     /// Create a fresh `StepId` backed by a new v4 UUID.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// The UUID behind this id.
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+/// Wrap an existing UUID, e.g. a trace id minted by an outer system.
+impl From<Uuid> for StepId {
+    fn from(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+}
+
+impl From<StepId> for Uuid {
+    fn from(id: StepId) -> Self {
+        id.0
     }
 }
 
@@ -63,5 +99,22 @@ impl Default for StepId {
 impl fmt::Display for StepId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_round_trip_through_uuid() {
+        let uuid = Uuid::new_v4();
+        let run = RunId::from(uuid);
+        assert_eq!(run.as_uuid(), &uuid);
+        assert_eq!(Uuid::from(run), uuid);
+
+        let step = StepId::from(uuid);
+        assert_eq!(step.as_uuid(), &uuid);
+        assert_eq!(Uuid::from(step), uuid);
     }
 }

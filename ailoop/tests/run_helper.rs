@@ -7,11 +7,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ailoop::{Conversation, History, Message, ToolDefinition, ToolResultContent};
+use ailoop::{Conversation, History, Message, RunStartInfo, ToolDefinition, ToolResultContent};
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{
-    AbortReason, AssistantBlock, CancellationToken, FinishReason, RunConfig, StreamChunk, ToolTag,
-    Usage,
+    AbortReason, AssistantBlock, CancellationToken, FinishReason, StreamChunk, ToolTag, Usage,
 };
 use ailoop_tools::{ToolContext, ToolDyn};
 use async_trait::async_trait;
@@ -50,19 +49,18 @@ async fn run_returns_final_text_for_text_only_turn() {
     assert_eq!(outcome.usage.output_tokens, 7);
 
     // History must contain the user input and the assistant turn.
-    let assistant_text: Option<String> =
-        chat.history_messages().iter().rev().find_map(|m| match m {
-            Message::Assistant { blocks } => {
-                let mut s = String::new();
-                for b in blocks {
-                    if let AssistantBlock::Text { text: t, .. } = b {
-                        s.push_str(t);
-                    }
+    let assistant_text: Option<String> = chat.messages().iter().rev().find_map(|m| match m {
+        Message::Assistant { blocks } => {
+            let mut s = String::new();
+            for b in blocks {
+                if let AssistantBlock::Text { text: t, .. } = b {
+                    s.push_str(t);
                 }
-                Some(s)
             }
-            _ => None,
-        });
+            Some(s)
+        }
+        _ => None,
+    });
     assert_eq!(assistant_text.as_deref(), Some("hello world"));
 }
 
@@ -73,11 +71,11 @@ async fn run_returns_final_text_for_text_only_turn() {
 async fn run_final_text_reflects_last_assistant_turn_only() {
     let turn1 = vec![
         StreamChunk::ToolCallStarted {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "get_weather".into(),
         },
         StreamChunk::ToolCallFinished {
-            id: "toolu_1".into(),
+            call_id: "toolu_1".into(),
             name: "get_weather".into(),
             args: json!({}),
         },
@@ -102,8 +100,8 @@ async fn run_final_text_reflects_last_assistant_turn_only() {
     struct GetWeather;
     #[async_trait]
     impl ToolDyn for GetWeather {
-        fn name(&self) -> String {
-            "get_weather".into()
+        fn name(&self) -> &str {
+            "get_weather"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(
@@ -166,17 +164,12 @@ async fn run_returns_ok_with_aborted_finish_reason_on_timeout() {
     // ScriptedModel turn that triggers an immediate Aborted via
     // HookAction::Terminate. The blocking model + cancellation path is
     // covered in `reliability.rs`.
-    use ailoop_core::{ChatMiddleware, HookAction, RunId};
+    use ailoop_core::{ChatMiddleware, HookAction};
 
     struct AbortingMw;
     #[async_trait]
     impl ChatMiddleware for AbortingMw {
-        async fn on_run_started(
-            &self,
-            _run_id: &RunId,
-            _messages: &[Message],
-            _config: &RunConfig,
-        ) -> HookAction {
+        async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> HookAction {
             HookAction::Terminate {
                 reason: "policy".into(),
             }
@@ -197,7 +190,9 @@ async fn run_returns_ok_with_aborted_finish_reason_on_timeout() {
     let outcome = chat.run("hi").await.expect("aborted run is not Err");
 
     match &outcome.finish_reason {
-        FinishReason::Aborted(AbortReason::Terminated { reason }) => assert_eq!(reason, "policy"),
+        FinishReason::Aborted(AbortReason::Terminated { reason, .. }) => {
+            assert_eq!(reason, "policy")
+        }
         other => panic!("expected Aborted, got {other:?}"),
     }
     assert!(
@@ -230,7 +225,7 @@ async fn run_drains_history_compacted_prelude_without_clobbering_outcome() {
     ]]);
 
     let mut chat = Conversation::builder(model)
-        .with_history(History::builder(460))
+        .history(History::builder(460))
         .build()
         .expect("build");
 
@@ -238,8 +233,8 @@ async fn run_drains_history_compacted_prelude_without_clobbering_outcome() {
     // this test. Stuff enough text to overshoot it.
     let big = "x".repeat(200);
     for _ in 0..15 {
-        chat.history_push(Message::user(big.clone()));
-        chat.history_push(Message::assistant_text(big.clone()));
+        chat.push_message(Message::user(big.clone()));
+        chat.push_message(Message::assistant_text(big.clone()));
     }
 
     let outcome = chat.run("trigger run").await.expect("run");
@@ -284,7 +279,7 @@ async fn run_extends_history_exactly_once_per_call() {
     assert_eq!(outcome.final_text.as_deref(), Some("second"));
 
     // Two user inputs + two assistant replies = 4 messages total.
-    let history = chat.history_messages();
+    let history = chat.messages();
     let user_count = history
         .iter()
         .filter(|m| matches!(m, Message::User { .. }))

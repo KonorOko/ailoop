@@ -37,8 +37,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ailoop_core::{
-    AbortReason, ChatMiddleware, ChatRequest, FinishReason, HookAction, Message, RunConfig, RunId,
-    StepId, StreamChunk, ToolCallInfo, ToolDecision, ToolResultContent, Usage,
+    AbortReason, ChatMiddleware, ChatRequest, FinishReason, HookAction, RunErrorInfo,
+    RunFinishedInfo, RunStartInfo, StepInfo, StreamChunk, ToolCallInfo, ToolDecision,
+    ToolResultContent, Usage,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -153,8 +154,12 @@ fn finish_reason_payload(r: &FinishReason) -> Value {
         FinishReason::Aborted(reason) => {
             o.insert("detail".into(), json!(reason.to_string()));
             o.insert("abort_kind".into(), json!(abort_kind_str(reason)));
-            if let AbortReason::ToolTerminated { tool_name, .. } = reason {
+            if let AbortReason::ToolTerminated {
+                tool_name, call_id, ..
+            } = reason
+            {
                 o.insert("tool_name".into(), json!(tool_name));
+                o.insert("call_id".into(), json!(call_id));
             }
         }
         FinishReason::Other(reason) => {
@@ -197,25 +202,20 @@ fn tool_result_body(r: &ToolResultContent) -> String {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for JsonTracer {
-    async fn on_run_started(
-        &self,
-        run_id: &RunId,
-        messages: &[Message],
-        config: &RunConfig,
-    ) -> HookAction {
+    async fn on_run_started(&self, run: &RunStartInfo<'_>) -> HookAction {
         let mut p = serde_json::Map::new();
-        p.insert("run_id".into(), json!(run_id.to_string()));
-        p.insert("messages".into(), json!(messages.len()));
-        p.insert("max_iterations".into(), json!(config.max_iterations));
-        p.insert("max_tokens".into(), json!(config.max_tokens));
+        p.insert("run_id".into(), json!(run.run_id.to_string()));
+        p.insert("messages".into(), json!(run.messages.len()));
+        p.insert("max_iterations".into(), json!(run.config.max_iterations));
+        p.insert("max_tokens".into(), json!(run.config.max_tokens));
         self.emit("run_started", p).await;
         HookAction::Continue
     }
 
-    async fn on_chat_request(&self, run_id: &RunId, step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, step: &StepInfo, req: &mut ChatRequest) {
         let mut p = serde_json::Map::new();
-        p.insert("run_id".into(), json!(run_id.to_string()));
-        p.insert("step_id".into(), json!(step_id.to_string()));
+        p.insert("run_id".into(), json!(step.run_id.to_string()));
+        p.insert("step_id".into(), json!(step.step_id.to_string()));
         p.insert("messages".into(), json!(req.messages.len()));
         p.insert(
             "tools".into(),
@@ -253,7 +253,7 @@ impl ChatMiddleware for JsonTracer {
                 p.insert("bytes".into(), json!(data.len()));
                 self.emit("redacted_reasoning", p).await;
             }
-            StreamChunk::ToolCallStarted { id, name } => {
+            StreamChunk::ToolCallStarted { call_id: id, name } => {
                 let mut p = serde_json::Map::new();
                 p.insert("call_id".into(), json!(id));
                 p.insert("name".into(), json!(name));
@@ -264,7 +264,11 @@ impl ChatMiddleware for JsonTracer {
                 // accumulated args land on `ToolCallFinished` and per-delta
                 // entries would dominate the log.
             }
-            StreamChunk::ToolCallFinished { id, name, args } => {
+            StreamChunk::ToolCallFinished {
+                call_id: id,
+                name,
+                args,
+            } => {
                 let mut p = serde_json::Map::new();
                 p.insert("call_id".into(), json!(id));
                 p.insert("name".into(), json!(name));
@@ -274,7 +278,7 @@ impl ChatMiddleware for JsonTracer {
                 self.emit("tool_call_finished", p).await;
             }
             StreamChunk::ToolCallMalformed {
-                id,
+                call_id: id,
                 name,
                 raw,
                 error,
@@ -294,6 +298,7 @@ impl ChatMiddleware for JsonTracer {
                 step_id,
                 call_id,
                 content,
+                ..
             } => {
                 let mut p = serde_json::Map::new();
                 p.insert("run_id".into(), json!(run_id.to_string()));
@@ -309,6 +314,7 @@ impl ChatMiddleware for JsonTracer {
                 run_id,
                 step_id,
                 iteration,
+                ..
             } => {
                 let mut p = serde_json::Map::new();
                 p.insert("run_id".into(), json!(run_id.to_string()));
@@ -321,6 +327,7 @@ impl ChatMiddleware for JsonTracer {
                 step_id,
                 iteration,
                 new_messages_so_far,
+                ..
             } => {
                 let mut p = serde_json::Map::new();
                 p.insert("run_id".into(), json!(run_id.to_string()));
@@ -345,6 +352,7 @@ impl ChatMiddleware for JsonTracer {
                 before_count,
                 after_count,
                 strategy,
+                ..
             } => {
                 let mut p = serde_json::Map::new();
                 p.insert("run_id".into(), json!(run_id.to_string()));
@@ -361,33 +369,21 @@ impl ChatMiddleware for JsonTracer {
         }
     }
 
-    async fn on_run_finished(
-        &self,
-        run_id: &RunId,
-        reason: &FinishReason,
-        usage: &Usage,
-        new_messages: &[Message],
-    ) {
+    async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
         let mut p = serde_json::Map::new();
-        p.insert("run_id".into(), json!(run_id.to_string()));
-        p.insert("reason".into(), finish_reason_payload(reason));
-        p.insert("usage".into(), usage_payload(usage));
-        p.insert("new_messages".into(), json!(new_messages.len()));
+        p.insert("run_id".into(), json!(run.run_id.to_string()));
+        p.insert("reason".into(), finish_reason_payload(run.reason));
+        p.insert("usage".into(), usage_payload(run.usage));
+        p.insert("new_messages".into(), json!(run.new_messages.len()));
         self.emit("run_finished", p).await;
     }
 
-    async fn on_run_error(
-        &self,
-        run_id: &RunId,
-        err: &(dyn std::error::Error + Send + Sync),
-        usage: &Usage,
-        partial_messages: &[Message],
-    ) {
+    async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
         let mut p = serde_json::Map::new();
-        p.insert("run_id".into(), json!(run_id.to_string()));
-        p.insert("error".into(), json!(err.to_string()));
-        p.insert("usage".into(), usage_payload(usage));
-        p.insert("partial_messages".into(), json!(partial_messages.len()));
+        p.insert("run_id".into(), json!(run.run_id.to_string()));
+        p.insert("error".into(), json!(run.error.to_string()));
+        p.insert("usage".into(), usage_payload(run.usage));
+        p.insert("partial_messages".into(), json!(run.partial_messages.len()));
         self.emit("run_error", p).await;
     }
 
@@ -428,7 +424,7 @@ impl ChatMiddleware for JsonTracer {
 mod tests {
     use super::*;
     use ailoop_core::testing::ScriptedModel;
-    use ailoop_core::{Message, RunConfig};
+    use ailoop_core::{Message, RunConfig, RunId, StepId};
     use ailoop_tools::ToolRegistry;
     use futures::StreamExt;
     use serde_json::Value;
@@ -463,7 +459,11 @@ mod tests {
         let step_id = StepId::new();
 
         tracer
-            .on_run_started(&run_id, &[Message::user("hi")], &RunConfig::default())
+            .on_run_started(&RunStartInfo::new(
+                &run_id,
+                &[Message::user("hi")],
+                &RunConfig::default(),
+            ))
             .await;
         tracer
             .on_before_tool_call(
@@ -479,15 +479,20 @@ mod tests {
             )
             .await;
         tracer
-            .on_chunk(&StreamChunk::HistoryCompacted {
-                run_id: run_id.clone(),
-                before_count: 12,
-                after_count: 4,
-                strategy: "truncate",
-            })
+            .on_chunk(&StreamChunk::history_compacted(
+                run_id.clone(),
+                12,
+                4,
+                "truncate",
+            ))
             .await;
         tracer
-            .on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
+            .on_run_finished(&RunFinishedInfo::new(
+                &run_id,
+                &FinishReason::EndTurn,
+                &Usage::default(),
+                &[],
+            ))
             .await;
 
         let lines = close_and_read(tracer, path);
@@ -667,8 +672,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ailoop_tools::ToolDyn for Echo {
-        fn name(&self) -> String {
-            "echo".into()
+        fn name(&self) -> &str {
+            "echo"
         }
         fn tool_definition(&self) -> ailoop_core::ToolDefinition {
             ailoop_core::ToolDefinition::new(
@@ -696,11 +701,11 @@ mod tests {
         let model = ScriptedModel::new([
             vec![
                 StreamChunk::ToolCallStarted {
-                    id: "toolu_1".into(),
+                    call_id: "toolu_1".into(),
                     name: "echo".into(),
                 },
                 StreamChunk::ToolCallFinished {
-                    id: "toolu_1".into(),
+                    call_id: "toolu_1".into(),
                     name: "echo".into(),
                     args: json!({}),
                 },
@@ -760,11 +765,11 @@ mod tests {
                     delta: format!("task{label}-msg{i}"),
                 })
                 .await;
-                t.on_chunk(&StreamChunk::StepStarted {
-                    run_id: run_id.clone(),
-                    step_id: step_id.clone(),
-                    iteration: i,
-                })
+                t.on_chunk(&StreamChunk::step_started(
+                    run_id.clone(),
+                    step_id.clone(),
+                    i,
+                ))
                 .await;
             }
         };
@@ -791,10 +796,11 @@ mod tests {
 
     #[test]
     fn aborted_payload_carries_detail_and_abort_kind() {
-        let payload = finish_reason_payload(&FinishReason::Aborted(AbortReason::ToolTerminated {
-            tool_name: "get_weather".into(),
-            reason: "loop".into(),
-        }));
+        let payload = finish_reason_payload(&FinishReason::Aborted(AbortReason::tool_terminated(
+            "get_weather",
+            "toolu_1",
+            "loop",
+        )));
         assert_eq!(
             payload,
             json!({
@@ -802,6 +808,7 @@ mod tests {
                 "detail": "loop",
                 "abort_kind": "tool_terminated",
                 "tool_name": "get_weather",
+                "call_id": "toolu_1",
             })
         );
 

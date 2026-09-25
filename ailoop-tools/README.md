@@ -11,7 +11,7 @@ Defines:
 - `ToolRegistry` — collects `Tool` impls, dispatches the
   model-requested invocations, returns typed errors.
 - `ToolTag` — capability declarations used by
-  `Conversation::with_capabilities` and the `ApprovalMiddleware`.
+  `ConversationBuilder::capabilities` and the `ApprovalMiddleware`.
 - `ToolJsonType` — derive-friendly JSON Schema fragment generator
   for tool parameter types.
 

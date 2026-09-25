@@ -43,11 +43,11 @@
 
 #![deny(missing_docs)]
 
-pub mod context;
-pub mod errors;
-pub mod registry;
-pub mod schema;
-pub mod timeout;
+mod context;
+mod errors;
+mod registry;
+mod schema;
+mod timeout;
 
 pub use context::{ToolActivation, ToolActivationError, ToolContext, UsageSink};
 pub use errors::ToolRegistryError;

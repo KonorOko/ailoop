@@ -32,8 +32,8 @@ struct GetWeather;
 
 #[async_trait]
 impl ToolDyn for GetWeather {
-    fn name(&self) -> String {
-        "get_weather".into()
+    fn name(&self) -> &str {
+        "get_weather"
     }
     fn tool_definition(&self) -> ToolDefinition {
         definition("get_weather")
@@ -51,8 +51,8 @@ struct Hang {
 
 #[async_trait]
 impl ToolDyn for Hang {
-    fn name(&self) -> String {
-        "hang".into()
+    fn name(&self) -> &str {
+        "hang"
     }
     fn tool_definition(&self) -> ToolDefinition {
         definition("hang")
@@ -86,7 +86,7 @@ impl ChatMiddleware for ToolResultChunks {
 
 fn call(id: &str, name: &str) -> StreamChunk {
     StreamChunk::ToolCallFinished {
-        id: id.into(),
+        call_id: id.into(),
         name: name.into(),
         args: json!({}),
     }
@@ -144,7 +144,7 @@ fn check_pairing(messages: &[Message]) -> Result<(), String> {
         let calls: Vec<&str> = blocks
             .iter()
             .filter_map(|b| match b {
-                AssistantBlock::ToolCall { id, .. } => Some(id.as_str()),
+                AssistantBlock::ToolCall { call_id: id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
@@ -201,7 +201,7 @@ async fn timeout_during_first_call_answers_both_calls() {
         assert_not_run(content, &AbortReason::Timeout(timeout).to_string());
     }
     assert_eq!(chunks.ids(), ["toolu_a", "toolu_b"]);
-    check_pairing(chat.history_messages()).unwrap();
+    check_pairing(chat.messages()).unwrap();
 }
 
 #[tokio::test]
@@ -233,7 +233,7 @@ async fn cancellation_during_first_call_answers_both_calls() {
         assert_not_run(content, "cancelled by caller");
     }
     assert_eq!(chunks.ids(), ["toolu_a", "toolu_b"]);
-    check_pairing(chat.history_messages()).unwrap();
+    check_pairing(chat.messages()).unwrap();
 }
 
 /// Streams one finished tool call, then never ends.
@@ -284,7 +284,7 @@ async fn abort_mid_stream_answers_finished_tool_calls() {
     assert_eq!(results[0].0, "toolu_a");
     assert!(results[0].1.is_error);
     assert_eq!(chunks.ids(), ["toolu_a"]);
-    check_pairing(chat.history_messages()).unwrap();
+    check_pairing(chat.messages()).unwrap();
 }
 
 /// Rejects a request whose history leaves a `tool_use` unanswered, the
@@ -341,7 +341,7 @@ async fn conversation_continues_after_terminate_mid_step() {
         outcome.finish_reason,
         FinishReason::Aborted(AbortReason::ToolTerminated { .. })
     ));
-    check_pairing(chat.history_messages()).unwrap();
+    check_pairing(chat.messages()).unwrap();
 
     let next = chat
         .run("go on")
