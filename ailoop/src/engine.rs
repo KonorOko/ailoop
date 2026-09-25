@@ -104,6 +104,60 @@ async fn fire_abort_hooks(
     chunk
 }
 
+/// Closes a step the run leaves part-way through. `tools_result` holds
+/// the results the step already has; each call in `unanswered` gets
+/// one too, in order, and its `ToolResult` chunk goes out through
+/// `on_chunk_mut` / `on_chunk` without any tool hook (the tool never
+/// ran). The step's results are stored, the run's messages committed,
+/// and the abort hooks fired. Returns the chunks to yield, with
+/// `RunFinished` last.
+#[allow(clippy::too_many_arguments)]
+async fn abort_step(
+    middlewares: &[Arc<dyn ChatMiddleware>],
+    run_id: &RunId,
+    step_id: &StepId,
+    reason: AbortReason,
+    usage: Usage,
+    run_msgs: &mut RunMessages<'_>,
+    mut tools_result: Vec<UserBlock>,
+    unanswered: impl IntoIterator<Item = PendingCall>,
+) -> Vec<StreamChunk> {
+    let mut chunks = Vec::new();
+    for call in unanswered {
+        let (id, content) = match call {
+            PendingCall::Run { id, .. } => (id, not_run_result(&reason)),
+            PendingCall::Rejected { id, content } => (id, content),
+        };
+        let mut chunk = StreamChunk::ToolResult {
+            run_id: run_id.clone(),
+            step_id: step_id.clone(),
+            call_id: id.clone(),
+            content: content.clone(),
+        };
+        for mw in middlewares {
+            mw.on_chunk_mut(&mut chunk).await;
+        }
+        for mw in middlewares {
+            mw.on_chunk(&chunk).await;
+        }
+        chunks.push(chunk);
+        tools_result.push(UserBlock::tool_result(id, content));
+    }
+    if !tools_result.is_empty() {
+        run_msgs.push(Message::User {
+            blocks: tools_result,
+        });
+    }
+    let new_messages = run_msgs.finish();
+    chunks.push(fire_abort_hooks(middlewares, run_id, reason, usage, new_messages).await);
+    chunks
+}
+
+/// The result recorded for a call the run was aborted before running.
+fn not_run_result(reason: &AbortReason) -> ToolResultContent {
+    ToolResultContent::error(format!("Tool not run: the run was aborted ({reason})"))
+}
+
 /// Turns an `Err` into a [`RunError`] carrying the run's usage so far
 /// and its completed steps, and fires `on_run_error` with both.
 macro_rules! bail_with_hooks {
@@ -605,11 +659,11 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         if !assistant_blocks.is_empty() {
                             run_msgs.push(Message::Assistant { blocks: assistant_blocks });
                         }
-                        let new_messages = run_msgs.finish();
-                        let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
+                        let chunks = abort_step(
+                            &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                            &mut run_msgs, Vec::new(), Vec::new(),
                         ).await;
-                        yield chunk;
+                        for chunk in chunks { yield chunk; }
                         return;
                     }
                 };
@@ -762,14 +816,11 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     }
                 }
                 if let Some(abort_reason) = abort_reason {
-                    if !tools_result.is_empty() {
-                        run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
-                    }
-                    let new_messages = run_msgs.finish();
-                    let chunk = fire_abort_hooks(
-                        &config.middlewares, &run_id, abort_reason, usage_run + delegated.total(), new_messages,
+                    let chunks = abort_step(
+                        &config.middlewares, &run_id, &step_id, abort_reason, usage_run + delegated.total(),
+                        &mut run_msgs, tools_result, Vec::new(),
                     ).await;
-                    yield chunk;
+                    for chunk in chunks { yield chunk; }
                     return;
                 }
 
@@ -779,14 +830,11 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 ).await {
                     Ok(d) => d,
                     Err(reason) => {
-                        if !tools_result.is_empty() {
-                            run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
-                        }
-                        let new_messages = run_msgs.finish();
-                        let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
+                        let chunks = abort_step(
+                            &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                            &mut run_msgs, tools_result, Vec::new(),
                         ).await;
-                        yield chunk;
+                        for chunk in chunks { yield chunk; }
                         return;
                     }
                 };
@@ -814,14 +862,11 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                             },
                             Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?,
                             Err(reason) => {
-                                if !tools_result.is_empty() {
-                                    run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
-                                }
-                                let new_messages = run_msgs.finish();
-                                let chunk = fire_abort_hooks(
-                                    &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
+                                let chunks = abort_step(
+                                    &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                                    &mut run_msgs, tools_result, Vec::new(),
                                 ).await;
-                                yield chunk;
+                                for chunk in chunks { yield chunk; }
                                 return;
                             }
                         }
@@ -830,15 +875,12 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         ToolResultContent::error(format!("Tool skipped: {reason}"))
                     },
                     ToolDecision::Terminate {reason} => {
-                        if !tools_result.is_empty() {
-                            run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
-                        }
-                        let new_messages = run_msgs.finish();
                         let reason = AbortReason::ToolTerminated { tool_name: name.clone(), reason };
-                        let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
+                        let chunks = abort_step(
+                            &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                            &mut run_msgs, tools_result, Vec::new(),
                         ).await;
-                        yield chunk;
+                        for chunk in chunks { yield chunk; }
                         return;
                     }
                     _ => ToolResultContent::error("unsupported ToolDecision variant"),
@@ -858,12 +900,11 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         // left it as) must land in history so the next
                         // assistant turn isn't missing a tool_result.
                         tools_result.push(UserBlock::tool_result(id.clone(), content.clone()));
-                        run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
-                        let new_messages = run_msgs.finish();
-                        let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
+                        let chunks = abort_step(
+                            &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                            &mut run_msgs, tools_result, Vec::new(),
                         ).await;
-                        yield chunk;
+                        for chunk in chunks { yield chunk; }
                         return;
                     }
                 }
@@ -877,12 +918,11 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         // history isn't left with a tool_call missing
                         // its tool_result on the next assistant turn.
                         tools_result.push(UserBlock::tool_result(id.clone(), content.clone()));
-                        run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
-                        let new_messages = run_msgs.finish();
-                        let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
+                        let chunks = abort_step(
+                            &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                            &mut run_msgs, tools_result, Vec::new(),
                         ).await;
-                        yield chunk;
+                        for chunk in chunks { yield chunk; }
                         return;
                     }
                 }
@@ -914,14 +954,11 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 ).await {
                     Ok(d) => d,
                     Err(reason) => {
-                        if !tools_result.is_empty() {
-                            run_msgs.push(Message::User { blocks: tools_result });
-                        }
-                        let new_messages = run_msgs.finish();
-                        let chunk = fire_abort_hooks(
-                            &config.middlewares, &run_id, reason, usage_run + delegated.total(), new_messages,
+                        let chunks = abort_step(
+                            &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
+                            &mut run_msgs, tools_result, Vec::new(),
                         ).await;
-                        yield chunk;
+                        for chunk in chunks { yield chunk; }
                         return;
                     }
                 };
