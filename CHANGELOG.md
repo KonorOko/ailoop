@@ -409,6 +409,13 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- The `Api` and `Provider` variants of `AnthropicError` and
+  `AzureOpenAIError` are `#[non_exhaustive]`, so the adapters can
+  surface more of the response later (a request id, the raw error
+  body) without another breaking change. Patterns outside the crate
+  need `..`, and code outside the crate can no longer build these
+  variants; the adapters are the only producers.
+
 - `AnthropicApiErrorKind::Api` is `AnthropicApiErrorKind::ServerError`,
   the name `AzureOpenAIApiErrorKind` already uses for the same case.
   It maps Anthropic's `api_error` (a generic server-side failure), but
@@ -873,6 +880,16 @@ and this project adheres to
 
 ### Migration
 
+Add `..` when destructuring adapter `Api` / `Provider` errors:
+
+```rust
+// Before (1.0.0-rc.3)
+AnthropicError::Api { status, kind, message, retry_after } => { /* ... */ }
+
+// After
+AnthropicError::Api { status, kind, message, retry_after, .. } => { /* ... */ }
+```
+
 Rename the Anthropic server-error kind:
 
 ```rust
@@ -916,7 +933,7 @@ Match the typed kind on Azure mid-stream errors:
 AzureOpenAIError::Provider { error_type, message } => { /* ... */ }
 
 // After
-AzureOpenAIError::Provider { kind, message } => { /* ... */ }
+AzureOpenAIError::Provider { kind, message, .. } => { /* ... */ }
 ```
 
 Rename `CompactionReport`:

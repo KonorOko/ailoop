@@ -94,6 +94,7 @@ pub enum AzureOpenAIError {
     /// `Retry-After` / `retry-after-ms` were inspected. `retry_after`
     /// is `None` when both headers were missing or unparseable.
     #[error("Azure OpenAI API error ({status}, {kind:?}): {message}")]
+    #[non_exhaustive]
     Api {
         /// HTTP status code returned by the API.
         status: StatusCode,
@@ -133,6 +134,7 @@ pub enum AzureOpenAIError {
     /// the event's `code` (or `type` when `code` is missing) with the
     /// same mapping as [`Api`](Self::Api).
     #[error("Azure OpenAI error event ({kind:?}): {message}")]
+    #[non_exhaustive]
     Provider {
         /// Typed category derived from the event payload.
         kind: AzureOpenAIApiErrorKind,

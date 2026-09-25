@@ -115,6 +115,7 @@ pub enum AnthropicError {
     /// and `Retry-After` was inspected. `retry_after` is `None` when the
     /// header was missing or unparseable.
     #[error("Anthropic API error ({status}, {kind:?}): {message}")]
+    #[non_exhaustive]
     Api {
         /// HTTP status code returned by the API.
         status: StatusCode,
@@ -153,6 +154,7 @@ pub enum AnthropicError {
     /// the typed `kind` lets callers (e.g. `RetryingModel<M>`) match on
     /// `AnthropicApiErrorKind::Overloaded` without parsing strings.
     #[error("Anthropic error event ({kind:?}): {message}")]
+    #[non_exhaustive]
     Provider {
         /// Typed category derived from the event payload.
         kind: AnthropicApiErrorKind,
