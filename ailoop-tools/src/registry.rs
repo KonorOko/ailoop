@@ -324,6 +324,21 @@ impl ToolRegistry {
         }
     }
 
+    /// Unregister every tool whose declared tags do **not** overlap with
+    /// `tags`, keeping only the matching ones in the catalog.
+    ///
+    /// Unlike [`deactivate_by_tags`](Self::deactivate_by_tags) this
+    /// removes the tools: they can no longer be dispatched or activated
+    /// at runtime. Tools with no declared tags are always removed; an
+    /// empty `tags` slice empties the registry. Kept tools keep their
+    /// active / inactive state.
+    pub fn retain_by_tags(&mut self, tags: &[ToolTag]) {
+        self.tools
+            .retain(|_, tool| tool.tool_definition().tags.iter().any(|t| tags.contains(t)));
+        let tools = &self.tools;
+        self.active_tools.retain(|name| tools.contains_key(name));
+    }
+
     /// Clear the active set. Every registered tool becomes inactive.
     pub fn deactivate_all(&mut self) {
         self.active_tools.clear();
@@ -534,5 +549,30 @@ mod tests {
         registry.activate_by_tags(&[ToolTag::ReadOnly, ToolTag::Network]);
 
         assert!(names(registry.active_tools()).is_empty());
+    }
+
+    #[test]
+    fn retain_by_tags_unregisters_non_matching() {
+        let mut registry = ToolRegistry::new();
+        for (name, tags) in [
+            ("fetch", vec![ToolTag::ReadOnly]),
+            ("rm", vec![ToolTag::Destructive]),
+            ("noop", vec![]),
+            ("lookup", vec![ToolTag::ReadOnly]),
+        ] {
+            registry
+                .register(Arc::new(TaggedTool { name, tags }))
+                .unwrap();
+        }
+        registry.deactivate_tool("lookup").unwrap();
+
+        registry.retain_by_tags(&[ToolTag::ReadOnly]);
+
+        assert_eq!(names(registry.all_tools()), vec!["fetch", "lookup"]);
+        assert_eq!(names(registry.active_tools()), vec!["fetch"]);
+        assert!(matches!(
+            registry.activate_tool("rm"),
+            Err(ToolRegistryError::NotFound(_))
+        ));
     }
 }
