@@ -97,10 +97,10 @@ pub struct SubAgentConfig {
     pub timeout: Option<Duration>,
     /// Cap on the number of provider turns inside the child run.
     /// Mapped to [`RunOptions::max_iterations`]. Hitting the cap
-    /// surfaces as
-    /// [`EngineError::MaxIterationsExceeded`](crate::EngineError::MaxIterationsExceeded),
-    /// which the wrapper renders as a `"sub-agent error: …"` text body
-    /// with `is_error: true`.
+    /// aborts the child with [`FinishReason::Aborted`], which the
+    /// wrapper renders as `"sub-agent aborted (agent loop exceeded max
+    /// iterations (n)): <partial text>"` with `is_error: true`, so
+    /// whatever the child wrote before the cap reaches the parent.
     pub max_iterations: Option<usize>,
     /// Per-turn `max_tokens` override for every [`ChatRequest`] the
     /// child run builds. Mapped to [`RunOptions::max_tokens`], so it
@@ -613,12 +613,12 @@ mod tests {
 
     /// `SubAgentConfig::max_iterations` per-call caps the child even when
     /// the child's [`ConversationBuilder`] would otherwise allow more
-    /// turns. With `max_iterations(0)`, the engine bails on the first
-    /// iteration check with [`EngineError::MaxIterationsExceeded`], which
-    /// the wrapper surfaces as `"sub-agent error: …"` + `is_error: true`.
+    /// turns. With `max_iterations(0)`, the engine aborts on the first
+    /// iteration check with [`AbortReason::MaxIterations`], which the
+    /// wrapper surfaces as `"sub-agent aborted: …"` + `is_error: true`.
     ///
     /// [`ConversationBuilder`]: crate::ConversationBuilder
-    /// [`EngineError::MaxIterationsExceeded`]: crate::EngineError::MaxIterationsExceeded
+    /// [`AbortReason::MaxIterations`]: ailoop_core::AbortReason::MaxIterations
     #[tokio::test]
     async fn sub_agent_config_max_iterations_caps_child() {
         // Child builder leaves max_iterations at the engine default
@@ -635,17 +635,63 @@ mod tests {
         let result = tool
             .call(json!({"prompt": "anything"}), &ToolContext::detached())
             .await;
-        let text = result
-            .as_text()
-            .expect("expected text body when max_iterations is exceeded");
-        assert!(
-            text.starts_with("sub-agent error:") && text.contains("max iterations"),
-            "expected max-iterations error body, got {text:?}"
+        assert_eq!(
+            result.as_text(),
+            Some("sub-agent aborted: agent loop exceeded max iterations (0)")
         );
         assert!(
             result.is_error,
             "max_iterations exceeded must mark is_error: true"
         );
+    }
+
+    /// A child that is still calling tools when it hits
+    /// `max_iterations` hands its partial text to the parent instead of
+    /// losing it behind an error.
+    #[tokio::test]
+    async fn sub_agent_max_iterations_preserves_partial_text() {
+        // The tool is not registered: the engine answers with an
+        // in-band "not found" result and keeps looping, which is all
+        // this test needs to reach the cap.
+        let tool_turn = vec![
+            StreamChunk::TextDelta {
+                delta: "found two candidates so far".into(),
+            },
+            StreamChunk::ToolCallStarted {
+                id: "toolu_1".into(),
+                name: "lookup".into(),
+            },
+            StreamChunk::ToolCallFinished {
+                id: "toolu_1".into(),
+                name: "lookup".into(),
+                args: json!({}),
+            },
+            StreamChunk::TurnFinished {
+                reason: FinishReason::ToolUse,
+                usage: Usage::default(),
+                service_tier: None,
+            },
+        ];
+        let model = ScriptedModel::new([tool_turn]);
+        let conv = Conversation::builder(model).build().expect("build");
+        let tool = SubAgentTool::with_config(
+            "delegate",
+            "delegate",
+            conv,
+            SubAgentConfig::new().max_iterations(1),
+        );
+
+        let result = tool
+            .call(json!({"prompt": "research"}), &ToolContext::detached())
+            .await;
+        assert_eq!(
+            result.as_text(),
+            Some(
+                "sub-agent aborted (agent loop exceeded max iterations (1)): \
+                 found two candidates so far"
+            )
+        );
+        assert!(result.is_error);
     }
 
     /// `SubAgentConfig::timeout` per-call aborts the child run. The

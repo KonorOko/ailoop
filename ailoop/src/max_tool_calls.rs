@@ -20,7 +20,8 @@ use tokio::sync::Mutex;
 ///
 /// On the (N+1)-th call the middleware returns
 /// [`ToolDecision::Terminate`], which the engine surfaces as
-/// [`FinishReason::Aborted`](ailoop_core::FinishReason::Aborted) while
+/// [`FinishReason::Aborted`](ailoop_core::FinishReason::Aborted)
+/// carrying [`AbortReason::ToolTerminated`](ailoop_core::AbortReason::ToolTerminated) while
 /// preserving any tool results already produced in the current step.
 /// Pair with [`crate::AntiLoop`] for content-aware repetition
 /// detection — the two are independent and compose.

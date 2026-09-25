@@ -155,11 +155,12 @@ pub enum HookAction {
     /// Default: let the run proceed.
     Continue,
     /// Abort the run before the first provider call. The engine
-    /// surfaces the reason as
-    /// [`crate::FinishReason::Aborted`]`(reason)` and still fires
+    /// surfaces it as [`crate::FinishReason::Aborted`] carrying
+    /// [`crate::AbortReason::Terminated`] and still fires
     /// [`ChatMiddleware::on_run_finished`].
     Terminate {
-        /// Human-readable reason; threaded through `FinishReason::Aborted`.
+        /// Human-readable reason; threaded through
+        /// [`crate::AbortReason::Terminated`].
         reason: String,
     },
 }
@@ -182,12 +183,14 @@ pub enum ToolDecision {
         reason: String,
     },
     /// Abort the run before executing this tool. The engine surfaces
-    /// the reason as [`crate::FinishReason::Aborted`]`(reason)` and
-    /// fires [`ChatMiddleware::on_run_finished`]; partial tool
+    /// it as [`crate::FinishReason::Aborted`] carrying
+    /// [`crate::AbortReason::ToolTerminated`] (with the tool's name)
+    /// and fires [`ChatMiddleware::on_run_finished`]; partial tool
     /// results from earlier tool calls in the same step are preserved
     /// in `new_messages`.
     Terminate {
-        /// Human-readable reason; threaded through `FinishReason::Aborted`.
+        /// Human-readable reason; threaded through
+        /// [`crate::AbortReason::ToolTerminated`].
         reason: String,
     },
 }

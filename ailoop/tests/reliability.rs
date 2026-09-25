@@ -12,8 +12,8 @@ use std::time::Duration;
 use ailoop::{Message, ToolDefinition, ToolResultContent, advanced::run_chat};
 use ailoop_core::testing::{ScriptedError, ScriptedModel};
 use ailoop_core::{
-    CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, HookAction,
-    RunConfig, RunId, StepId, StreamChunk, ToolDecision, Usage,
+    AbortReason, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason,
+    HookAction, RunConfig, RunId, StepId, StreamChunk, ToolDecision, Usage,
 };
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use async_trait::async_trait;
@@ -127,10 +127,7 @@ async fn timeout_aborts_run_during_chat_stream() {
 
     match run_finished(&chunks) {
         StreamChunk::RunFinished { reason, .. } => match reason {
-            FinishReason::Aborted(msg) => assert!(
-                msg.starts_with("timeout exceeded"),
-                "unexpected abort reason: {msg}"
-            ),
+            FinishReason::Aborted(AbortReason::Timeout(_)) => {}
             other => panic!("expected Aborted reason, got {other:?}"),
         },
         other => panic!("expected RunFinished, got {other:?}"),
@@ -157,7 +154,7 @@ async fn cancellation_aborts_run_externally() {
 
     match run_finished(&chunks) {
         StreamChunk::RunFinished { reason, .. } => match reason {
-            FinishReason::Aborted(msg) => assert_eq!(msg, "cancelled by caller"),
+            FinishReason::Aborted(AbortReason::Cancelled) => {}
             other => panic!("expected Aborted reason, got {other:?}"),
         },
         other => panic!("expected RunFinished, got {other:?}"),
@@ -199,7 +196,7 @@ async fn no_timeout_or_cancellation_leaves_run_unaffected() {
 async fn cancellation_wins_over_timeout_when_both_configured() {
     // Both fire essentially simultaneously, so the abort future's
     // `biased` ordering is what determines the winner. Cancel must win
-    // so callers can rely on the "cancelled by caller" reason.
+    // so callers can rely on `AbortReason::Cancelled`.
     let token = CancellationToken::new();
     token.cancel();
 
@@ -215,11 +212,8 @@ async fn cancellation_wins_over_timeout_when_both_configured() {
 
     match run_finished(&chunks) {
         StreamChunk::RunFinished { reason, .. } => match reason {
-            FinishReason::Aborted(msg) => assert_eq!(
-                msg, "cancelled by caller",
-                "expected cancellation to outrace timeout, got {msg}"
-            ),
-            other => panic!("expected Aborted reason, got {other:?}"),
+            FinishReason::Aborted(AbortReason::Cancelled) => {}
+            other => panic!("expected cancellation to outrace timeout, got {other:?}"),
         },
         other => panic!("expected RunFinished, got {other:?}"),
     }
@@ -336,10 +330,7 @@ async fn on_run_finished_fires_when_run_aborts_via_timeout() {
         "on_run_finished must fire exactly once on timeout abort"
     );
     match recorder.last_reason.lock().unwrap().as_ref() {
-        Some(FinishReason::Aborted(msg)) => assert!(
-            msg.starts_with("timeout exceeded"),
-            "unexpected reason: {msg}"
-        ),
+        Some(FinishReason::Aborted(AbortReason::Timeout(_))) => {}
         other => panic!("expected Aborted reason, got {other:?}"),
     }
 }
@@ -418,10 +409,7 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
 
     match run_finished(&chunks) {
         StreamChunk::RunFinished { reason, .. } => match reason {
-            FinishReason::Aborted(msg) => assert!(
-                msg.starts_with("timeout exceeded"),
-                "expected timeout reason, got {msg}"
-            ),
+            FinishReason::Aborted(AbortReason::Timeout(_)) => {}
             other => panic!("expected Aborted reason, got {other:?}"),
         },
         other => panic!("expected RunFinished, got {other:?}"),
@@ -552,7 +540,9 @@ async fn hook_action_terminate_still_fires_on_run_finished() {
 
     assert_eq!(recorder.finished.load(Ordering::SeqCst), 1);
     match recorder.last_reason.lock().unwrap().as_ref() {
-        Some(FinishReason::Aborted(r)) => assert_eq!(r, "no go"),
+        Some(FinishReason::Aborted(AbortReason::Terminated { reason })) => {
+            assert_eq!(reason, "no go")
+        }
         other => panic!("expected Aborted reason, got {other:?}"),
     }
 }

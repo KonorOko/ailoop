@@ -1,7 +1,7 @@
-//! Engine event vocabulary: [`StreamChunk`], [`FinishReason`], and
-//! [`Usage`].
+//! Engine event vocabulary: [`StreamChunk`], [`FinishReason`],
+//! [`AbortReason`], and [`Usage`].
 
-use std::{ops::Add, sync::Arc};
+use std::{fmt, ops::Add, sync::Arc, time::Duration};
 
 use crate::{Message, RunId, StepId, ToolResultContent};
 
@@ -221,16 +221,67 @@ pub enum FinishReason {
     StopSequence,
     /// Run was terminated outside the model: cancellation token,
     /// timeout, [`crate::HookAction::Terminate`], or
-    /// [`crate::ToolDecision::Terminate`]. The string carries a
-    /// human-readable reason (`"cancelled by caller"`,
-    /// `"timeout: ..."`, the middleware-supplied `reason`, etc.).
-    /// The engine guarantees this is the *only* finish reason ever
-    /// surfaced for caller-initiated stops — `Err` results are
-    /// reserved for transport errors.
-    Aborted(String),
+    /// [`crate::ToolDecision::Terminate`]. The [`AbortReason`] says
+    /// which one; match on its variants instead of parsing the
+    /// [`Display`](fmt::Display) text. The engine guarantees this is
+    /// the *only* finish reason ever surfaced for caller-initiated
+    /// stops — `Err` results are reserved for transport errors.
+    Aborted(AbortReason),
     /// Provider reported a finish reason the adapter did not map to
     /// one of the typed variants. Treat as terminal.
     Other(String),
+}
+
+/// Why the engine aborted a run, carried by [`FinishReason::Aborted`].
+///
+/// The [`Display`](fmt::Display) impl renders a human-readable
+/// message (`"cancelled by caller"`, `"timeout exceeded after 5s"`, or
+/// the middleware-supplied reason verbatim) suitable for logs or for
+/// feeding back to a parent model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AbortReason {
+    /// [`crate::RunConfig::timeout`] elapsed. Carries the configured
+    /// timeout.
+    Timeout(Duration),
+    /// [`crate::RunConfig::cancellation`] fired. Cancellation wins
+    /// over a timeout that fires at the same instant.
+    Cancelled,
+    /// A middleware returned [`crate::HookAction::Terminate`] from
+    /// [`crate::ChatMiddleware::on_run_started`].
+    Terminated {
+        /// The middleware-supplied reason.
+        reason: String,
+    },
+    /// A middleware returned [`crate::ToolDecision::Terminate`] from
+    /// [`crate::ChatMiddleware::on_before_tool_call`] (e.g. `AntiLoop`
+    /// or `MaxToolCalls`).
+    ToolTerminated {
+        /// Name of the tool whose call was refused.
+        tool_name: String,
+        /// The middleware-supplied reason.
+        reason: String,
+    },
+    /// The run reached [`crate::RunConfig::max_iterations`] while the
+    /// model was still requesting tools. Carries the configured cap.
+    /// Messages produced up to that point (including every tool
+    /// result) are kept in `new_messages`.
+    MaxIterations(usize),
+}
+
+impl fmt::Display for AbortReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AbortReason::Timeout(d) => write!(f, "timeout exceeded after {d:?}"),
+            AbortReason::Cancelled => f.write_str("cancelled by caller"),
+            AbortReason::Terminated { reason } | AbortReason::ToolTerminated { reason, .. } => {
+                f.write_str(reason)
+            }
+            AbortReason::MaxIterations(n) => {
+                write!(f, "agent loop exceeded max iterations ({n})")
+            }
+        }
+    }
 }
 
 /// Token counters reported by the provider for a turn.
@@ -308,5 +359,38 @@ impl std::ops::AddAssign for Usage {
         self.cache_creation_5m_tokens += other.cache_creation_5m_tokens;
         self.cache_creation_1h_tokens += other.cache_creation_1h_tokens;
         self.reasoning_tokens += other.reasoning_tokens;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abort_reason_display_preserves_legacy_texts() {
+        assert_eq!(
+            AbortReason::Timeout(Duration::from_millis(50)).to_string(),
+            "timeout exceeded after 50ms"
+        );
+        assert_eq!(AbortReason::Cancelled.to_string(), "cancelled by caller");
+        assert_eq!(
+            AbortReason::Terminated {
+                reason: "policy".into()
+            }
+            .to_string(),
+            "policy"
+        );
+        assert_eq!(
+            AbortReason::ToolTerminated {
+                tool_name: "search".into(),
+                reason: "loop detected".into()
+            }
+            .to_string(),
+            "loop detected"
+        );
+        assert_eq!(
+            AbortReason::MaxIterations(5).to_string(),
+            "agent loop exceeded max iterations (5)"
+        );
     }
 }

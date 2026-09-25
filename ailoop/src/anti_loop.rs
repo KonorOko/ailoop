@@ -70,9 +70,10 @@ struct Inner {
 /// On detection the middleware returns
 /// [`ToolDecision::Terminate`](ailoop_core::ToolDecision::Terminate)
 /// from `on_before_tool_call`, which the engine surfaces as
-/// `FinishReason::Aborted(_)` while preserving any tool results already
-/// produced in the current step. `Skip` is deliberately not used: a
-/// skip would feed an error back to the model, leaving the loop intact.
+/// `FinishReason::Aborted(AbortReason::ToolTerminated { .. })` while
+/// preserving any tool results already produced in the current step.
+/// `Skip` is deliberately not used: a skip would feed an error back to
+/// the model, leaving the loop intact.
 ///
 /// The text detector relies on `on_before_tool_call` as its
 /// termination point, so a pure text-only run with no tool calls cannot

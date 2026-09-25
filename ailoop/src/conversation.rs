@@ -44,8 +44,9 @@ pub const DEFAULT_HISTORY_MAX_TOKENS: usize = 100_000;
 /// exactly once.
 ///
 /// **Aborts are not errors.** [`RunConfig::cancellation`] firing,
-/// [`RunConfig::timeout`] elapsing, and middleware/tool returning
-/// `Terminate` all surface as `Ok(_)` carrying
+/// [`RunConfig::timeout`] elapsing, [`RunConfig::max_iterations`]
+/// being reached, and middleware/tool returning `Terminate` all
+/// surface as `Ok(_)` carrying
 /// [`FinishReason::Aborted`] — never as `Err(EngineError::_)`. Only
 /// model / tool-registry / context errors produce an `Err`. See
 /// [`EngineError`] for the failure surface.
@@ -74,7 +75,7 @@ pub struct RunOutcome {
     /// the `tracing` feature is on) with the outcome.
     pub run_id: RunId,
     /// How the run ended. Aborts (cancellation, timeout,
-    /// hook/tool `Terminate`) surface as
+    /// `max_iterations`, hook/tool `Terminate`) surface as
     /// [`FinishReason::Aborted`](ailoop_core::FinishReason::Aborted) —
     /// they do **not** become `Err`.
     pub finish_reason: FinishReason,
@@ -126,8 +127,10 @@ pub struct RunOptions {
     /// without affecting siblings sharing the parent.
     pub cancellation: Option<CancellationToken>,
     /// Maximum number of provider turns before the engine aborts with
-    /// [`EngineError::MaxIterationsExceeded`](crate::EngineError::MaxIterationsExceeded).
-    /// `None` keeps the engine default. Override per-run when a
+    /// [`ailoop_core::FinishReason::Aborted`] carrying
+    /// [`ailoop_core::AbortReason::MaxIterations`] — **never** an `Err`;
+    /// the partial turns are kept in history. `None` keeps the engine
+    /// default. Override per-run when a
     /// particular agentic task is known to be longer-running than the
     /// default would allow.
     pub max_iterations: Option<usize>,
@@ -1912,7 +1915,7 @@ mod tests {
 
     /// A token pre-cancelled before `stream_with_options` is awaited
     /// aborts the run at the first await boundary. The outcome is
-    /// `FinishReason::Aborted("cancelled by caller")` — never `Err`.
+    /// `FinishReason::Aborted(AbortReason::Cancelled)` — never `Err`.
     #[tokio::test]
     async fn run_options_cancellation_aborts_run() {
         let mut chat = Conversation::builder(one_turn_model())
@@ -1929,10 +1932,7 @@ mod tests {
 
         match outcome.finish_reason {
             FinishReason::Aborted(ref reason) => {
-                assert!(
-                    reason.contains("cancelled by caller"),
-                    "unexpected abort reason: {reason}"
-                );
+                assert_eq!(*reason, ailoop_core::AbortReason::Cancelled);
             }
             other => panic!("expected Aborted, got {other:?}"),
         }

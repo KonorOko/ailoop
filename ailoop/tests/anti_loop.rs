@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use ailoop::{AntiLoop, Message, ToolDefinition, ToolResultContent, advanced::run_chat};
 use ailoop_core::testing::ScriptedModel;
-use ailoop_core::{FinishReason, RunConfig, StreamChunk, Usage};
+use ailoop_core::{AbortReason, FinishReason, RunConfig, StreamChunk, Usage};
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -90,7 +90,11 @@ async fn tool_call_loop_aborts_on_third_identical_call() {
 
     let reason = collect_finish_reason(model, mw).await;
     match reason {
-        FinishReason::Aborted(r) => {
+        FinishReason::Aborted(AbortReason::ToolTerminated {
+            tool_name,
+            reason: r,
+        }) => {
+            assert_eq!(tool_name, "get_weather");
             assert!(
                 r.starts_with("anti-loop: tool 'get_weather' called"),
                 "got: {r}"
@@ -159,7 +163,7 @@ async fn text_loop_aborts_after_three_identical_turns() {
 
     let reason = collect_finish_reason(model, mw).await;
     match reason {
-        FinishReason::Aborted(r) => {
+        FinishReason::Aborted(AbortReason::ToolTerminated { reason: r, .. }) => {
             assert!(
                 r.starts_with("anti-loop: assistant text repeated identically across"),
                 "got: {r}"
@@ -191,7 +195,9 @@ async fn state_clears_between_runs_so_second_run_re_arms() {
         ScriptedModel::new((0..3).map(|i| tool_turn(&format!("toolu2_{i}"), json!({}), None)));
     let reason2 = collect_finish_reason(model2, mw).await;
     match reason2 {
-        FinishReason::Aborted(r) => assert!(r.contains("3 times"), "got: {r}"),
+        FinishReason::Aborted(AbortReason::ToolTerminated { reason: r, .. }) => {
+            assert!(r.contains("3 times"), "got: {r}")
+        }
         other => panic!("expected Aborted on second run, got {other:?}"),
     }
 }
@@ -236,7 +242,7 @@ async fn custom_text_predicate_starts_with_fires() {
 
     let reason = collect_finish_reason(model, mw).await;
     match reason {
-        FinishReason::Aborted(r) => assert!(
+        FinishReason::Aborted(AbortReason::ToolTerminated { reason: r, .. }) => assert!(
             r.starts_with("anti-loop: assistant text repeated identically across"),
             "got: {r}"
         ),
@@ -279,7 +285,7 @@ async fn custom_tool_call_identity_collapses_cosmetic_variation() {
 
     let reason = collect_finish_reason(model, mw).await;
     match reason {
-        FinishReason::Aborted(r) => {
+        FinishReason::Aborted(AbortReason::ToolTerminated { reason: r, .. }) => {
             assert!(
                 r.starts_with("anti-loop: tool 'get_weather' with identity '"),
                 "reason should surface the identity prefix, got: {r}"
@@ -312,7 +318,7 @@ async fn default_tool_call_identity_preserves_legacy_reason() {
 
     let reason = collect_finish_reason(model, mw).await;
     match reason {
-        FinishReason::Aborted(r) => {
+        FinishReason::Aborted(AbortReason::ToolTerminated { reason: r, .. }) => {
             assert!(
                 r.starts_with("anti-loop: tool 'get_weather' called"),
                 "default path must keep its reason wording, got: {r}"
@@ -351,7 +357,7 @@ async fn custom_tool_call_identity_change_resets_streak() {
 
     let reason = collect_finish_reason(model, mw).await;
     match reason {
-        FinishReason::Aborted(r) => {
+        FinishReason::Aborted(AbortReason::ToolTerminated { reason: r, .. }) => {
             assert!(
                 r.contains("get_weather|/c"),
                 "the firing identity should be the repeated one, got: {r}"

@@ -10,7 +10,8 @@ use std::time::Duration;
 use ailoop::{Conversation, History, Message, ToolDefinition, ToolResultContent};
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{
-    AssistantBlock, CancellationToken, FinishReason, RunConfig, StreamChunk, ToolTag, Usage,
+    AbortReason, AssistantBlock, CancellationToken, FinishReason, RunConfig, StreamChunk, ToolTag,
+    Usage,
 };
 use ailoop_tools::{ToolContext, ToolDyn};
 use async_trait::async_trait;
@@ -196,7 +197,7 @@ async fn run_returns_ok_with_aborted_finish_reason_on_timeout() {
     let outcome = chat.run("hi").await.expect("aborted run is not Err");
 
     match &outcome.finish_reason {
-        FinishReason::Aborted(reason) => assert_eq!(reason, "policy"),
+        FinishReason::Aborted(AbortReason::Terminated { reason }) => assert_eq!(reason, "policy"),
         other => panic!("expected Aborted, got {other:?}"),
     }
     assert!(
