@@ -10,6 +10,17 @@ and this project adheres to
 
 ### Added
 
+- `ConversationBuilder::max_iterations(n)`: a default iteration cap for
+  every run of a conversation, like `ConversationBuilder::max_tokens`.
+  Before, the only way to change the cap was per run with
+  `RunOptions::max_iterations`, so keeping one value meant passing it on
+  every call. Precedence, highest first: `RunOptions::max_iterations`
+  (and `SubAgentConfig::max_iterations`, which maps to it) > the builder
+  default > the engine default (25). The resolved value is what
+  `RunConfig::max_iterations` carries, so `on_run_started` observers and
+  `JsonTracer` see the cap in effect. On a sub-agent's child
+  conversation, it sets the child's default cap.
+
 - `ToolCallInfo` (re-exported from `ailoop`): the identity of one tool
   call, passed to every tool hook of `ChatMiddleware`. Public fields
   `run_id`, `step_id`, `call_id` (the provider-assigned id, the same as
@@ -371,6 +382,20 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `RunConfig::default().max_iterations` is now 25 (was 10). One
+  iteration is one model turn plus the tool calls it triggers. Every
+  `ContinueDecision::Continue` from `on_turn_end` also counts, and a
+  sub-agent's wrap-up uses the last iteration. So 10 ran out on
+  ordinary agent tasks (read, search, edit, verify). The run then
+  ended with `Ok` / `FinishReason::Aborted(AbortReason::MaxIterations(10))`,
+  which is easy to miss. The new default applies to every run that
+  does not set a cap, including `SubAgentTool` children with no
+  `SubAgentConfig::max_iterations`. It is a safety brake, not a
+  budget. Without a token or cost cap, the worst-case run of a caller
+  who relies on the default is now 2.5× longer. In production, set
+  `max_iterations` explicitly, together with `timeout` and
+  `MaxToolCalls`.
+
 - The four tool hooks of `ChatMiddleware` take a `&ToolCallInfo` in
   place of `run_id, step_id, name`: `on_before_tool_call(call, args)`,
   `on_before_tool_call_mut(call, args)`,
@@ -627,6 +652,22 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+To keep the old cap of 10 iterations, set it explicitly:
+
+```rust
+// Every run of a conversation (also a sub-agent's child)
+let chat = Conversation::builder(model).max_iterations(10).build()?;
+
+// Per run
+chat.run_with_options(input, RunOptions::new().max_iterations(10)).await?;
+
+// Engine entry point
+let config = RunConfig { max_iterations: 10, ..Default::default() };
+
+// Sub-agent children
+SubAgentTool::with_config(name, description, child, SubAgentConfig::new().max_iterations(10));
+```
 
 Tool hooks take a `&ToolCallInfo`; read the run, step, call id and
 tool name from its fields:
