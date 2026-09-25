@@ -844,9 +844,13 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// Run `callback` before every Destructive or WritesFiles tool call;
     /// the callback's [`ToolDecision`] is forwarded to the engine.
     ///
-    /// Tool name resolution happens at `build()` time and respects the
-    /// capability filter, so untagged or filtered-out tools never trigger
-    /// the callback.
+    /// Tool name resolution happens at `build()` time over the **whole
+    /// registered catalog**, not just the initial active set. Tools that
+    /// start deferred (via [`initial_active_tools`](Self::initial_active_tools))
+    /// or filtered out by [`with_capabilities`](Self::with_capabilities)
+    /// are still gated if a handler activates them mid-run with
+    /// [`ToolContext::tools`](ailoop_tools::ToolContext::tools). Untagged
+    /// tools never trigger the callback.
     ///
     /// [`ToolDecision`]: ailoop_core::ToolDecision
     pub fn with_approval<F, Fut>(self, callback: F) -> Self
@@ -860,6 +864,10 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// Same as [`with_approval`](Self::with_approval) but with a custom
     /// tag set. The callback fires for tool calls whose declared tags
     /// overlap with `tags`. Pass an empty slice to disable the gate.
+    ///
+    /// As with [`with_approval`](Self::with_approval), the gated set is
+    /// resolved over every registered tool, so deferred and
+    /// capability-filtered tools activated at runtime are covered too.
     pub fn with_approval_for_tags<F, Fut>(mut self, tags: &[ToolTag], callback: F) -> Self
     where
         F: Fn(String, serde_json::Value) -> Fut + Send + Sync + 'static,
@@ -1046,9 +1054,10 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// 4. If any [`with_approval*`](Self::with_approval) variant was
     ///    called, an internal `ApprovalMiddleware` is appended after
     ///    the system-prompt one. Tool-name resolution for the
-    ///    capability-tag form happens here, *after* the capability
-    ///    filter has shrunk the active tool set, so untagged or
-    ///    filtered-out tools never trigger the gate.
+    ///    capability-tag form happens here, over the whole registered
+    ///    catalog (active and inactive tools alike), so a deferred or
+    ///    capability-filtered tool activated mid-run is still gated.
+    ///    Untagged tools never trigger it.
     ///
     /// Within the `RequestDefaultsMiddleware` itself, per-field
     /// defaults are applied first and the
@@ -1101,8 +1110,13 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             let approval_mw = match spec.tags {
                 None => ApprovalMiddleware::from_parts_all(spec.callback),
                 Some(tags) => {
+                    // Resolve over the whole catalog, not just the
+                    // initial active set: deferred and
+                    // capability-filtered tools can be activated
+                    // mid-run via `ctx.tools().activate(...)` and must
+                    // still hit the gate.
                     let names: HashSet<String> = tools
-                        .active_tools()
+                        .all_tools()
                         .filter(|tool| {
                             tool.tool_definition()
                                 .tags
@@ -1384,10 +1398,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capabilities_filter_runs_before_approval_resolution() {
-        // delete_file is filtered out by capabilities; the approval gate
-        // should not register it as a gated name (and the dispatch
-        // wouldn't reach it anyway because the engine wouldn't expose it).
+    async fn approval_gate_covers_capability_filtered_tools() {
+        // delete_file is filtered out by capabilities, so it starts
+        // inactive — but it stays in the catalog and a handler can
+        // activate it mid-run via `ctx.tools().activate(...)`. The
+        // approval gate is resolved over the whole catalog, so it must
+        // still fire for it.
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_cb = counter.clone();
         let chat = Conversation::builder(MockModel)
@@ -1410,13 +1426,16 @@ mod tests {
             .build()
             .unwrap();
 
-        // delete_file is inactive (filtered out), so even if dispatched
-        // the approval gate wouldn't have it in its set.
+        assert_eq!(chat.active_tool_names(), vec!["list_dir".to_string()]);
+
+        dispatch_through_chain(&chat, "list_dir", &json!({})).await;
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+
         dispatch_through_chain(&chat, "delete_file", &json!({})).await;
         assert_eq!(
             counter.load(Ordering::SeqCst),
-            0,
-            "filtered-out tool should not be in approval gate"
+            1,
+            "capability-filtered tool must still be gated"
         );
     }
 

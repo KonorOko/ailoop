@@ -231,6 +231,16 @@ impl ToolRegistry {
             .map(|(_, tool)| tool)
     }
 
+    /// Iterate over every registered tool (active + inactive), in
+    /// registration order. This is the full catalog a handler can
+    /// reach through [`ToolActivation::activate`](crate::ToolActivation::activate),
+    /// so anything that must hold for every tool the run could
+    /// dispatch (approval gating, auditing) should be computed over it
+    /// rather than over [`active_tools`](Self::active_tools).
+    pub fn all_tools(&self) -> impl Iterator<Item = &Arc<dyn ToolDyn>> {
+        self.tools.values()
+    }
+
     /// Register `tool` and mark it active. Returns
     /// [`ToolRegistryError::AlreadyRegistered`] when a tool with the
     /// same wire name is already present — names are unique across

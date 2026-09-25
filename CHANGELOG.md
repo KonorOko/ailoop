@@ -10,6 +10,11 @@ and this project adheres to
 
 ### Added
 
+- `ToolRegistry::all_tools()`: iterate over every registered tool,
+  active and inactive, in registration order. It is the catalog a
+  handler can reach with `ToolActivation::activate`, so policies that
+  must cover every tool a run could dispatch (like approval gating)
+  should be computed over it rather than over `active_tools()`.
 - `ChatMiddleware::on_turn_end` and `ContinueDecision` (re-exported
   from `ailoop`): native support for the "completion gate" pattern.
   When the model ends a turn with no tool calls to run, the engine
@@ -308,6 +313,23 @@ and this project adheres to
     model.
 
 ### Fixed
+
+- **Security:** the approval gate from
+  `ConversationBuilder::with_approval` / `with_approval_for_tags` no
+  longer lets deferred tools run unapproved. The set of gated tool
+  names was resolved at `build()` time from the *initial active set*
+  only, so a `Destructive` / `WritesFiles` tool that started inactive
+  (via `initial_active_tools`, or filtered out by `with_capabilities`)
+  and was later activated by a handler with `ctx.tools().activate(...)`
+  (the `search_tools` pattern) executed without ever reaching the
+  approval callback — a `Skip` / `Terminate` policy for destructive
+  actions was silently bypassed. The gated set is now resolved over
+  the whole registered catalog, so the callback fires for those tools
+  exactly as for tools active from the start. `with_approval_for_all`
+  and `ApprovalMiddleware::for_named` were not affected. **Behavior
+  change:** tools filtered out by `with_capabilities` now also go
+  through the callback if they get activated; previously the docs
+  stated they never triggered it.
 
 - The `StreamChunk::HistoryCompacted` that `Conversation` emits for
   the compaction before a run now also passes through
