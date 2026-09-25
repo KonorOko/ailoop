@@ -107,6 +107,19 @@ and this project adheres to
   renders empty, the user's prompt reaches the model untouched. User
   middlewares still do not observe the builder prompt in
   `on_chat_request`, since it is assembled after them.
+- `RunOptions::max_tokens` and `SubAgentConfig::max_tokens` are no
+  longer silently ignored when the conversation was built with
+  `ConversationBuilder::max_tokens`. The builder default used to be
+  applied by the internal request-defaults middleware, which overwrote
+  `req.max_tokens` unconditionally on every request, so the per-call
+  override always lost. **Behavior change:** the effective cap is now
+  resolved before the run starts with the precedence `RunOptions` >
+  builder > engine default (4096); a user middleware rewriting
+  `req.max_tokens` in `on_chat_request` still wins over all of them.
+  Callers that passed both and relied on the builder value winning
+  must drop the per-call override. Because the resolved value is what
+  `RunConfig::max_tokens` carries, `JsonTracer`'s `run_started` event
+  now reports the cap actually sent instead of the engine default.
 
 ### Migration
 
