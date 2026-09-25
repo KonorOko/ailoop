@@ -279,11 +279,41 @@ impl History {
     /// [`CompactionStrategy`]: crate::CompactionStrategy
     /// [`StreamChunk::HistoryCompacted`]: ailoop_core::StreamChunk::HistoryCompacted
     pub async fn compact_if_needed(&mut self) -> Result<Option<CompactionReport>, CompactionError> {
-        let threshold = self.max_tokens.saturating_sub(self.reserved_tokens);
-        if self.estimated_tokens() < threshold {
+        if !self.needs_compaction() {
             return Ok(None);
         }
+        self.force_compact().await.map(Some)
+    }
 
+    /// Whether [`estimated_tokens`](Self::estimated_tokens) has reached
+    /// the effective budget, `max_tokens - reserved_tokens` (saturating
+    /// at zero). This is the check
+    /// [`compact_if_needed`](Self::compact_if_needed) runs before
+    /// invoking the strategy.
+    pub fn needs_compaction(&self) -> bool {
+        let threshold = self.max_tokens.saturating_sub(self.reserved_tokens);
+        self.estimated_tokens() >= threshold
+    }
+
+    /// Run the configured [`CompactionStrategy`] unconditionally,
+    /// ignoring the token budget.
+    ///
+    /// Use it when the estimate said the history fits but the provider
+    /// disagreed — for example after a context-window overflow error,
+    /// which is how `Conversation` recovers from one. Returns the same
+    /// [`CompactionReport`] as
+    /// [`compact_if_needed`](Self::compact_if_needed) and the same
+    /// errors, including [`CompactionError::NotEnoughHistory`] when the
+    /// history is no longer than `preserve_n_last`.
+    ///
+    /// The strategy may be unable to shrink the history even when it
+    /// succeeds (every message before the preserved tail is pinned, or
+    /// the tail itself is what does not fit); compare
+    /// [`estimated_tokens`](Self::estimated_tokens) before and after
+    /// when that matters.
+    ///
+    /// [`CompactionStrategy`]: crate::CompactionStrategy
+    pub async fn force_compact(&mut self) -> Result<CompactionReport, CompactionError> {
         let before = self.messages.len();
         let output = self
             .strategy
@@ -298,11 +328,38 @@ impl History {
         let strategy = self.strategy.name();
         self.messages = output.messages;
         self.pinned = output.pinned;
-        Ok(Some(CompactionReport {
+        Ok(CompactionReport {
             before,
             after,
             strategy,
-        }))
+        })
+    }
+
+    /// Replace the whole history with `messages` and the parallel pin
+    /// mask `pinned`, keeping the budget, strategy and tokenizer. The
+    /// two vectors must have the same length; otherwise a
+    /// [`FromMessagesError::LengthMismatch`] is returned and the
+    /// history is left untouched.
+    ///
+    /// The in-place counterpart of [`History::from_messages`]: restore
+    /// a previously captured state (e.g. roll back a failed run, or
+    /// load a [`ConversationSnapshot`] into a live history).
+    ///
+    /// [`ConversationSnapshot`]: crate::ConversationSnapshot
+    pub fn replace_messages(
+        &mut self,
+        messages: Vec<Message>,
+        pinned: Vec<bool>,
+    ) -> Result<(), FromMessagesError> {
+        if messages.len() != pinned.len() {
+            return Err(FromMessagesError::LengthMismatch {
+                messages: messages.len(),
+                pinned: pinned.len(),
+            });
+        }
+        self.messages = messages;
+        self.pinned = pinned;
+        Ok(())
     }
 }
 
@@ -675,6 +732,60 @@ mod tests {
                 Err(CompactionError::NotEnoughHistory)
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn force_compact_runs_strategy_under_budget() {
+        let mut mgr = five_messages(History::builder(10_000));
+        assert!(!mgr.needs_compaction());
+        assert!(mgr.compact_if_needed().await.unwrap().is_none());
+
+        let report = mgr.force_compact().await.expect("strategy should run");
+        assert_eq!((report.before, report.after), (5, 2));
+        assert_eq!(mgr.messages().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn force_compact_reports_not_enough_history() {
+        let mut mgr = History::builder(10_000).preserve_n_last(4).build();
+        mgr.add_message(Message::user("only"));
+        assert!(matches!(
+            mgr.force_compact().await,
+            Err(CompactionError::NotEnoughHistory)
+        ));
+        assert_eq!(mgr.messages().len(), 1, "history untouched on error");
+    }
+
+    #[test]
+    fn needs_compaction_honours_reserved_tokens() {
+        assert!(!five_messages(History::builder(60)).needs_compaction());
+        assert!(five_messages(History::builder(60).reserved_tokens(15)).needs_compaction());
+    }
+
+    #[test]
+    fn replace_messages_swaps_history_and_pin_mask() {
+        let mut mgr = five_messages(History::builder(60));
+        mgr.replace_messages(
+            vec![Message::user("a"), Message::assistant_text("b")],
+            vec![true, false],
+        )
+        .expect("equal lengths");
+        assert_eq!(mgr.messages().len(), 2);
+        assert_eq!(mgr.pinned(), &[true, false]);
+    }
+
+    #[test]
+    fn replace_messages_rejects_length_mismatch() {
+        let mut mgr = five_messages(History::builder(60));
+        let result = mgr.replace_messages(vec![Message::user("solo")], vec![]);
+        assert_eq!(
+            result,
+            Err(FromMessagesError::LengthMismatch {
+                messages: 1,
+                pinned: 0,
+            })
+        );
+        assert_eq!(mgr.messages().len(), 5, "history untouched on error");
     }
 
     #[tokio::test]

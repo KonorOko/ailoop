@@ -1,16 +1,17 @@
 use ailoop_core::{
     AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason,
-    Message, ReasoningEffort, RunConfig, RunId, StreamChunk, ToolChoice, ToolTag, Usage,
+    Message, ProviderError, ReasoningEffort, RunConfig, RunId, StreamChunk, ToolChoice, ToolTag,
+    Usage,
 };
 use ailoop_history::{ConversationSnapshot, History, HistoryBuilder};
 use ailoop_prompts::{Prompt, PromptSection};
 use ailoop_tools::{ToolDyn, ToolRegistry};
 use futures::{Stream, StreamExt, stream::BoxStream};
 use serde_json::Value;
-use std::{collections::HashSet, path::Path, sync::Arc, task::Poll, time::Duration};
+use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
 
 use crate::{
-    engine::run_chat,
+    engine::{ContextOptions, run_with_history},
     errors::{BuildError, EngineError},
     middleware::{
         ApprovalCallback, ApprovalMiddleware, RequestDefaults, RequestDefaultsMiddleware,
@@ -62,6 +63,7 @@ pub struct Conversation<M: CompletionModel> {
     tools: ToolRegistry,
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
     max_tokens: Option<u32>,
+    context_options: ContextOptions,
 }
 
 /// Summary of a completed (or aborted) run, returned by
@@ -200,7 +202,11 @@ impl RunOptions {
     }
 }
 
-impl<M: CompletionModel + Send + Sync> Conversation<M> {
+impl<M> Conversation<M>
+where
+    M: CompletionModel + Send + Sync,
+    M::Error: ProviderError,
+{
     /// Start a [`ConversationBuilder`] for `model`. Equivalent to
     /// [`ConversationBuilder::new(model)`](ConversationBuilder::new) and
     /// is the canonical entry point — most code should never call
@@ -377,9 +383,18 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
     /// fully drained.
     ///
     /// If [`History::compact_if_needed`] fires before the
-    /// engine starts a [`StreamChunk::HistoryCompacted`] is yielded as
+    /// engine starts, a [`StreamChunk::HistoryCompacted`] is yielded as
     /// the first chunk, carrying the same [`RunId`] every subsequent
-    /// engine chunk uses.
+    /// engine chunk uses. Compactions during the run
+    /// ([`ConversationBuilder::compact_between_iterations`],
+    /// [`ConversationBuilder::recover_from_context_overflow`]) are
+    /// reported the same way, in stream order.
+    ///
+    /// The history is updated in place while the run proceeds and
+    /// committed on `RunFinished`. If the run ends in `Err`, or the
+    /// stream is dropped before `RunFinished`, the history is rolled
+    /// back to its state right after the kickoff was added (and the
+    /// pre-run compaction, if any, ran).
     pub async fn stream(
         &mut self,
         input: impl Into<Message>,
@@ -413,7 +428,6 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
         self.history.add_message(msg);
         let report = self.history.compact_if_needed().await?;
 
-        let snapshot = self.history.messages().to_vec();
         let run_id = options.run_id.unwrap_or_default();
 
         let mut config = RunConfig::default();
@@ -428,11 +442,18 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
             config.max_tokens = n;
         }
 
-        let inner = run_chat(&self.model, snapshot, &self.tools, config).await?;
+        let inner = run_with_history(
+            &self.model,
+            &mut self.history,
+            &self.tools,
+            config,
+            self.context_options,
+            M::Error::is_context_overflow,
+        );
 
         let prelude: BoxStream<'_, Result<StreamChunk, EngineError<M::Error>>> = match report {
             Some(r) => {
-                let chunk = StreamChunk::HistoryCompacted {
+                let mut chunk = StreamChunk::HistoryCompacted {
                     run_id,
                     before_count: r.before,
                     after_count: r.after,
@@ -440,6 +461,9 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
                 };
                 let middlewares = self.middlewares.clone();
                 Box::pin(futures::stream::once(async move {
+                    for mw in &middlewares {
+                        mw.on_chunk_mut(&mut chunk).await;
+                    }
                     for mw in &middlewares {
                         mw.on_chunk(&chunk).await;
                     }
@@ -451,7 +475,6 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
 
         Ok(RunStream {
             inner: Box::pin(prelude.chain(inner)),
-            history: &mut self.history,
         })
     }
 }
@@ -492,6 +515,7 @@ pub struct ConversationBuilder<M: CompletionModel> {
     approval: Option<ApprovalSpec>,
     request_defaults: RequestDefaults,
     max_tokens: Option<u32>,
+    context_options: ContextOptions,
     errors: Vec<BuildError>,
 }
 
@@ -518,6 +542,10 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             approval: None,
             request_defaults: RequestDefaults::default(),
             max_tokens: None,
+            context_options: ContextOptions {
+                compact_between_iterations: false,
+                recover_from_overflow: true,
+            },
             errors: vec![],
         }
     }
@@ -709,6 +737,62 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// overwrite each other.
     pub fn with_history(mut self, history: HistoryBuilder) -> Self {
         self.history = history;
+        self
+    }
+
+    /// Check the history budget before **every** model call of a run,
+    /// not only before the first one. Default: `false`.
+    ///
+    /// Without it, compaction runs once, before the run starts. A run
+    /// that loops through many tool calls then grows its context with
+    /// every tool result until the provider rejects it. With it, before
+    /// each call after the first, the engine runs
+    /// [`History::compact_if_needed`] on the live history. When that
+    /// compacts, a [`StreamChunk::HistoryCompacted`] carrying the run's
+    /// [`RunId`] is emitted before the next [`StreamChunk::StepStarted`].
+    ///
+    /// The built-in strategies only cut at a user message that is not a
+    /// tool result, which inside a run means the run's own kickoff. So
+    /// mid-run compaction reclaims earlier turns and never splits the
+    /// run's tool_use / tool_result pairs, but it cannot shrink the run
+    /// itself. If a compaction leaves the history over budget, or does
+    /// not reduce it at all, the engine stops checking for the rest of
+    /// the run instead of repeating the work every iteration.
+    /// [`CompactionError::NotEnoughHistory`](ailoop_history::CompactionError::NotEnoughHistory)
+    /// is ignored here, because compacting mid-run is best-effort;
+    /// [`recover_from_context_overflow`](Self::recover_from_context_overflow)
+    /// is the safety net.
+    ///
+    /// Off by default because each compaction has a cost: with
+    /// [`SummarizeStrategy`](ailoop_history::SummarizeStrategy) it is an
+    /// extra model call.
+    pub fn compact_between_iterations(mut self, enabled: bool) -> Self {
+        self.context_options.compact_between_iterations = enabled;
+        self
+    }
+
+    /// Recover when the provider rejects a request because the prompt
+    /// exceeds the context window. Default: `true`.
+    ///
+    /// When a model call fails with an error whose
+    /// [`ProviderError::is_context_overflow`] is `true` (the token
+    /// estimate said the prompt fits, the provider disagreed), the
+    /// engine forces a compaction ([`History::force_compact`]), emits
+    /// [`StreamChunk::HistoryCompacted`], and reissues the request
+    /// once. Every middleware's `on_chat_request` runs again for the
+    /// same step. At most one retry happens per model call. If the
+    /// retry overflows too, or the compaction cannot shrink the
+    /// history, the run fails with [`EngineError::ContextOverflow`] and
+    /// the history is rolled back to its state when the run started.
+    ///
+    /// Only errors returned when opening the stream are recovered
+    /// (both supported providers report overflow that way); an error
+    /// in the middle of a stream is not retried.
+    ///
+    /// With `false`, an overflow surfaces as [`EngineError::Model`], as
+    /// in earlier releases.
+    pub fn recover_from_context_overflow(mut self, enabled: bool) -> Self {
+        self.context_options.recover_from_overflow = enabled;
         self
     }
 
@@ -1039,6 +1123,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             tools,
             middlewares,
             max_tokens: self.max_tokens,
+            context_options: self.context_options,
         })
     }
 }
@@ -1052,13 +1137,12 @@ impl<M: CompletionModel> ConversationBuilder<M> {
 /// releases the borrow — any tools already spawned by the engine
 /// continue to completion via tokio's normal drop-cancellation rules.
 ///
-/// History extension happens on the terminal
-/// [`StreamChunk::RunFinished`]: the run's `new_messages` are appended
-/// to the conversation exactly once, atomically with delivery of that
-/// chunk to the consumer.
+/// The run's changes to the conversation history are committed on the
+/// terminal [`StreamChunk::RunFinished`], atomically with delivery of
+/// that chunk to the consumer. Dropping the stream earlier (or a run
+/// ending in `Err`) rolls them back.
 pub struct RunStream<'a, M: CompletionModel> {
     inner: BoxStream<'a, Result<StreamChunk, EngineError<M::Error>>>,
-    history: &'a mut History,
 }
 
 impl<'a, M: CompletionModel> Stream for RunStream<'a, M> {
@@ -1068,15 +1152,7 @@ impl<'a, M: CompletionModel> Stream for RunStream<'a, M> {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        let polled = this.inner.poll_next_unpin(cx);
-
-        if let Poll::Ready(Some(Ok(StreamChunk::RunFinished { new_messages, .. }))) = &polled {
-            this.history.extend(new_messages.clone());
-        }
-
-        polled
+        self.get_mut().inner.poll_next_unpin(cx)
     }
 }
 

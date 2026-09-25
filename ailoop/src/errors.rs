@@ -47,6 +47,36 @@ pub enum EngineError<E: std::error::Error> {
     /// [`CompactionError`]: ailoop_history::CompactionError
     #[error("context error: {0}")]
     Context(#[from] ailoop_history::CompactionError),
+
+    /// The provider rejected the request because the prompt does not
+    /// fit the model's context window
+    /// ([`ProviderError::is_context_overflow`]), and compacting the
+    /// history could not fix it. Only [`Conversation`] returns this,
+    /// and only with
+    /// [`recover_from_context_overflow`](crate::ConversationBuilder::recover_from_context_overflow)
+    /// on (the default). It is returned when any of these happens:
+    ///
+    /// - the request still overflowed after one forced compaction and
+    ///   retry;
+    /// - the forced compaction had nothing to drop
+    ///   ([`CompactionError::NotEnoughHistory`]);
+    /// - the forced compaction did not reduce the estimated token count.
+    ///
+    /// The typical cause is a turn whose own content (for example a
+    /// huge tool result) is larger than the window: the built-in
+    /// strategies never cut into the run in progress.
+    ///
+    /// The wrapped value is the provider's last error. The
+    /// conversation history is rolled back to its state when the run
+    /// started, so no half-finished turn is left behind. With recovery
+    /// turned off, an overflow surfaces as [`EngineError::Model`]
+    /// instead.
+    ///
+    /// [`ProviderError::is_context_overflow`]: ailoop_core::ProviderError::is_context_overflow
+    /// [`Conversation`]: crate::Conversation
+    /// [`CompactionError::NotEnoughHistory`]: ailoop_history::CompactionError::NotEnoughHistory
+    #[error("prompt does not fit the context window even after compaction: {0}")]
+    ContextOverflow(E),
 }
 
 /// Errors accumulated by [`ConversationBuilder`] and surfaced when

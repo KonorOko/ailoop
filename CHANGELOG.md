@@ -54,6 +54,61 @@ and this project adheres to
   `ConversationBuilder::with_history` (including after
   `from_snapshot`), and is not persisted in `ConversationSnapshot`.
   `estimated_tokens()` is unchanged.
+- `History::force_compact()`: runs the compaction strategy regardless
+  of the token budget. It is for the case where the estimate said the
+  history fits and the provider disagreed, for example after a
+  context-window overflow. It returns the same `CompactionReport` and
+  errors as `compact_if_needed`. The strategy may still be unable to
+  shrink the history (everything before the preserved tail is pinned,
+  or the tail itself is what does not fit), so compare
+  `estimated_tokens()` before and after when that matters.
+  `compact_if_needed` now delegates to it.
+- In-run context management for `Conversation`. Before, the history
+  was compacted once, before the run, and each tool result grew the
+  context until the provider rejected it, which ended the run with
+  `EngineError::Model`. Two builder switches cover this:
+  - `ConversationBuilder::compact_between_iterations(bool)` (default
+    `false`): checks the history budget before every model call after
+    the first, not only at run start. When it compacts, the stream
+    carries a `StreamChunk::HistoryCompacted` with the run's `RunId`
+    between the previous `StepFinished` and the next `StepStarted`.
+    The built-in strategies cut only at a user message that is not a
+    tool result, which inside a run means the run's own kickoff. So
+    mid-run compaction reclaims earlier turns, never splits the run's
+    tool_use / tool_result pairs, and cannot shrink the run itself.
+    If a compaction leaves the history over budget, or does not reduce
+    it, the check is skipped for the rest of the run instead of being
+    repeated every iteration. It is off by default because each
+    compaction has a cost (an extra model call with
+    `SummarizeStrategy`).
+  - `ConversationBuilder::recover_from_context_overflow(bool)` (default
+    `true`): when opening the model stream fails with an error whose
+    `ProviderError::is_context_overflow()` is `true`, the engine forces
+    a compaction (`History::force_compact`), emits `HistoryCompacted`,
+    and reissues the request once. `on_chat_request` runs again for
+    the same step.
+- `EngineError::ContextOverflow(E)`: returned by `Conversation` when an
+  overflow could not be recovered. That is, the retry overflowed too,
+  or the forced compaction had nothing to drop or did not reduce the
+  estimated tokens. The typical cause is a single turn (for example a
+  huge tool result) that is larger than the window. It carries the
+  provider's last error. The history is rolled back to its state when
+  the run started, so no half-finished tool turn is persisted. This is
+  the same rollback that already applied to any run ending in `Err` or
+  dropped mid-stream; it now also undoes compactions done during the
+  run.
+- `ProviderError` is implemented for `std::convert::Infallible`, so
+  models with `type Error = Infallible` satisfy the new bound without
+  boilerplate.
+- `History::needs_compaction()`: exposes the budget check
+  `compact_if_needed` runs (`estimated_tokens() >= max_tokens -
+  reserved_tokens`) without running the strategy.
+- `History::replace_messages(messages, pinned)`: the in-place
+  counterpart of `History::from_messages`. It swaps the message vector
+  and pin mask and keeps the budget, strategy and tokenizer. Useful
+  for rolling back to a captured state or loading a snapshot into a
+  live history. If the lengths differ it returns
+  `FromMessagesError::LengthMismatch` and leaves the history untouched.
 - Re-export `CacheControl`, `SystemBlock`, `SystemPrompt`, and
   `ToolResultBlock` from the `ailoop` façade. Downstream crates that
   write custom `ChatMiddleware`s (setting `SystemPrompt::Blocks` with
@@ -130,6 +185,26 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `Conversation`'s methods and `SubAgentTool`'s `ToolDyn` impl now
+  require `M::Error: ProviderError`, so the engine can tell a
+  context-window overflow from other model errors. The built-in
+  adapters (`AnthropicError`, `AzureOpenAIError`), `ScriptedError` and
+  `Infallible` already implement it. A custom model's error type needs
+  an `impl ProviderError for MyError {}`, whose defaults report no
+  overflow. Generic code over `M: CompletionModel` that calls
+  `Conversation` needs the extra bound. `advanced::run_chat` is
+  unchanged: it has no history to compact and gains no bound.
+- **Behavior change:** a context-window overflow no longer ends a
+  `Conversation` run immediately as `Err(EngineError::Model(_))`.
+  With the default `recover_from_context_overflow(true)`, the engine
+  compacts and retries once, and returns
+  `Err(EngineError::ContextOverflow(_))` if that does not help. Code
+  that matched `EngineError::Model(e)` with `e.is_context_overflow()`
+  should match `ContextOverflow`, or opt out with
+  `recover_from_context_overflow(false)`.
+- `ChatMiddleware::on_chat_request` can fire twice for the same
+  `step_id` when an overflow is recovered. The retried request is
+  rebuilt from the compacted history.
 - `ToolContext::new` gained a trailing `cancellation: CancellationToken`
   parameter. Engine-internal; external callers rarely construct
   `ToolContext` directly — standalone callers go through
@@ -180,6 +255,10 @@ and this project adheres to
 
 ### Fixed
 
+- The `StreamChunk::HistoryCompacted` that `Conversation` emits for
+  the compaction before a run now also passes through
+  `ChatMiddleware::on_chunk_mut`, like every other engine chunk. It
+  used to reach only `on_chunk`.
 - A `system_prompt` set by a user middleware in `on_chat_request` is no
   longer silently discarded. The internal system-prompt middleware runs
   after user middlewares (it has to, so tool-group sections reflect the
@@ -235,6 +314,52 @@ match outcome.finish_reason {
     FinishReason::Aborted(AbortReason::Timeout(_)) => retry_later(),
     FinishReason::Aborted(reason) => log::warn!("aborted: {reason}"),
     _ => {}
+}
+```
+
+Custom `CompletionModel` error types used with `Conversation` must
+implement `ProviderError`. An empty impl keeps the old behavior (no
+overflow is ever reported); override `is_context_overflow` to opt in
+to recovery.
+
+```rust
+// Before
+impl CompletionModel for MyModel {
+    type Error = MyError;
+    // ...
+}
+
+// After
+impl ailoop::ProviderError for MyError {} // or override is_context_overflow
+```
+
+Generic code over `Conversation<M>` gains the bound:
+
+```rust
+// Before
+async fn ask<M: CompletionModel + Send + Sync>(chat: &mut Conversation<M>) { /* ... */ }
+
+// After
+async fn ask<M>(chat: &mut Conversation<M>)
+where
+    M: CompletionModel + Send + Sync,
+    M::Error: ailoop::ProviderError,
+{ /* ... */ }
+```
+
+Overflow errors surface as a dedicated variant after recovery:
+
+```rust
+// Before
+match chat.run(input).await {
+    Err(EngineError::Model(e)) if e.is_context_overflow() => start_new_session(),
+    other => handle(other),
+}
+
+// After
+match chat.run(input).await {
+    Err(EngineError::ContextOverflow(_)) => start_new_session(),
+    other => handle(other),
 }
 ```
 

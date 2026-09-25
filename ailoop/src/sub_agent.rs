@@ -9,7 +9,8 @@
 use std::time::Duration;
 
 use ailoop_core::{
-    CompletionModel, FinishReason, Message, Source, ToolDefinition, ToolResultContent, UserBlock,
+    CompletionModel, FinishReason, Message, ProviderError, Source, ToolDefinition,
+    ToolResultContent, UserBlock,
 };
 use ailoop_tools::{ToolContext, ToolDyn};
 use serde_json::{Value, json};
@@ -209,7 +210,7 @@ impl SubAgentConfig {
 /// # use std::sync::Arc;
 /// # async fn build<M>(researcher_model: M, parent_model: M)
 /// # -> Result<(), Box<dyn std::error::Error>>
-/// # where M: ailoop::CompletionModel + Send + Sync + 'static {
+/// # where M: ailoop::CompletionModel + Send + Sync + 'static, M::Error: ailoop::ProviderError {
 /// // 1. Build the child conversation (its own model, history, prompt).
 /// let researcher = ailoop::Conversation::builder(researcher_model)
 ///     .system_prompt("You are a focused research sub-agent.")
@@ -237,7 +238,7 @@ impl SubAgentConfig {
 /// # use std::time::Duration;
 /// # async fn build<M>(researcher_model: M)
 /// # -> Result<(), Box<dyn std::error::Error>>
-/// # where M: ailoop::CompletionModel + Send + Sync + 'static {
+/// # where M: ailoop::CompletionModel + Send + Sync + 'static, M::Error: ailoop::ProviderError {
 /// let researcher = ailoop::Conversation::builder(researcher_model).build()?;
 /// let tool = ailoop::SubAgentTool::with_config(
 ///     "researcher",
@@ -303,6 +304,7 @@ where
 impl<M> ToolDyn for SubAgentTool<M>
 where
     M: CompletionModel + Send + Sync + 'static,
+    M::Error: ProviderError,
 {
     fn name(&self) -> String {
         self.name.clone()
