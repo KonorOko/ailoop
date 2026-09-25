@@ -296,6 +296,11 @@ async fn history_compacted_chunk(
 /// [`partial_messages`](RunError::partial_messages) hold the steps
 /// completed before the failure.
 ///
+/// When a turn requests several tools, the order in which those calls
+/// run is not guaranteed; tool results are still recorded in the order
+/// of the model's calls. See
+/// [Tool calls within a step](ChatMiddleware#tool-calls-within-a-step).
+///
 /// [`Conversation::run`]: crate::Conversation::run
 /// [`Conversation::stream`]: crate::Conversation::stream
 /// [`ConversationBuilder::compact_between_iterations`]: crate::ConversationBuilder::compact_between_iterations
@@ -699,6 +704,12 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 run_msgs.push(Message::Assistant { blocks: assistant_blocks });
             }
 
+            // Calls run one at a time in the model's order. That is an
+            // implementation detail, not part of the contract: the
+            // `ChatMiddleware` docs leave the order between calls of a
+            // step open so they can run concurrently later. What must
+            // hold either way: per-call hook order, `tools_result` in
+            // the model's order, and completed results kept on abort.
             let mut tools_result = Vec::new();
             for call in tool_calls {
                 let (id, name, mut args) = match call {

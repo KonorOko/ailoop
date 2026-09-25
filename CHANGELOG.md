@@ -294,6 +294,21 @@ and this project adheres to
   turn's `input_tokens`, per-turn latency or service-tier attribution,
   online tokenizer calibration).
 
+- Documented contract: when the model requests several tools in one
+  turn, the order **between** those calls is not guaranteed. The engine
+  still runs them one at a time in the model's order, and nothing
+  changes in this release. The contract is written down now so a later
+  1.x release can run a step's tools concurrently without it being a
+  breaking change. What stays guaranteed: the hook order within one
+  call (`on_before_tool_call_mut` → `on_before_tool_call` → tool →
+  `on_after_tool_call_mut` → `on_after_tool_call` → `ToolResult`
+  chunk), tool results in history in the order of the model's calls,
+  and every call of a step finishing before `on_turn_end` or the next
+  `on_chat_request`. Middlewares with state should key it by `RunId`
+  (and `StepId`) behind a lock, and should not assume that an
+  `on_after_tool_call` belongs to the latest `on_before_tool_call`. See
+  "Tool calls within a step" on `ChatMiddleware`.
+
 ### Changed (BREAKING)
 
 - `Conversation::run`, `run_with_options`, `stream`,
