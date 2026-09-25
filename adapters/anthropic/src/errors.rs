@@ -157,6 +157,13 @@ pub enum AnthropicError {
         /// Human-readable message from the event payload.
         message: String,
     },
+
+    /// Configuration error surfaced from
+    /// [`AnthropicClient::from_env`](crate::AnthropicClient::from_env) /
+    /// [`from_env_var`](crate::AnthropicClient::from_env_var): the API
+    /// key variable is missing or not valid Unicode. Permanent.
+    #[error("missing required configuration: {0}")]
+    Config(String),
 }
 
 /// Map an Anthropic-typed `AnthropicApiErrorKind` to a retry decision. Used both
@@ -200,7 +207,9 @@ impl Retryable for AnthropicError {
             }
             AnthropicError::Http(_) => RetryClassification::Transient { retry_after: None },
             // Parse failures are deterministic — retrying won't change the bytes.
-            AnthropicError::Sse(_) | AnthropicError::Json(_) => RetryClassification::Permanent,
+            AnthropicError::Sse(_) | AnthropicError::Json(_) | AnthropicError::Config(_) => {
+                RetryClassification::Permanent
+            }
         }
     }
 }

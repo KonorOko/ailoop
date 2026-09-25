@@ -3,6 +3,7 @@ use std::env::VarError;
 use ailoop_core::CompletionClient;
 use reqwest::Client as HttpClient;
 
+use crate::errors::AnthropicError;
 use crate::model::AnthropicChatModel;
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -36,17 +37,23 @@ impl AnthropicClient {
 
     /// Read [`API_KEY_ENV`](Self::API_KEY_ENV) (loading `.env` first
     /// if present) and build a client with the public endpoint.
-    /// Returns [`VarError`] when the variable is missing or unset.
-    pub fn from_env() -> Result<Self, VarError> {
+    /// Returns [`AnthropicError::Config`] when the variable is missing
+    /// or not valid Unicode.
+    pub fn from_env() -> Result<Self, AnthropicError> {
         Self::from_env_var(Self::API_KEY_ENV)
     }
 
     /// Like [`from_env`](Self::from_env) but reads `name` instead of
     /// the default variable. Useful when multiple keys live in the
     /// same environment.
-    pub fn from_env_var(name: &str) -> Result<Self, VarError> {
+    pub fn from_env_var(name: &str) -> Result<Self, AnthropicError> {
         dotenvy::dotenv().ok();
-        let api_key = std::env::var(name)?;
+        let api_key = std::env::var(name).map_err(|e| match e {
+            VarError::NotPresent => AnthropicError::Config(format!("{name} is required")),
+            VarError::NotUnicode(_) => {
+                AnthropicError::Config(format!("{name} is not valid Unicode"))
+            }
+        })?;
 
         Ok(Self::new(api_key))
     }
@@ -94,5 +101,23 @@ impl CompletionClient for AnthropicClient {
 
     fn completion_model(&self, model_name: impl Into<String>) -> Self::Model {
         AnthropicChatModel::new(self.clone(), model_name.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_key_is_a_typed_config_error() {
+        let err = AnthropicClient::from_env_var("AILOOP_TEST_UNSET_ANTHROPIC_KEY")
+            .err()
+            .expect("variable is not set");
+        match err {
+            AnthropicError::Config(msg) => {
+                assert!(msg.contains("AILOOP_TEST_UNSET_ANTHROPIC_KEY"), "{msg}");
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
     }
 }

@@ -409,6 +409,15 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `AnthropicClient::from_env` / `from_env_var` return
+  `Result<Self, AnthropicError>` instead of `Result<Self, VarError>`,
+  like `AzureOpenAIClient::from_env`. A missing or non-Unicode key is
+  the new `AnthropicError::Config(String)`, whose message names the
+  variable (`VarError` only says "environment variable not found"), and
+  a single error type covers both configuring and calling the adapter.
+  `Config` is permanent for `RetryingModel`. Code that propagates the
+  error with `?` into `Box<dyn Error>` or `anyhow` is unaffected.
+
 - `AnthropicModel` is `AnthropicChatModel`, matching
   `AzureOpenAIChatModel`. Both adapters now name the model type after
   the API it drives, which leaves room for other endpoints of the same
@@ -857,6 +866,22 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Match the typed error from `AnthropicClient::from_env`:
+
+```rust
+// Before (1.0.0-rc.3)
+match AnthropicClient::from_env() {
+    Err(std::env::VarError::NotPresent) => { /* ... */ }
+    // ...
+}
+
+// After
+match AnthropicClient::from_env() {
+    Err(AnthropicError::Config(msg)) => { /* ... */ }
+    // ...
+}
+```
 
 Rename the Anthropic model type:
 
