@@ -196,7 +196,14 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
 
         loop {
             if iteration >= config.max_iterations {
-                bail_with_hooks!(Err(EngineError::MaxIterationsExceeded(iteration)), &config.middlewares, &run_id)?;
+                // Every previous iteration pushed its tool results before
+                // looping, so `current_messages` has no dangling tool_use.
+                let new_messages = current_messages.split_off(messages.len());
+                let chunk = fire_abort_hooks(
+                    &config.middlewares, &run_id, AbortReason::MaxIterations(config.max_iterations), usage_run, new_messages,
+                ).await;
+                yield chunk;
+                return;
             }
 
             let step_id = StepId::new();

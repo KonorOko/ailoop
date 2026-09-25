@@ -262,6 +262,11 @@ pub enum AbortReason {
         /// The middleware-supplied reason.
         reason: String,
     },
+    /// The run reached [`crate::RunConfig::max_iterations`] while the
+    /// model was still requesting tools. Carries the configured cap.
+    /// Messages produced up to that point (including every tool
+    /// result) are kept in `new_messages`.
+    MaxIterations(usize),
 }
 
 impl fmt::Display for AbortReason {
@@ -271,6 +276,9 @@ impl fmt::Display for AbortReason {
             AbortReason::Cancelled => f.write_str("cancelled by caller"),
             AbortReason::Terminated { reason } | AbortReason::ToolTerminated { reason, .. } => {
                 f.write_str(reason)
+            }
+            AbortReason::MaxIterations(n) => {
+                write!(f, "agent loop exceeded max iterations ({n})")
             }
         }
     }
@@ -379,6 +387,10 @@ mod tests {
             }
             .to_string(),
             "loop detected"
+        );
+        assert_eq!(
+            AbortReason::MaxIterations(5).to_string(),
+            "agent loop exceeded max iterations (5)"
         );
     }
 }

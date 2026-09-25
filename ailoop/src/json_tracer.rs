@@ -171,6 +171,7 @@ fn abort_kind_str(r: &AbortReason) -> &'static str {
         AbortReason::Cancelled => "cancelled",
         AbortReason::Terminated { .. } => "terminated",
         AbortReason::ToolTerminated { .. } => "tool_terminated",
+        AbortReason::MaxIterations(_) => "max_iterations",
         _ => "unknown",
     }
 }

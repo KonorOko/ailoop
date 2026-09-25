@@ -4,12 +4,13 @@
 //! never the rendered text.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ailoop::{
-    AbortReason, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, Conversation,
-    FinishReason, HookAction, Message, RunConfig, RunId, RunOptions, StepId, StreamChunk,
-    ToolDecision, ToolDefinition, ToolResultContent, Usage,
+    AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
+    Conversation, FinishReason, HookAction, Message, RunConfig, RunId, RunOptions, StepId,
+    StreamChunk, ToolDecision, ToolDefinition, ToolResultContent, Usage, UserBlock,
 };
 use ailoop_core::testing::{ScriptedError, ScriptedModel};
 use ailoop_tools::{ToolContext, ToolDyn};
@@ -193,4 +194,84 @@ async fn tool_terminate_produces_tool_terminated_with_tool_name() {
         }
         other => panic!("expected Aborted(ToolTerminated), got {other:?}"),
     }
+}
+
+#[derive(Default)]
+struct LifecycleCounter {
+    finished: AtomicUsize,
+    errored: AtomicUsize,
+}
+
+#[async_trait]
+impl ChatMiddleware for LifecycleCounter {
+    async fn on_run_finished(
+        &self,
+        _run_id: &RunId,
+        _reason: &FinishReason,
+        _usage: &Usage,
+        _new_messages: &[Message],
+    ) {
+        self.finished.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn on_run_error(&self, _run_id: &RunId, _err: &(dyn std::error::Error + Send + Sync)) {
+        self.errored.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Hitting `max_iterations` is an abort, not an error: the run returns
+/// `Ok`, keeps every completed tool_use/tool_result pair, persists them
+/// to history, and fires `on_run_finished` (not `on_run_error`) once.
+#[tokio::test]
+async fn max_iterations_produces_max_iterations_and_keeps_partial_work() {
+    let model = ScriptedModel::new((0..5).map(|i| tool_turn(&format!("toolu_{i}"))));
+    let counter = Arc::new(LifecycleCounter::default());
+    let mut chat = Conversation::builder(model)
+        .tool(GetWeather)
+        .middleware(counter.clone())
+        .build()
+        .expect("build");
+
+    let outcome = chat
+        .run_with_options("hi", RunOptions::new().max_iterations(2))
+        .await
+        .expect("max_iterations is an abort, not an Err");
+
+    match outcome.finish_reason {
+        FinishReason::Aborted(AbortReason::MaxIterations(n)) => assert_eq!(n, 2),
+        other => panic!("expected Aborted(MaxIterations), got {other:?}"),
+    }
+
+    let tool_calls = outcome
+        .new_messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::Assistant { blocks } => Some(blocks),
+            _ => None,
+        })
+        .flatten()
+        .filter(|b| matches!(b, AssistantBlock::ToolCall { .. }))
+        .count();
+    let tool_results = outcome
+        .new_messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::User { blocks } => Some(blocks),
+            _ => None,
+        })
+        .flatten()
+        .filter(|b| matches!(b, UserBlock::ToolResult { .. }))
+        .count();
+    assert_eq!(tool_calls, 2, "one tool call per completed iteration");
+    assert_eq!(tool_results, 2, "every tool_use keeps its tool_result");
+
+    // Kickoff + the run's new messages land in history.
+    assert_eq!(
+        chat.history_messages().len(),
+        1 + outcome.new_messages.len(),
+        "partial work must be persisted to history"
+    );
+
+    assert_eq!(counter.finished.load(Ordering::SeqCst), 1);
+    assert_eq!(counter.errored.load(Ordering::SeqCst), 0);
 }

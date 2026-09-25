@@ -196,7 +196,7 @@ async fn no_timeout_or_cancellation_leaves_run_unaffected() {
 async fn cancellation_wins_over_timeout_when_both_configured() {
     // Both fire essentially simultaneously, so the abort future's
     // `biased` ordering is what determines the winner. Cancel must win
-    // so callers can rely on the "cancelled by caller" reason.
+    // so callers can rely on `AbortReason::Cancelled`.
     let token = CancellationToken::new();
     token.cancel();
 

@@ -6,13 +6,12 @@ use ailoop_tools::errors::ToolRegistryError;
 ///
 /// **Aborts are not in here.** Cancellation via
 /// [`RunConfig::cancellation`], timeout via [`RunConfig::timeout`],
-/// and middleware/tool returning `Terminate` all surface as
-/// `Ok(_)` carrying [`FinishReason::Aborted`] — see
-/// [`Conversation::run`] for the full contract. `EngineError` is
-/// reserved for transport / setup-time failures: a model-side HTTP
-/// error, a tool registry error not tied to a single tool call, a
-/// context-manager compaction failure, or the engine breaking out
-/// because [`RunConfig::max_iterations`] was hit.
+/// hitting [`RunConfig::max_iterations`], and middleware/tool
+/// returning `Terminate` all surface as `Ok(_)` carrying
+/// [`FinishReason::Aborted`] — see [`Conversation::run`] for the full
+/// contract. `EngineError` is reserved for transport / setup-time
+/// failures: a model-side HTTP error, a tool registry error not tied
+/// to a single tool call, or a context-manager compaction failure.
 ///
 /// [`Conversation::run`]: crate::Conversation::run
 /// [`Conversation::stream`]: crate::Conversation::stream
@@ -48,15 +47,6 @@ pub enum EngineError<E: std::error::Error> {
     /// [`CompactionError`]: ailoop_history::CompactionError
     #[error("context error: {0}")]
     Context(#[from] ailoop_history::CompactionError),
-
-    /// The agent loop broke out because the iteration counter reached
-    /// [`RunConfig::max_iterations`]. The wrapped value is the
-    /// configured cap. Raise the cap or attach an
-    /// [`AntiLoop`](crate::AntiLoop) middleware to stop earlier.
-    ///
-    /// [`RunConfig::max_iterations`]: ailoop_core::RunConfig::max_iterations
-    #[error("agent loop exceeded max iterations ({0})")]
-    MaxIterationsExceeded(usize),
 }
 
 /// Errors accumulated by [`ConversationBuilder`] and surfaced when

@@ -112,7 +112,27 @@ and this project adheres to
   `SubAgentTool`'s `"sub-agent aborted: …"`) is unchanged.
   `JsonTracer`'s `run_finished` payload keeps `reason.detail` and
   gains `reason.abort_kind` (`timeout` / `cancelled` / `terminated` /
-  `tool_terminated`) plus `reason.tool_name` for tool terminations.
+  `tool_terminated` / `max_iterations`) plus `reason.tool_name` for
+  tool terminations.
+- Reaching `RunConfig::max_iterations` (or `RunOptions::max_iterations`
+  / `SubAgentConfig::max_iterations`) is now an abort, not an error.
+  The run returns `Ok` with
+  `FinishReason::Aborted(AbortReason::MaxIterations(n))` instead of
+  `Err(EngineError::MaxIterationsExceeded(n))`, and
+  `EngineError::MaxIterationsExceeded` is removed. This matches the
+  "aborts are not errors" contract and the `RunConfig::max_iterations`
+  docs, which already promised `Aborted`. Behavior follows the other
+  aborts:
+  - Every completed tool_use/tool_result pair is kept in
+    `new_messages`, and `Conversation` persists it to history. The
+    `Err` path used to drop that work.
+  - `on_run_finished` fires exactly once. `on_run_error` no longer
+    fires for this case.
+  - `SubAgentTool` now returns
+    `"sub-agent aborted (agent loop exceeded max iterations (n)): <partial text>"`
+    (still `is_error: true`) instead of `"sub-agent error: …"`.
+    Whatever the child found before the cap now reaches the parent
+    model.
 
 ### Fixed
 
@@ -171,6 +191,26 @@ match outcome.finish_reason {
     FinishReason::Aborted(AbortReason::Timeout(_)) => retry_later(),
     FinishReason::Aborted(reason) => log::warn!("aborted: {reason}"),
     _ => {}
+}
+```
+
+`max_iterations` no longer produces an `Err`; check the outcome
+instead. Because the partial turns are now persisted, drop any code
+that re-appended them by hand.
+
+```rust
+// Before
+match chat.run(input).await {
+    Err(EngineError::MaxIterationsExceeded(n)) => hit_cap(n),
+    Err(e) => return Err(e.into()),
+    Ok(outcome) => use_answer(outcome),
+}
+
+// After
+let outcome = chat.run(input).await?;
+match outcome.finish_reason {
+    FinishReason::Aborted(AbortReason::MaxIterations(n)) => hit_cap(n),
+    _ => use_answer(outcome),
 }
 ```
 

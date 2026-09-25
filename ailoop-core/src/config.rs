@@ -24,7 +24,10 @@ pub struct RunConfig {
     /// [`SystemPrompt::Blocks`] to opt in to per-block cache breakpoints.
     pub system_prompt: Option<SystemPrompt>,
     /// Maximum number of provider turns before the engine aborts the
-    /// run with [`crate::FinishReason::Aborted`]. One iteration covers a
+    /// run with [`crate::FinishReason::Aborted`] carrying
+    /// [`crate::AbortReason::MaxIterations`]. Like every abort, this is
+    /// not an error: the partial `new_messages` are kept and
+    /// `on_run_finished` fires. One iteration covers a
     /// `chat_stream` call plus the tool calls it triggers. The cap
     /// prevents runaway tool-use loops; pair with an [`crate::ChatMiddleware`]
     /// such as `AntiLoop` for content-aware loop detection.
