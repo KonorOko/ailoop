@@ -160,3 +160,16 @@ fn decisions_are_debug_and_finish_reason_is_comparable() {
         FinishReason::Aborted(ailoop::AbortReason::Cancelled),
     );
 }
+
+/// `PromptSection::from_file` and `BuildError::Prompt` carry a
+/// `PromptError`, which callers match on through the facade.
+#[test]
+fn prompt_error_is_reexported() {
+    let err = ailoop::PromptSection::from_file("does/not/exist.md").unwrap_err();
+    match err {
+        ailoop::PromptError::LoadFile { path, .. } => {
+            assert_eq!(path, std::path::Path::new("does/not/exist.md"));
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}

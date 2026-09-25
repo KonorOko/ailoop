@@ -10,6 +10,12 @@ and this project adheres to
 
 ### Added
 
+- The `ailoop` facade re-exports `PromptError`. It is the error of
+  `PromptSection::from_file` and the payload of `BuildError::Prompt`
+  (a missing file passed to `system_prompt_file` or
+  `tool_with_prompt_file`), so matching on its `LoadFile` case meant
+  depending on `ailoop-prompts` directly.
+
 - `DEFAULT_MAX_ITERATIONS` (`usize`, 25) and `DEFAULT_MAX_TOKENS`
   (`u32`, 4096), re-exported from `ailoop`. They name the defaults
   `RunConfig::default()` uses (and `ChatRequest::default()` for

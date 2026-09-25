@@ -99,7 +99,7 @@ pub use ailoop_history::{
     InMemoryHistoryStore, JsonFileHistoryStore, JsonFileHistoryStoreError, SummarizeStrategy,
     TruncateStrategy,
 };
-pub use ailoop_prompts::{Prompt, PromptBuilder, PromptSection};
+pub use ailoop_prompts::{Prompt, PromptBuilder, PromptError, PromptSection};
 /// Attribute macro for implementing the crate's async traits
 /// ([`ChatMiddleware`], [`CompactionStrategy`], [`CompletionModel`], …).
 ///
