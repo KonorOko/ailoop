@@ -409,6 +409,13 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `RunId` and `StepId` keep their `Uuid` private. The public tuple
+  field (`RunId(pub Uuid)`) made the representation part of the API, so
+  switching to another id scheme (e.g. UUIDv7 or a string trace id)
+  would have been breaking. Build one from an outer trace id with
+  `RunId::from(uuid)`, and read it back with `as_uuid()` or
+  `Uuid::from(id)`.
+
 - `ChatRequest::disable_parallel_tool_use` is
   `ChatRequest::parallel_tool_use`, and
   `ConversationBuilder::disable_parallel_tool_use(bool)` is
@@ -781,6 +788,18 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Replace the tuple constructor and `.0` access on `RunId` / `StepId`:
+
+```rust
+// Before (1.0.0-rc.3)
+let run_id = RunId(trace_uuid);
+let uuid = run_id.0;
+
+// After
+let run_id = RunId::from(trace_uuid);
+let uuid = *run_id.as_uuid();
+```
 
 Invert the value when moving to `parallel_tool_use`:
 
