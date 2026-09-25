@@ -557,6 +557,37 @@ pub struct Usage {
     pub reasoning_tokens: u64,
 }
 
+impl Usage {
+    /// Usage with the given input and output token counts; every other
+    /// counter is zero.
+    ///
+    /// `Usage` is `#[non_exhaustive]`, so code outside this crate cannot
+    /// use a struct literal. This is the constructor for the common
+    /// case, such as a tool that calls a model itself and reports the
+    /// spend through `ToolContext::report_usage`. Set the remaining
+    /// public fields afterwards when the provider reports them:
+    ///
+    /// ```
+    /// use ailoop_core::Usage;
+    ///
+    /// let mut usage = Usage::new(1_200, 350);
+    /// usage.cached_input_tokens = 800;
+    /// assert_eq!(usage.input_tokens, 1_200);
+    /// assert_eq!(usage.reasoning_tokens, 0);
+    /// ```
+    pub const fn new(input_tokens: u64, output_tokens: u64) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            reasoning_tokens: 0,
+        }
+    }
+}
+
 impl Add for Usage {
     type Output = Usage;
 
@@ -584,6 +615,28 @@ impl Add for Usage {
 impl std::ops::AddAssign for Usage {
     fn add_assign(&mut self, other: Usage) {
         *self = *self + other;
+    }
+}
+
+/// Sums with `+`, so each counter saturates at `u64::MAX`.
+///
+/// ```
+/// use ailoop_core::Usage;
+///
+/// let turns = [Usage::new(100, 20), Usage::new(150, 30)];
+/// let total: Usage = turns.iter().sum();
+/// assert_eq!(total, Usage::new(250, 50));
+/// ```
+impl std::iter::Sum for Usage {
+    fn sum<I: Iterator<Item = Usage>>(iter: I) -> Usage {
+        iter.fold(Usage::default(), |total, usage| total + usage)
+    }
+}
+
+/// Sums with `+`, so each counter saturates at `u64::MAX`.
+impl<'a> std::iter::Sum<&'a Usage> for Usage {
+    fn sum<I: Iterator<Item = &'a Usage>>(iter: I) -> Usage {
+        iter.copied().sum()
     }
 }
 
@@ -700,5 +753,35 @@ mod tests {
         let mut total = near_max;
         total += filled(5);
         assert_eq!(total, filled(u64::MAX));
+    }
+
+    #[test]
+    fn usage_new_sets_input_and_output_only() {
+        let usage = Usage::new(7, 3);
+        assert_eq!(
+            usage,
+            Usage {
+                input_tokens: 7,
+                output_tokens: 3,
+                ..Usage::default()
+            }
+        );
+    }
+
+    #[test]
+    fn usage_sums_owned_and_borrowed_iterators() {
+        let turns = vec![Usage::new(10, 1), Usage::new(20, 2), filled(3)];
+        let expected = Usage {
+            input_tokens: 33,
+            output_tokens: 6,
+            ..filled(3)
+        };
+        assert_eq!(turns.iter().sum::<Usage>(), expected);
+        assert_eq!(turns.into_iter().sum::<Usage>(), expected);
+        assert_eq!(std::iter::empty::<Usage>().sum::<Usage>(), Usage::default());
+        assert_eq!(
+            [filled(u64::MAX), filled(1)].iter().sum::<Usage>(),
+            filled(u64::MAX)
+        );
     }
 }

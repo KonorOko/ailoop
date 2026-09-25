@@ -10,6 +10,17 @@ and this project adheres to
 
 ### Added
 
+- `Usage::new(input_tokens, output_tokens)` builds a `Usage` with the
+  other counters at zero. `Usage` is `#[non_exhaustive]`, so a tool
+  outside the crate that reports its own spend through
+  `ToolContext::report_usage` had to start from `Usage::default()` and
+  assign fields one by one; `ctx.report_usage(Usage::new(1_200, 350))`
+  now does it in one call. It is a `const fn`.
+
+- `Usage` implements `Sum` (over `Usage` and `&Usage`), so per-turn
+  values collected in a middleware add up with `.iter().sum()`. It
+  saturates like `+`.
+
 - `ToolRegistry` implements `Default` (an empty registry, same as
   `ToolRegistry::new()`), so it works with `..Default::default()`,
   `#[derive(Default)]` on structs that hold one, and

@@ -186,6 +186,16 @@ impl ToolContext {
     ///
     /// On a [`Self::detached`] context the report only accumulates in
     /// the context's own sink (readable via [`Self::usage_sink`]).
+    ///
+    /// ```
+    /// use ailoop_core::Usage;
+    /// use ailoop_tools::ToolContext;
+    ///
+    /// # let ctx = ToolContext::detached();
+    /// // Inside a tool, after it called a model itself:
+    /// ctx.report_usage(Usage::new(1_200, 350));
+    /// # assert_eq!(ctx.usage_sink().total(), Usage::new(1_200, 350));
+    /// ```
     pub fn report_usage(&self, usage: Usage) {
         self.usage.report(usage);
     }
