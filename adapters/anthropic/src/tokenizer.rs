@@ -43,7 +43,7 @@
 //! [`CharTokenizer`]: ailoop_core::CharTokenizer
 //! [`HistoryBuilder::tokenizer`]: https://docs.rs/ailoop-history
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use ailoop_core::Tokenizer;
 
@@ -125,15 +125,25 @@ impl OnlineCalibratedTokenizer {
             return;
         }
         let sample = observed_tokens as f32 / text_chars as f32;
-        let mut ratio = self.ratio.write().expect("tokenizer ratio lock poisoned");
+        let mut ratio = self.write_ratio();
         *ratio = (1.0 - self.alpha) * (*ratio) + self.alpha * sample;
+    }
+
+    // Poisoning only means another thread panicked mid-update; the
+    // ratio itself is still a valid `f32`.
+    fn read_ratio(&self) -> RwLockReadGuard<'_, f32> {
+        self.ratio.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write_ratio(&self) -> RwLockWriteGuard<'_, f32> {
+        self.ratio.write().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Current tokens-per-char ratio. Useful for diagnostics and
     /// tests. Returns `DEFAULT_INITIAL_RATIO` (0.25) before any
     /// observations have been fed in.
     pub fn ratio(&self) -> f32 {
-        *self.ratio.read().expect("tokenizer ratio lock poisoned")
+        *self.read_ratio()
     }
 }
 

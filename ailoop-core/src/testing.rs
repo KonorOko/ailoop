@@ -149,7 +149,13 @@ impl CompletionModel for ScriptedModel {
         &self,
         _req: ChatRequest,
     ) -> Result<BoxStream<'static, Result<StreamChunk, Self::Error>>, Self::Error> {
-        let next = self.scripts.lock().unwrap().pop_front();
+        // Poisoning only means another thread panicked mid-update; the
+        // queue itself is still consistent.
+        let next = self
+            .scripts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front();
         match next {
             None => Ok(Box::pin(stream::empty())),
             Some(Err(e)) => Err(e),

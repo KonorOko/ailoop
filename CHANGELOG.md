@@ -778,6 +778,19 @@ and this project adheres to
 
 ### Fixed
 
+- A panic on one thread while it held an internal lock no longer makes
+  every later use of that lock panic too. The shared state behind
+  `UsageSink`, `ToolActivation`, the engine's active-tool snapshot,
+  `SubAgentTool`'s wrap-up budget, `OnlineCalibratedTokenizer`,
+  `CachingTokenProvider`, `InMemoryHistoryStore` and `ScriptedModel`
+  used `expect` on the lock, so a single panic (a tool, a hook, or the
+  old `Usage` overflow) poisoned it and the next report, activation or
+  request panicked in turn, taking down unrelated runs that shared the
+  handle. They now recover the guard from a poisoned lock, as
+  `MaxToolCalls`, `AntiLoop` and `ApprovalMiddleware` already did. The
+  data they protect (a total, a set of names, a ratio, a cached value)
+  is replaced or updated in one step, so it is still consistent.
+
 - Adding `Usage` values (`+`, `+=`) saturates each counter at
   `u64::MAX` instead of overflowing. Before, an overflow panicked in
   debug builds, and inside `UsageSink::report` it did so with the lock

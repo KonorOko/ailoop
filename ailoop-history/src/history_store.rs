@@ -2,7 +2,7 @@
 //! [`JsonFileHistoryStore`] backends.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 
@@ -64,6 +64,12 @@ impl InMemoryHistoryStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    fn lock(&self) -> MutexGuard<'_, Option<ConversationSnapshot>> {
+        // Poisoning only means another thread panicked mid-update; the
+        // stored snapshot is replaced whole, so it is still consistent.
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 #[async_trait]
@@ -71,19 +77,12 @@ impl HistoryStore for InMemoryHistoryStore {
     type Error = std::convert::Infallible;
 
     async fn save(&self, snapshot: &ConversationSnapshot) -> Result<(), Self::Error> {
-        *self
-            .inner
-            .lock()
-            .expect("InMemoryHistoryStore mutex poisoned") = Some(snapshot.clone());
+        *self.lock() = Some(snapshot.clone());
         Ok(())
     }
 
     async fn load(&self) -> Result<Option<ConversationSnapshot>, Self::Error> {
-        Ok(self
-            .inner
-            .lock()
-            .expect("InMemoryHistoryStore mutex poisoned")
-            .clone())
+        Ok(self.lock().clone())
     }
 }
 

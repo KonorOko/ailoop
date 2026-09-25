@@ -15,7 +15,7 @@
 //! through [`ToolContext::report_usage`]; the engine folds it into the
 //! run total on `RunFinished.usage`. See [`UsageSink`].
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use ailoop_core::{RunId, StepId, ToolDefinition, Usage};
 use indexmap::{IndexMap, IndexSet};
@@ -214,6 +214,14 @@ struct UsageSinkInner {
     parent: Option<UsageSink>,
 }
 
+impl UsageSinkInner {
+    fn lock(&self) -> MutexGuard<'_, Usage> {
+        // Poisoning only means another thread panicked mid-update; the
+        // total itself is still consistent.
+        self.total.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 impl UsageSink {
     /// Standalone sink with a zero total.
     pub fn new() -> Self {
@@ -233,7 +241,7 @@ impl UsageSink {
 
     /// Add `usage` to this sink's total and to every parent's.
     pub fn report(&self, usage: Usage) {
-        *self.inner.total.lock().expect("UsageSink lock") += usage;
+        *self.inner.lock() += usage;
         if let Some(parent) = &self.inner.parent {
             parent.report(usage);
         }
@@ -241,7 +249,7 @@ impl UsageSink {
 
     /// Sum of every report made to this sink (and its clones) so far.
     pub fn total(&self) -> Usage {
-        *self.inner.total.lock().expect("UsageSink lock")
+        *self.inner.lock()
     }
 }
 
@@ -274,6 +282,14 @@ struct ToolActivationInner {
     active: Arc<Mutex<IndexSet<String>>>,
 }
 
+impl ToolActivationInner {
+    fn lock(&self) -> MutexGuard<'_, IndexSet<String>> {
+        // Poisoning only means another thread panicked mid-update; the
+        // set itself is still consistent.
+        self.active.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 impl ToolActivation {
     /// Construct a handle backed by a shared catalog and a per-run
     /// active set. Used by the engine; downstream callers rarely
@@ -303,11 +319,7 @@ impl ToolActivation {
         let Some(inner) = &self.inner else {
             return false;
         };
-        inner
-            .active
-            .lock()
-            .expect("ToolActivation lock")
-            .contains(name)
+        inner.lock().contains(name)
     }
 
     /// Add `name` to the active set. Returns
@@ -320,11 +332,7 @@ impl ToolActivation {
         if !inner.catalog.contains_key(name) {
             return Err(ToolActivationError::NotFound(name.to_string()));
         }
-        inner
-            .active
-            .lock()
-            .expect("ToolActivation lock")
-            .insert(name.to_string());
+        inner.lock().insert(name.to_string());
         Ok(())
     }
 
@@ -334,11 +342,7 @@ impl ToolActivation {
     /// Returns [`ToolActivationError::Detached`] for detached handles.
     pub fn deactivate(&self, name: &str) -> Result<(), ToolActivationError> {
         let inner = self.inner.as_ref().ok_or(ToolActivationError::Detached)?;
-        inner
-            .active
-            .lock()
-            .expect("ToolActivation lock")
-            .shift_remove(name);
+        inner.lock().shift_remove(name);
         Ok(())
     }
 
@@ -348,7 +352,7 @@ impl ToolActivation {
         let Some(inner) = &self.inner else {
             return Vec::new();
         };
-        let active = inner.active.lock().expect("ToolActivation lock");
+        let active = inner.lock();
         inner
             .catalog
             .iter()
@@ -365,7 +369,7 @@ impl ToolActivation {
         let Some(inner) = &self.inner else {
             return Vec::new();
         };
-        let active = inner.active.lock().expect("ToolActivation lock");
+        let active = inner.lock();
         inner
             .catalog
             .iter()
@@ -575,5 +579,44 @@ mod tests {
         assert_eq!(mid.total().input_tokens, 5);
         assert_eq!(root.total().input_tokens, 5);
         assert_eq!(root.total().output_tokens, 2);
+    }
+
+    /// Run `f` on another thread and wait for it to panic. `f` panics
+    /// while holding a lock, which leaves that lock poisoned.
+    fn panic_on_thread(f: impl FnOnce() + Send + 'static) {
+        assert!(std::thread::spawn(f).join().is_err());
+    }
+
+    #[test]
+    fn usage_sink_keeps_working_after_its_lock_is_poisoned() {
+        let sink = UsageSink::new();
+        sink.report(tokens(2, 1));
+        let inner = sink.inner.clone();
+        panic_on_thread(move || {
+            let _guard = inner.total.lock().unwrap();
+            panic!("poison the lock");
+        });
+        assert!(sink.inner.total.is_poisoned());
+
+        sink.report(tokens(3, 1));
+        assert_eq!(sink.total(), tokens(5, 2));
+    }
+
+    #[test]
+    fn tool_activation_keeps_working_after_its_lock_is_poisoned() {
+        let h = build_handle(&["a"], &["a", "b"]);
+        let active = h.inner.as_ref().unwrap().active.clone();
+        let held = active.clone();
+        panic_on_thread(move || {
+            let _guard = held.lock().unwrap();
+            panic!("poison the lock");
+        });
+        assert!(active.is_poisoned());
+
+        assert!(h.is_active("a"));
+        h.activate("b").unwrap();
+        h.deactivate("a").unwrap();
+        assert_eq!(names(h.list_active()), vec!["b"]);
+        assert_eq!(names(h.list_inactive()), vec!["a"]);
     }
 }

@@ -654,7 +654,9 @@ fn run_engine<'a, M: CompletionModel>(
                 // previous step may have called `ctx.tools().activate(...)`
                 // and that change must reach the model on this turn.
                 req.tools = Some({
-                    let active = active_snapshot.lock().expect("active_snapshot lock");
+                    // Poisoning only means another thread panicked
+                    // mid-update; the set itself is still consistent.
+                    let active = active_snapshot.lock().unwrap_or_else(|e| e.into_inner());
                     catalog
                         .iter()
                         .filter(|(name, _)| active.contains(*name))
@@ -867,7 +869,10 @@ fn run_engine<'a, M: CompletionModel>(
                 // prompted.
                 let call = match call {
                     PendingCall::Run { id, name, .. }
-                        if !active_snapshot.lock().expect("active_snapshot lock").contains(&name) =>
+                        if !active_snapshot
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .contains(&name) =>
                     {
                         let content = unavailable_tool(&name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()));
                         PendingCall::Rejected { id, content }

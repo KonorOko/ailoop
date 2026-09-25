@@ -6,7 +6,7 @@
 //! prior turns. For stateless behavior reconstruct the `SubAgentTool`
 //! (or its inner `Conversation`) per call.
 
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::Duration;
 
 use ailoop_core::{
@@ -289,6 +289,12 @@ struct WrapUpState {
     triggered: Option<AbortReason>,
 }
 
+fn lock_state(state: &StdMutex<WrapUpState>) -> MutexGuard<'_, WrapUpState> {
+    // Poisoning only means another thread panicked mid-update; the
+    // state itself is still consistent.
+    state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Run-scoped middleware installed by [`SubAgentTool::call`] when
 /// [`SubAgentConfig::wrap_up`] is set. See [`WrapUp`].
 struct WrapUpMiddleware {
@@ -301,7 +307,7 @@ struct WrapUpMiddleware {
 impl ChatMiddleware for WrapUpMiddleware {
     async fn on_run_started(&self, run: &RunStartInfo<'_>) -> ailoop_core::HookAction {
         let fraction = self.time_fraction.clamp(0.0, 1.0);
-        self.state.lock().expect("wrap-up state").budget = Some(WrapUpBudget {
+        lock_state(&self.state).budget = Some(WrapUpBudget {
             started: Instant::now(),
             soft_deadline: run.config.timeout.map(|t| t.mul_f64(fraction)),
             max_iterations: run.config.max_iterations,
@@ -311,13 +317,13 @@ impl ChatMiddleware for WrapUpMiddleware {
 
     async fn on_chunk(&self, chunk: &StreamChunk) {
         if let StreamChunk::StepStarted { iteration, .. } = chunk {
-            self.state.lock().expect("wrap-up state").iteration = *iteration;
+            lock_state(&self.state).iteration = *iteration;
         }
     }
 
     async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         {
-            let mut state = self.state.lock().expect("wrap-up state");
+            let mut state = lock_state(&self.state);
             if state.triggered.is_none() {
                 let Some(budget) = &state.budget else { return };
                 let trigger = if state.iteration + 1 >= budget.max_iterations {
@@ -656,8 +662,7 @@ where
                 .await
         };
 
-        let wrapped_up =
-            wrap_up_state.and_then(|state| state.lock().expect("wrap-up state").triggered.take());
+        let wrapped_up = wrap_up_state.and_then(|state| lock_state(&state).triggered.take());
 
         match run_result {
             Ok(outcome) => {
