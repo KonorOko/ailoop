@@ -1254,7 +1254,7 @@ impl<'a, M: CompletionModel> Stream for RunStream<'a, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ailoop_core::{ChatRequest, CompletionModel, StreamChunk, ToolDecision};
+    use ailoop_core::{ChatRequest, CompletionModel, StreamChunk, ToolCallInfo, ToolDecision};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1313,7 +1313,13 @@ mod tests {
         let run_id = ailoop_core::RunId::new();
         let step_id = ailoop_core::StepId::new();
         for mw in &chat.middlewares {
-            match mw.on_before_tool_call(&run_id, &step_id, name, args).await {
+            match mw
+                .on_before_tool_call(
+                    &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", name),
+                    args,
+                )
+                .await
+            {
                 ToolDecision::Continue => continue,
                 other => return other,
             }

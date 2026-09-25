@@ -10,7 +10,7 @@ use ailoop::{Message, ToolDefinition, ToolResultContent, advanced::run_chat};
 use ailoop_core::testing::{ScriptedError, ScriptedModel};
 use ailoop_core::{
     ChatMiddleware, ChatRequest, FinishReason, HookAction, RunConfig, RunId, StepId, StreamChunk,
-    ToolDecision, Usage,
+    ToolCallInfo, ToolDecision, Usage,
 };
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use futures::StreamExt;
@@ -76,22 +76,14 @@ impl ChatMiddleware for RecordingMiddleware {
         self.push(label);
     }
 
-    async fn on_before_tool_call(
-        &self,
-        _run_id: &RunId,
-        _step_id: &StepId,
-        _name: &str,
-        _args: &Value,
-    ) -> ToolDecision {
+    async fn on_before_tool_call(&self, _call: &ToolCallInfo, _args: &Value) -> ToolDecision {
         self.push("on_before_tool_call");
         ToolDecision::Continue
     }
 
     async fn on_after_tool_call(
         &self,
-        _run_id: &RunId,
-        _step_id: &StepId,
-        _name: &str,
+        _call: &ToolCallInfo,
         _args: &Value,
         _result: &ToolResultContent,
     ) {

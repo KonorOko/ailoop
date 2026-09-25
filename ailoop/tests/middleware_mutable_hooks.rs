@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use ailoop::{Conversation, Message, ToolDefinition, ToolResultContent, advanced::run_chat};
 use ailoop_core::testing::ScriptedModel;
-use ailoop_core::{ChatMiddleware, FinishReason, RunConfig, RunId, StepId, StreamChunk, Usage};
+use ailoop_core::{ChatMiddleware, FinishReason, RunConfig, StreamChunk, ToolCallInfo, Usage};
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -188,9 +188,7 @@ async fn on_before_tool_call_mut_mutation_visible_to_tool_and_observer() {
     impl ChatMiddleware for ArgsObserver {
         async fn on_before_tool_call(
             &self,
-            _: &RunId,
-            _: &StepId,
-            _: &str,
+            _call: &ToolCallInfo,
             args: &Value,
         ) -> ailoop_core::ToolDecision {
             *self.seen.lock().unwrap() = Some(args.clone());
@@ -203,7 +201,7 @@ async fn on_before_tool_call_mut_mutation_visible_to_tool_and_observer() {
     struct RedactArgs;
     #[async_trait::async_trait]
     impl ChatMiddleware for RedactArgs {
-        async fn on_before_tool_call_mut(&self, _: &RunId, _: &StepId, _: &str, args: &mut Value) {
+        async fn on_before_tool_call_mut(&self, _call: &ToolCallInfo, args: &mut Value) {
             if let Some(obj) = args.as_object_mut() {
                 obj.insert("redacted".into(), Value::Bool(true));
             }
@@ -289,9 +287,7 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
     impl ChatMiddleware for ResultObserver {
         async fn on_after_tool_call(
             &self,
-            _: &RunId,
-            _: &StepId,
-            _: &str,
+            _call: &ToolCallInfo,
             _: &Value,
             result: &ToolResultContent,
         ) {
@@ -304,9 +300,7 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
     impl ChatMiddleware for RewriteResult {
         async fn on_after_tool_call_mut(
             &self,
-            _: &RunId,
-            _: &StepId,
-            _: &str,
+            _call: &ToolCallInfo,
             _: &Value,
             result: &mut ToolResultContent,
         ) {

@@ -1,5 +1,5 @@
 use ailoop::{ApprovalMiddleware, Conversation, ToolDecision, ailoop_tool};
-use ailoop_core::{ChatMiddleware, ChatRequest, CompletionModel, StreamChunk};
+use ailoop_core::{ChatMiddleware, ChatRequest, CompletionModel, StreamChunk, ToolCallInfo};
 use futures::stream::BoxStream;
 use serde_json::json;
 use std::sync::Arc;
@@ -51,10 +51,16 @@ async fn approve_all_fires_for_every_tool() {
     let run_id = ailoop_core::RunId::new();
     let step_id = ailoop_core::StepId::new();
     let _ = mw
-        .on_before_tool_call(&run_id, &step_id, "anything", &json!({}))
+        .on_before_tool_call(
+            &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "anything"),
+            &json!({}),
+        )
         .await;
     let _ = mw
-        .on_before_tool_call(&run_id, &step_id, "else", &json!({}))
+        .on_before_tool_call(
+            &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "else"),
+            &json!({}),
+        )
         .await;
 
     assert_eq!(counter.load(Ordering::SeqCst), 2);
@@ -75,13 +81,22 @@ async fn for_named_only_fires_for_listed_tools() {
     let run_id = ailoop_core::RunId::new();
     let step_id = ailoop_core::StepId::new();
     let _ = mw
-        .on_before_tool_call(&run_id, &step_id, "list_dir", &json!({}))
+        .on_before_tool_call(
+            &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "list_dir"),
+            &json!({}),
+        )
         .await;
     let _ = mw
-        .on_before_tool_call(&run_id, &step_id, "delete_file", &json!({}))
+        .on_before_tool_call(
+            &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "delete_file"),
+            &json!({}),
+        )
         .await;
     let _ = mw
-        .on_before_tool_call(&run_id, &step_id, "other", &json!({}))
+        .on_before_tool_call(
+            &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "other"),
+            &json!({}),
+        )
         .await;
 
     assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -98,7 +113,10 @@ async fn for_named_returns_continue_for_non_gated() {
     let run_id = ailoop_core::RunId::new();
     let step_id = ailoop_core::StepId::new();
     let decision = mw
-        .on_before_tool_call(&run_id, &step_id, "list_dir", &json!({}))
+        .on_before_tool_call(
+            &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "list_dir"),
+            &json!({}),
+        )
         .await;
     assert!(matches!(decision, ToolDecision::Continue));
 }
@@ -114,7 +132,10 @@ async fn approval_callback_decision_is_returned() {
     let run_id = ailoop_core::RunId::new();
     let step_id = ailoop_core::StepId::new();
     let decision = mw
-        .on_before_tool_call(&run_id, &step_id, "anything", &json!({}))
+        .on_before_tool_call(
+            &ToolCallInfo::new(run_id.clone(), step_id.clone(), "toolu_test", "anything"),
+            &json!({}),
+        )
         .await;
     match decision {
         ToolDecision::Skip { reason } => assert_eq!(reason, "denied"),

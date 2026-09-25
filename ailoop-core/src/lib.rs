@@ -52,7 +52,7 @@ pub use message::{
     AssistantBlock, CacheControl, Message, Source, SystemBlock, SystemPrompt, ToolResultBlock,
     ToolResultContent, UserBlock,
 };
-pub use middleware::{ChatMiddleware, ContinueDecision, HookAction, ToolDecision};
+pub use middleware::{ChatMiddleware, ContinueDecision, HookAction, ToolCallInfo, ToolDecision};
 pub use provider_error::ProviderError;
 pub use request::{ChatRequest, ReasoningEffort, ToolChoice, ToolDefinition, ToolTag};
 pub use retry::{RetryClassification, RetryConfig, Retryable, RetryingModel};

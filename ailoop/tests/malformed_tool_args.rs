@@ -6,9 +6,9 @@
 use std::sync::{Arc, Mutex};
 
 use ailoop::{
-    AssistantBlock, ChatMiddleware, Conversation, FinishReason, Message, RunId, StepId,
-    StreamChunk, ToolContext, ToolDecision, ToolDefinition, ToolDyn, ToolResultBlock,
-    ToolResultContent, Usage, UserBlock,
+    AssistantBlock, ChatMiddleware, Conversation, FinishReason, Message, StreamChunk, ToolCallInfo,
+    ToolContext, ToolDecision, ToolDefinition, ToolDyn, ToolResultBlock, ToolResultContent, Usage,
+    UserBlock,
 };
 use ailoop_core::testing::ScriptedModel;
 use async_trait::async_trait;
@@ -58,25 +58,18 @@ impl ChatMiddleware for Spy {
                 .push((call_id.clone(), content.clone()));
         }
     }
-    async fn on_before_tool_call(
-        &self,
-        _: &RunId,
-        _: &StepId,
-        name: &str,
-        _: &Value,
-    ) -> ToolDecision {
-        self.hooks.lock().unwrap().push(format!("before:{name}"));
+    async fn on_before_tool_call(&self, call: &ToolCallInfo, _: &Value) -> ToolDecision {
+        self.hooks
+            .lock()
+            .unwrap()
+            .push(format!("before:{}", call.name));
         ToolDecision::Continue
     }
-    async fn on_after_tool_call(
-        &self,
-        _: &RunId,
-        _: &StepId,
-        name: &str,
-        _: &Value,
-        _: &ToolResultContent,
-    ) {
-        self.hooks.lock().unwrap().push(format!("after:{name}"));
+    async fn on_after_tool_call(&self, call: &ToolCallInfo, _: &Value, _: &ToolResultContent) {
+        self.hooks
+            .lock()
+            .unwrap()
+            .push(format!("after:{}", call.name));
     }
 }
 

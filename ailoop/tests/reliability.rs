@@ -13,7 +13,7 @@ use ailoop::{Message, ToolDefinition, ToolResultContent, advanced::run_chat};
 use ailoop_core::testing::{ScriptedError, ScriptedModel};
 use ailoop_core::{
     AbortReason, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason,
-    HookAction, RunConfig, RunId, StepId, StreamChunk, ToolDecision, Usage,
+    HookAction, RunConfig, RunId, StreamChunk, ToolCallInfo, ToolDecision, Usage,
 };
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use async_trait::async_trait;
@@ -345,13 +345,7 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
 
     #[async_trait]
     impl ChatMiddleware for SlowApproval {
-        async fn on_before_tool_call(
-            &self,
-            _run_id: &RunId,
-            _step_id: &StepId,
-            _name: &str,
-            _args: &Value,
-        ) -> ToolDecision {
+        async fn on_before_tool_call(&self, _call: &ToolCallInfo, _args: &Value) -> ToolDecision {
             std::future::pending::<()>().await;
             unreachable!("timeout should drop this future before it returns")
         }

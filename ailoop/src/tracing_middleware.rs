@@ -12,7 +12,7 @@
 
 use ailoop_core::{
     ChatMiddleware, ChatRequest, FinishReason, HookAction, Message, RunConfig, RunId, StepId,
-    StreamChunk, ToolDecision, ToolResultContent, Usage,
+    StreamChunk, ToolCallInfo, ToolDecision, ToolResultContent, Usage,
 };
 use serde_json::Value;
 
@@ -196,18 +196,13 @@ impl ChatMiddleware for TracingMiddleware {
         );
     }
 
-    async fn on_before_tool_call(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        name: &str,
-        _args: &Value,
-    ) -> ToolDecision {
+    async fn on_before_tool_call(&self, call: &ToolCallInfo, _args: &Value) -> ToolDecision {
         tracing::info!(
             target: "ailoop.tool",
-            run_id = %run_id,
-            step_id = %step_id,
-            name = %name,
+            run_id = %call.run_id,
+            step_id = %call.step_id,
+            call_id = %call.call_id,
+            name = %call.name,
             "tool call starting",
         );
         ToolDecision::Continue
@@ -215,18 +210,17 @@ impl ChatMiddleware for TracingMiddleware {
 
     async fn on_after_tool_call(
         &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        name: &str,
+        call: &ToolCallInfo,
         _args: &Value,
         result: &ToolResultContent,
     ) {
         let outcome = if result.is_error { "error" } else { "text" };
         tracing::debug!(
             target: "ailoop.tool",
-            run_id = %run_id,
-            step_id = %step_id,
-            name = %name,
+            run_id = %call.run_id,
+            step_id = %call.step_id,
+            call_id = %call.call_id,
+            name = %call.name,
             outcome,
             "tool call finished",
         );
@@ -280,8 +274,16 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             futures::executor::block_on(async {
                 mw.on_run_started(&run_id, &[], &RunConfig::default()).await;
-                mw.on_before_tool_call(&run_id, &step_id, "get_weather", &serde_json::Value::Null)
-                    .await;
+                mw.on_before_tool_call(
+                    &ToolCallInfo::new(
+                        run_id.clone(),
+                        step_id.clone(),
+                        "toolu_test",
+                        "get_weather",
+                    ),
+                    &serde_json::Value::Null,
+                )
+                .await;
                 mw.on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
                     .await;
                 mw.on_chunk(&StreamChunk::HistoryCompacted {
