@@ -91,6 +91,21 @@ impl ChatMiddleware for TracingMiddleware {
                     "tool call finished",
                 );
             }
+            StreamChunk::ToolCallMalformed {
+                id,
+                name,
+                raw,
+                error,
+            } => {
+                tracing::warn!(
+                    target: "ailoop.chunk",
+                    call_id = %id,
+                    name = %name,
+                    error = %error,
+                    raw_bytes = raw.len(),
+                    "tool call malformed",
+                );
+            }
             StreamChunk::TurnFinished {
                 reason,
                 usage,

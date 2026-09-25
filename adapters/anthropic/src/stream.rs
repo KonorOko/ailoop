@@ -138,9 +138,9 @@ where
                 AnthropicEvent::ContentBlockStop { index } => {
                     match blocks.remove(&index) {
                         Some(BlockState::ToolUse { id, name, args_buf }) => {
-                            let args = serde_json::from_str(&args_buf)
-                                .unwrap_or(serde_json::json!({}));
-                            yield StreamChunk::ToolCallFinished { id, name, args };
+                            // Invalid JSON (e.g. cut off by max_tokens)
+                            // closes as ToolCallMalformed, never as `{}`.
+                            yield StreamChunk::tool_call_from_raw_args(id, name, args_buf);
                         }
                         Some(BlockState::Thinking { signature }) => {
                             yield StreamChunk::ReasoningFinished { signature };
@@ -683,5 +683,108 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    fn tool_use_turn(
+        deltas: &[&str],
+        stop_reason: &str,
+    ) -> Vec<Result<AnthropicEvent, AnthropicError>> {
+        let mut events = vec![
+            ok(AnthropicEvent::MessageStart {
+                message: MessageStartPayload {
+                    usage: MessageStartUsage::default(),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockStart {
+                index: 0,
+                content_block: AnthropicBlock::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "write_file".into(),
+                    input: json!({}),
+                },
+            }),
+        ];
+        for d in deltas {
+            events.push(ok(AnthropicEvent::ContentBlockDelta {
+                index: 0,
+                delta: AnthropicDelta::InputJsonDelta {
+                    partial_json: (*d).into(),
+                },
+            }));
+        }
+        events.extend([
+            ok(AnthropicEvent::ContentBlockStop { index: 0 }),
+            ok(AnthropicEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some(stop_reason.into()),
+                },
+                usage: UsageDelta::default(),
+            }),
+            ok(AnthropicEvent::MessageStop),
+        ]);
+        events
+    }
+
+    /// A turn cut off by `max_tokens` mid-`tool_use` leaves invalid JSON
+    /// in the buffer. It must close the call as `ToolCallMalformed`
+    /// (with the raw text) rather than a `ToolCallFinished` with `{}`
+    /// that the engine would execute.
+    #[tokio::test]
+    async fn truncated_tool_input_is_malformed_not_empty_args() {
+        let chunks = run(tool_use_turn(
+            &[r#"{"path": "a.txt", "#, r#""content": "hel"#],
+            "max_tokens",
+        ))
+        .await;
+
+        assert!(
+            !chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::ToolCallFinished { .. })),
+            "truncated args must not produce ToolCallFinished: {chunks:?}"
+        );
+        let malformed = chunks
+            .iter()
+            .find_map(|c| match c {
+                StreamChunk::ToolCallMalformed {
+                    id,
+                    name,
+                    raw,
+                    error,
+                } => Some((id, name, raw, error)),
+                _ => None,
+            })
+            .expect("ToolCallMalformed");
+        assert_eq!(malformed.0, "toolu_1");
+        assert_eq!(malformed.1, "write_file");
+        assert_eq!(malformed.2, r#"{"path": "a.txt", "content": "hel"#);
+        assert!(!malformed.3.is_empty());
+        assert!(matches!(
+            chunks.last(),
+            Some(StreamChunk::TurnFinished {
+                reason: FinishReason::MaxTokens,
+                ..
+            })
+        ));
+    }
+
+    /// A tool without parameters may stream no `input_json_delta` at
+    /// all; the empty buffer is a valid `{}`, not a malformed call.
+    #[tokio::test]
+    async fn tool_use_without_input_deltas_finishes_with_empty_object() {
+        let chunks = run(tool_use_turn(&[], "tool_use")).await;
+        let args = chunks
+            .iter()
+            .find_map(|c| match c {
+                StreamChunk::ToolCallFinished { args, .. } => Some(args.clone()),
+                _ => None,
+            })
+            .expect("ToolCallFinished");
+        assert_eq!(args, json!({}));
+        assert!(
+            !chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::ToolCallMalformed { .. }))
+        );
     }
 }

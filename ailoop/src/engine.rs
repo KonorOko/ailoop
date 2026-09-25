@@ -597,7 +597,18 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     },
                     StreamChunk::ToolCallFinished { id, name, args } => {
                         assistant_blocks.push(AssistantBlock::tool_call(id.clone(), name.clone(), args.clone()));
-                        tool_calls.push((id.clone(), name.clone(), args.clone()))
+                        tool_calls.push(PendingCall::Run { id: id.clone(), name: name.clone(), args: args.clone() })
+                    },
+                    StreamChunk::ToolCallMalformed { id, name, raw, error } => {
+                        // Providers require an object input on replay; the
+                        // raw text travels back in the error result instead.
+                        assistant_blocks.push(AssistantBlock::tool_call(
+                            id.clone(), name.clone(), Value::Object(Default::default()),
+                        ));
+                        tool_calls.push(PendingCall::Malformed {
+                            id: id.clone(),
+                            content: malformed_args_result(name, raw, error),
+                        })
                     },
                     StreamChunk::ReasoningFinished { signature } => {
                         // Reasoning blocks must keep their original position
@@ -640,7 +651,25 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
             }
 
             let mut tools_result = Vec::new();
-            for (id, name, mut args) in tool_calls {
+            for call in tool_calls {
+                let (id, name, mut args) = match call {
+                    PendingCall::Run { id, name, args } => (id, name, args),
+                    // Nothing runs, so no tool hook fires: the synthesized
+                    // error only goes out as a ToolResult chunk.
+                    PendingCall::Malformed { id, content } => {
+                        let mut chunk = StreamChunk::ToolResult {
+                            run_id: run_id.clone(),
+                            step_id: step_id.clone(),
+                            call_id: id.clone(),
+                            content: content.clone(),
+                        };
+                        for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
+                        for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                        yield chunk;
+                        tools_result.push(UserBlock::tool_result(id, content));
+                        continue;
+                    }
+                };
 
                 // Input-transform phase: every `_mut` runs before any
                 // gating decision so a sanitizer can rewrite args before
@@ -877,6 +906,46 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
     Box::pin(stream)
 }
 
+/// A tool call collected from the provider turn, executed after the
+/// stream ends.
+enum PendingCall {
+    Run {
+        id: String,
+        name: String,
+        args: Value,
+    },
+    /// Arguments were not a JSON object; the tool is never invoked and
+    /// `content` is the error reply sent back to the model.
+    Malformed {
+        id: String,
+        content: ToolResultContent,
+    },
+}
+
+/// Longest slice of the raw arguments echoed back to the model.
+const MALFORMED_RAW_ECHO_BYTES: usize = 1024;
+
+/// Error reply for a [`StreamChunk::ToolCallMalformed`]: a short
+/// explanation plus the `{"INVALID_JSON": raw}` wrapper Anthropic
+/// recommends, with `raw` capped so a long truncated payload is not
+/// replayed in full.
+fn malformed_args_result(name: &str, raw: &str, error: &str) -> ToolResultContent {
+    let echoed = if raw.len() > MALFORMED_RAW_ECHO_BYTES {
+        let mut end = MALFORMED_RAW_ECHO_BYTES;
+        while !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &raw[..end])
+    } else {
+        raw.to_string()
+    };
+    let wrapper = serde_json::json!({ "INVALID_JSON": echoed });
+    ToolResultContent::error(format!(
+        "Invalid JSON arguments for tool '{name}': {error}. The tool was not run; \
+         call it again with complete, valid JSON.\n{wrapper}"
+    ))
+}
+
 async fn run_tool_chain(
     chain: &[Arc<dyn ChatMiddleware>],
     run_id: &RunId,
@@ -959,6 +1028,30 @@ mod tests {
         async fn call(&self, _: serde_json::Value, _ctx: &ToolContext) -> ToolResultContent {
             ToolResultContent::text("sunny")
         }
+    }
+
+    #[test]
+    fn malformed_args_result_wraps_and_caps_raw() {
+        let short = malformed_args_result("write_file", r#"{"a":"#, "EOF while parsing");
+        assert!(short.is_error);
+        let ailoop_core::ToolResultBlock::Text { text } = &short.blocks[0] else {
+            panic!("expected a text block");
+        };
+        assert!(
+            text.starts_with("Invalid JSON arguments for tool 'write_file': EOF while parsing.")
+        );
+        assert!(text.ends_with(r#"{"INVALID_JSON":"{\"a\":"}"#), "{text}");
+
+        // Multi-byte chars straddling the cap must not split.
+        let long = "é".repeat(MALFORMED_RAW_ECHO_BYTES);
+        let capped = malformed_args_result("t", &long, "EOF");
+        let ailoop_core::ToolResultBlock::Text { text } = &capped.blocks[0] else {
+            panic!("expected a text block");
+        };
+        let wrapper: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        let echoed = wrapper["INVALID_JSON"].as_str().unwrap();
+        assert!(echoed.ends_with('…'));
+        assert!(echoed.len() <= MALFORMED_RAW_ECHO_BYTES + '…'.len_utf8());
     }
 
     /// Engine-level counterpart to the state-machine test in
