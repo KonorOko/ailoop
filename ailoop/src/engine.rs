@@ -5,18 +5,18 @@ use std::time::Duration;
 
 use crate::errors::EngineError;
 use ailoop_core::{
-    AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason,
-    HookAction, Message, RunConfig, RunId, StepId, StreamChunk, ToolDecision, ToolResultContent,
-    Usage, UserBlock,
+    AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
+    FinishReason, HookAction, Message, RunConfig, RunId, StepId, StreamChunk, ToolDecision,
+    ToolResultContent, Usage, UserBlock,
 };
 use ailoop_tools::{ToolActivation, ToolContext, ToolRegistry, errors::ToolRegistryError};
 use async_stream::try_stream;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
 
-type AbortFuture = Pin<Box<dyn Future<Output = String> + Send>>;
+type AbortFuture = Pin<Box<dyn Future<Output = AbortReason> + Send>>;
 
-/// Builds the abort future that resolves with a textual reason when the
+/// Builds the abort future that resolves with an [`AbortReason`] when the
 /// configured timeout elapses or the [`CancellationToken`] is fired.
 /// Resolves to a never-completing future when neither is configured.
 fn build_abort_future(
@@ -28,22 +28,22 @@ fn build_abort_future(
             match cancellation {
                 Some(token) => {
                     token.cancelled().await;
-                    "cancelled by caller".to_string()
+                    AbortReason::Cancelled
                 }
-                None => std::future::pending::<String>().await,
+                None => std::future::pending::<AbortReason>().await,
             }
         };
         let timer_fut = async move {
             match timeout {
                 Some(d) => {
                     tokio::time::sleep(d).await;
-                    format!("timeout exceeded after {d:?}")
+                    AbortReason::Timeout(d)
                 }
-                None => std::future::pending::<String>().await,
+                None => std::future::pending::<AbortReason>().await,
             }
         };
         // Cancel takes priority on simultaneous fire so callers can rely
-        // on the "cancelled by caller" reason in a configured race.
+        // on `AbortReason::Cancelled` in a configured race.
         tokio::select! {
             biased;
             reason = cancel_fut => reason,
@@ -56,7 +56,7 @@ fn build_abort_future(
 /// caller receives `Err(reason)` and `fut` is dropped — which cancels
 /// any in-flight HTTP request, retry-backoff sleep, or tool execution
 /// behind it.
-async fn race_abort<F, T>(fut: F, abort: &mut AbortFuture) -> Result<T, String>
+async fn race_abort<F, T>(fut: F, abort: &mut AbortFuture) -> Result<T, AbortReason>
 where
     F: Future<Output = T>,
 {
@@ -74,7 +74,7 @@ where
 async fn fire_abort_hooks(
     middlewares: &[Arc<dyn ChatMiddleware>],
     run_id: &RunId,
-    reason: String,
+    reason: AbortReason,
     usage: Usage,
     new_messages: Vec<Message>,
 ) -> StreamChunk {
@@ -174,7 +174,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                 HookAction::Continue => {},
                 HookAction::Terminate {reason} => {
                     let chunk = fire_abort_hooks(
-                        &config.middlewares, &run_id, reason, Usage::default(), vec![],
+                        &config.middlewares, &run_id, AbortReason::Terminated { reason }, Usage::default(), vec![],
                     ).await;
                     yield chunk;
                     return;
@@ -357,19 +357,17 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                 // gating decision so a sanitizer can rewrite args before
                 // an `ApprovalMiddleware` sees them. Mutated `args` flow
                 // through to the tool invocation below.
-                let mut aborted = false;
-                let mut abort_reason = String::new();
+                let mut abort_reason = None;
                 for mw in &config.middlewares {
                     if let Err(reason) = race_abort(
                         mw.on_before_tool_call_mut(&run_id, &step_id, &name, &mut args),
                         &mut abort_fut,
                     ).await {
-                        aborted = true;
-                        abort_reason = reason;
+                        abort_reason = Some(reason);
                         break;
                     }
                 }
-                if aborted {
+                if let Some(abort_reason) = abort_reason {
                     if !tools_result.is_empty() {
                         current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
                     }
@@ -446,6 +444,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                             current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
                         }
                         let new_messages = current_messages.split_off(messages.len());
+                        let reason = AbortReason::ToolTerminated { tool_name: name.clone(), reason };
                         let chunk = fire_abort_hooks(
                             &config.middlewares, &run_id, reason, usage_run, new_messages,
                         ).await;
@@ -860,7 +859,9 @@ mod tests {
             "on_run_finished must fire exactly once on HookAction::Terminate"
         );
         match mw.last_reason.lock().unwrap().as_ref() {
-            Some(FinishReason::Aborted(r)) => assert_eq!(r, "budget exceeded"),
+            Some(FinishReason::Aborted(AbortReason::Terminated { reason })) => {
+                assert_eq!(reason, "budget exceeded")
+            }
             other => panic!("expected Aborted reason, got {other:?}"),
         }
 
@@ -872,7 +873,11 @@ mod tests {
             })
             .expect("run should emit RunFinished");
         assert!(
-            matches!(finished, FinishReason::Aborted(ref r) if r == "budget exceeded"),
+            matches!(
+                finished,
+                FinishReason::Aborted(AbortReason::Terminated { ref reason })
+                    if reason == "budget exceeded"
+            ),
             "RunFinished.reason mismatch: {finished:?}"
         );
     }

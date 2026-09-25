@@ -37,8 +37,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ailoop_core::{
-    ChatMiddleware, ChatRequest, FinishReason, HookAction, Message, RunConfig, RunId, StepId,
-    StreamChunk, ToolDecision, ToolResultContent, Usage,
+    AbortReason, ChatMiddleware, ChatRequest, FinishReason, HookAction, Message, RunConfig, RunId,
+    StepId, StreamChunk, ToolDecision, ToolResultContent, Usage,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -149,10 +149,30 @@ fn finish_reason_str(r: &FinishReason) -> &'static str {
 fn finish_reason_payload(r: &FinishReason) -> Value {
     let mut o = serde_json::Map::new();
     o.insert("kind".into(), json!(finish_reason_str(r)));
-    if let FinishReason::Aborted(reason) | FinishReason::Other(reason) = r {
-        o.insert("detail".into(), json!(reason));
+    match r {
+        FinishReason::Aborted(reason) => {
+            o.insert("detail".into(), json!(reason.to_string()));
+            o.insert("abort_kind".into(), json!(abort_kind_str(reason)));
+            if let AbortReason::ToolTerminated { tool_name, .. } = reason {
+                o.insert("tool_name".into(), json!(tool_name));
+            }
+        }
+        FinishReason::Other(reason) => {
+            o.insert("detail".into(), json!(reason));
+        }
+        _ => {}
     }
     Value::Object(o)
+}
+
+fn abort_kind_str(r: &AbortReason) -> &'static str {
+    match r {
+        AbortReason::Timeout(_) => "timeout",
+        AbortReason::Cancelled => "cancelled",
+        AbortReason::Terminated { .. } => "terminated",
+        AbortReason::ToolTerminated { .. } => "tool_terminated",
+        _ => "unknown",
+    }
 }
 
 fn usage_payload(u: &Usage) -> Value {
@@ -640,5 +660,32 @@ mod tests {
             );
             assert_eq!(line["schema"], json!(SCHEMA_VERSION));
         }
+    }
+
+    #[test]
+    fn aborted_payload_carries_detail_and_abort_kind() {
+        let payload = finish_reason_payload(&FinishReason::Aborted(AbortReason::ToolTerminated {
+            tool_name: "get_weather".into(),
+            reason: "loop".into(),
+        }));
+        assert_eq!(
+            payload,
+            json!({
+                "kind": "aborted",
+                "detail": "loop",
+                "abort_kind": "tool_terminated",
+                "tool_name": "get_weather",
+            })
+        );
+
+        let payload = finish_reason_payload(&FinishReason::Aborted(AbortReason::Cancelled));
+        assert_eq!(
+            payload,
+            json!({
+                "kind": "aborted",
+                "detail": "cancelled by caller",
+                "abort_kind": "cancelled",
+            })
+        );
     }
 }

@@ -1912,7 +1912,7 @@ mod tests {
 
     /// A token pre-cancelled before `stream_with_options` is awaited
     /// aborts the run at the first await boundary. The outcome is
-    /// `FinishReason::Aborted("cancelled by caller")` — never `Err`.
+    /// `FinishReason::Aborted(AbortReason::Cancelled)` — never `Err`.
     #[tokio::test]
     async fn run_options_cancellation_aborts_run() {
         let mut chat = Conversation::builder(one_turn_model())
@@ -1929,10 +1929,7 @@ mod tests {
 
         match outcome.finish_reason {
             FinishReason::Aborted(ref reason) => {
-                assert!(
-                    reason.contains("cancelled by caller"),
-                    "unexpected abort reason: {reason}"
-                );
+                assert_eq!(*reason, ailoop_core::AbortReason::Cancelled);
             }
             other => panic!("expected Aborted, got {other:?}"),
         }

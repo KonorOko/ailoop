@@ -52,7 +52,7 @@ pub use message::{
 pub use middleware::{ChatMiddleware, HookAction, ToolDecision};
 pub use request::{ChatRequest, ReasoningEffort, ToolChoice, ToolDefinition, ToolTag};
 pub use retry::{RetryClassification, RetryConfig, Retryable, RetryingModel};
-pub use stream::{FinishReason, StreamChunk, Usage};
+pub use stream::{AbortReason, FinishReason, StreamChunk, Usage};
 pub use tokenizer::{CharTokenizer, Tokenizer};
 pub use traits::{CompletionClient, CompletionModel};
 

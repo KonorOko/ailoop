@@ -91,6 +91,28 @@ and this project adheres to
   `ToolContext` directly — standalone callers go through
   `ToolContext::detached()`, whose signature is unchanged (it mints a
   fresh never-cancelled token internally).
+- `FinishReason::Aborted` now carries a structured `AbortReason`
+  (re-exported as `ailoop::AbortReason`) instead of a free-form
+  `String`. Callers can tell *why* a run stopped by matching on the
+  variant rather than parsing text:
+  - `Timeout(Duration)`: `RunConfig::timeout` / `RunOptions::timeout`
+    elapsed. It carries the configured duration.
+  - `Cancelled`: the `CancellationToken` fired. It still wins over a
+    timeout that fires at the same instant.
+  - `Terminated { reason }`: a middleware returned
+    `HookAction::Terminate` from `on_run_started`.
+  - `ToolTerminated { tool_name, reason }`: a middleware (`AntiLoop`,
+    `MaxToolCalls`, or your own) returned `ToolDecision::Terminate`. It
+    now also names the refused tool.
+
+  `AbortReason` is `#[non_exhaustive]`. Its `Display` renders exactly
+  the old strings (`"timeout exceeded after 30s"`,
+  `"cancelled by caller"`, or the middleware reason verbatim), so text
+  shown to users or to a parent model (for example
+  `SubAgentTool`'s `"sub-agent aborted: …"`) is unchanged.
+  `JsonTracer`'s `run_finished` payload keeps `reason.detail` and
+  gains `reason.abort_kind` (`timeout` / `cancelled` / `terminated` /
+  `tool_terminated`) plus `reason.tool_name` for tool terminations.
 
 ### Fixed
 
@@ -130,6 +152,26 @@ let ctx = ToolContext::new(run_id, step_id, activation);
 // After
 use ailoop::CancellationToken;
 let ctx = ToolContext::new(run_id, step_id, activation, CancellationToken::new());
+```
+
+`FinishReason::Aborted` carries `AbortReason`: match the variant, or
+call `.to_string()` where the old `String` was used.
+
+```rust
+// Before
+match outcome.finish_reason {
+    FinishReason::Aborted(msg) if msg.starts_with("timeout") => retry_later(),
+    FinishReason::Aborted(msg) => log::warn!("aborted: {msg}"),
+    _ => {}
+}
+
+// After
+use ailoop::AbortReason;
+match outcome.finish_reason {
+    FinishReason::Aborted(AbortReason::Timeout(_)) => retry_later(),
+    FinishReason::Aborted(reason) => log::warn!("aborted: {reason}"),
+    _ => {}
+}
 ```
 
 - `Conversation::stream_with_options` / `run_with_options` plus
