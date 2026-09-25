@@ -103,7 +103,6 @@ pub(crate) struct RequestDefaults {
     pub(crate) tool_choice: Option<ToolChoice>,
     pub(crate) disable_parallel_tool_use: Option<bool>,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
-    pub(crate) max_tokens: Option<u32>,
     pub(crate) additional_params: Option<Value>,
     pub(crate) overlay: Option<RequestOverlay>,
 }
@@ -117,7 +116,6 @@ impl RequestDefaults {
             || self.tool_choice.is_some()
             || self.disable_parallel_tool_use.is_some()
             || self.reasoning_effort.is_some()
-            || self.max_tokens.is_some()
             || self.additional_params.is_some()
             || self.overlay.is_some()
     }
@@ -155,9 +153,6 @@ impl ChatMiddleware for RequestDefaultsMiddleware {
         }
         if req.reasoning_effort.is_none() {
             req.reasoning_effort = self.defaults.reasoning_effort;
-        }
-        if let Some(mt) = self.defaults.max_tokens {
-            req.max_tokens = mt;
         }
         if req.additional_params.is_none() {
             req.additional_params = self.defaults.additional_params.clone();

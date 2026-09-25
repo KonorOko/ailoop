@@ -103,7 +103,12 @@ pub struct SubAgentConfig {
     /// with `is_error: true`.
     pub max_iterations: Option<usize>,
     /// Per-turn `max_tokens` override for every [`ChatRequest`] the
-    /// child run builds. Mapped to [`RunOptions::max_tokens`].
+    /// child run builds. Mapped to [`RunOptions::max_tokens`], so it
+    /// takes precedence over the child's
+    /// [`ConversationBuilder::max_tokens`](crate::ConversationBuilder::max_tokens);
+    /// `None` falls through to the child's builder default (or 4096).
+    /// A middleware on the child that rewrites `req.max_tokens` still
+    /// wins.
     ///
     /// [`ChatRequest`]: ailoop_core::ChatRequest
     pub max_tokens: Option<u32>,
@@ -725,6 +730,47 @@ mod tests {
             *captured.lock().unwrap(),
             Some(321),
             "ChatRequest.max_tokens must reflect SubAgentConfig.max_tokens"
+        );
+    }
+
+    /// `SubAgentConfig::max_tokens` beats the child conversation's
+    /// builder default.
+    #[tokio::test]
+    async fn sub_agent_config_max_tokens_overrides_child_builder_default() {
+        struct ReqSpy {
+            captured: Arc<StdMutex<Option<u32>>>,
+        }
+        #[async_trait::async_trait]
+        impl ChatMiddleware for ReqSpy {
+            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+                *self.captured.lock().unwrap() = Some(req.max_tokens);
+            }
+        }
+
+        let captured = Arc::new(StdMutex::new(None));
+        let model = ScriptedModel::new([one_text_turn("ok")]);
+        let conv = Conversation::builder(model)
+            .max_tokens(1000)
+            .middleware(Arc::new(ReqSpy {
+                captured: captured.clone(),
+            }))
+            .build()
+            .expect("build");
+        let tool = SubAgentTool::with_config(
+            "delegate",
+            "delegate",
+            conv,
+            SubAgentConfig::new().max_tokens(321),
+        );
+
+        let result = tool
+            .call(json!({"prompt": "anything"}), &ToolContext::detached())
+            .await;
+        assert!(!result.is_error, "happy path must not be flagged as error");
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(321),
+            "SubAgentConfig.max_tokens must win over the child's builder default"
         );
     }
 

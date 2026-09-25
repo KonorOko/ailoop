@@ -54,6 +54,7 @@ pub struct Conversation<M: CompletionModel> {
     history: History,
     tools: ToolRegistry,
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
+    max_tokens: Option<u32>,
 }
 
 /// Summary of a completed (or aborted) run, returned by
@@ -130,11 +131,15 @@ pub struct RunOptions {
     /// particular agentic task is known to be longer-running than the
     /// default would allow.
     pub max_iterations: Option<usize>,
-    /// Per-run `max_tokens` cap layered on every `ChatRequest`. `None`
-    /// keeps the engine default (4096). Builder-level
-    /// [`ConversationBuilder::max_tokens`] still wins because it is
-    /// applied by `RequestDefaultsMiddleware`, which runs after the
-    /// internal default; this knob is the floor.
+    /// Per-run `max_tokens` cap for every `ChatRequest` of this run.
+    ///
+    /// Precedence, highest first: a user middleware that rewrites
+    /// `req.max_tokens` in `on_chat_request` > this field >
+    /// [`ConversationBuilder::max_tokens`] > the engine default (4096).
+    /// `None` falls through to the builder default. The resolved value
+    /// is what [`RunConfig::max_tokens`] carries, so `on_run_started`
+    /// observers (e.g. [`JsonTracer`](crate::JsonTracer)) see the cap
+    /// actually sent.
     pub max_tokens: Option<u32>,
     /// Caller-supplied id for the run. When `None`, the engine mints a
     /// fresh UUID v4. Set this when an outer system needs to correlate
@@ -170,8 +175,9 @@ impl RunOptions {
         self
     }
 
-    /// Override [`ailoop_core::RunConfig::max_tokens`] for this run.
-    /// See [`Self::max_tokens`] for the precedence contract.
+    /// Override the `max_tokens` cap for this run, taking precedence
+    /// over [`ConversationBuilder::max_tokens`]. See
+    /// [`Self::max_tokens`] for the precedence contract.
     pub fn max_tokens(mut self, n: u32) -> Self {
         self.max_tokens = Some(n);
         self
@@ -409,7 +415,7 @@ impl<M: CompletionModel + Send + Sync> Conversation<M> {
         if let Some(n) = options.max_iterations {
             config.max_iterations = n;
         }
-        if let Some(n) = options.max_tokens {
+        if let Some(n) = options.max_tokens.or(self.max_tokens) {
             config.max_tokens = n;
         }
 
@@ -476,6 +482,7 @@ pub struct ConversationBuilder<M: CompletionModel> {
     initial_active: Option<Vec<String>>,
     approval: Option<ApprovalSpec>,
     request_defaults: RequestDefaults,
+    max_tokens: Option<u32>,
     errors: Vec<BuildError>,
 }
 
@@ -501,6 +508,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             initial_active: None,
             approval: None,
             request_defaults: RequestDefaults::default(),
+            max_tokens: None,
             errors: vec![],
         }
     }
@@ -861,13 +869,18 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
-    /// Default `max_tokens` applied to every [`ChatRequest`]. Unlike
-    /// the `Option`-typed controls, this clobbers the engine's
-    /// `RunConfig::max_tokens` because `ChatRequest::max_tokens` is a
-    /// non-optional `u32`. User middlewares running after this still
-    /// win.
+    /// Default `max_tokens` cap for every [`ChatRequest`] of every
+    /// run, replacing the engine default (4096).
+    ///
+    /// A per-run [`RunOptions::max_tokens`] (and therefore
+    /// [`SubAgentConfig::max_tokens`](crate::SubAgentConfig::max_tokens)
+    /// on a sub-agent's child conversation) overrides it, and a user
+    /// middleware rewriting `req.max_tokens` in `on_chat_request`
+    /// overrides both. The value is resolved into
+    /// [`RunConfig::max_tokens`] before the run starts rather than
+    /// applied by a middleware.
     pub fn max_tokens(mut self, n: u32) -> Self {
-        self.request_defaults.max_tokens = Some(n);
+        self.max_tokens = Some(n);
         self
     }
 
@@ -905,7 +918,6 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// 1. The internal `RequestDefaultsMiddleware` is prepended *only*
     ///    when at least one per-request default was set on the
     ///    builder ([`temperature`](Self::temperature),
-    ///    [`max_tokens`](Self::max_tokens),
     ///    [`request_defaults`](Self::request_defaults), …). It runs
     ///    first, so user middlewares see the defaults already applied
     ///    and can override unconditionally — defaults are a *floor*,
@@ -1014,6 +1026,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             history,
             tools,
             middlewares,
+            max_tokens: self.max_tokens,
         })
     }
 }
@@ -1618,6 +1631,101 @@ mod tests {
             Some(1.0),
             "user middleware must override the builder default"
         );
+    }
+
+    /// `max_tokens` recorded in the `run_started` line of a
+    /// [`JsonTracer`](crate::JsonTracer) log.
+    fn traced_run_started_max_tokens(path: &Path) -> u64 {
+        let raw = std::fs::read_to_string(path).expect("trace file should exist");
+        raw.lines()
+            .map(|l| serde_json::from_str::<Value>(l).expect("valid JSON line"))
+            .find(|l| l["kind"] == "run_started")
+            .expect("run_started line")["max_tokens"]
+            .as_u64()
+            .expect("max_tokens is a number")
+    }
+
+    /// A per-run `RunOptions::max_tokens` beats the builder default,
+    /// both on the wire and in what `run_started` observers see.
+    #[tokio::test]
+    async fn run_options_max_tokens_overrides_builder_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.ndjson");
+        let captured = Arc::new(Mutex::new(None));
+        let mut chat = Conversation::builder(one_turn_model())
+            .max_tokens(1000)
+            .middleware(Arc::new(crate::JsonTracer::new(&path).unwrap()))
+            .middleware(Arc::new(RecordingMiddleware {
+                out: captured.clone(),
+            }))
+            .build()
+            .expect("builder should succeed");
+
+        chat.run_with_options("hi", RunOptions::new().max_tokens(321))
+            .await
+            .expect("run should succeed");
+        drop(chat);
+
+        let rec = captured.lock().unwrap().clone().expect("recorded");
+        assert_eq!(rec.max_tokens, 321, "RunOptions must win over the builder");
+        assert_eq!(traced_run_started_max_tokens(&path), 321);
+    }
+
+    /// Without a per-run override the builder default applies, and a
+    /// builder whose only per-request default is `max_tokens` does
+    /// not insert the internal `RequestDefaultsMiddleware`.
+    #[tokio::test]
+    async fn builder_max_tokens_applies_without_run_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.ndjson");
+        let captured = Arc::new(Mutex::new(None));
+        let mut chat = Conversation::builder(one_turn_model())
+            .max_tokens(1000)
+            .middleware(Arc::new(crate::JsonTracer::new(&path).unwrap()))
+            .middleware(Arc::new(RecordingMiddleware {
+                out: captured.clone(),
+            }))
+            .build()
+            .expect("builder should succeed");
+        // JsonTracer + RecordingMiddleware + SystemPromptMiddleware.
+        assert_eq!(chat.middlewares.len(), 3);
+
+        chat.run("hi").await.expect("run should succeed");
+        drop(chat);
+
+        let rec = captured.lock().unwrap().clone().expect("recorded");
+        assert_eq!(rec.max_tokens, 1000);
+        assert_eq!(traced_run_started_max_tokens(&path), 1000);
+    }
+
+    /// A user middleware rewriting `req.max_tokens` still beats both
+    /// the builder default and `RunOptions::max_tokens`.
+    #[tokio::test]
+    async fn user_middleware_max_tokens_wins_over_run_options() {
+        struct Override;
+        #[async_trait::async_trait]
+        impl ChatMiddleware for Override {
+            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+                req.max_tokens = 77;
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(None));
+        let mut chat = Conversation::builder(one_turn_model())
+            .max_tokens(1000)
+            .middleware(Arc::new(Override))
+            .middleware(Arc::new(RecordingMiddleware {
+                out: captured.clone(),
+            }))
+            .build()
+            .expect("builder should succeed");
+
+        chat.run_with_options("hi", RunOptions::new().max_tokens(321))
+            .await
+            .expect("run should succeed");
+
+        let rec = captured.lock().unwrap().clone().expect("recorded");
+        assert_eq!(rec.max_tokens, 77);
     }
 
     /// The `request_defaults(closure)` overlay runs *after* the
