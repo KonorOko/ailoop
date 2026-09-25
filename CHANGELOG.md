@@ -402,6 +402,20 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- The `StreamChunk` variants the engine emits (`RunStarted`,
+  `StepStarted`, `StepFinished`, `ToolResult`, `RunFinished`,
+  `HistoryCompacted`) are `#[non_exhaustive]`. The enum already was, so
+  new chunks could be added, but a variant's fields could not grow
+  without breaking every match that listed them all, and these are the
+  chunks most likely to carry more context later. Match them with `..`.
+  Code outside `ailoop-core` builds them with the new constructors
+  `StreamChunk::run_started`, `step_started`, `step_finished`,
+  `tool_result`, `run_finished` and `history_compacted`, e.g. to feed a
+  middleware's `on_chunk` in a test. The variants providers emit
+  (`TextDelta`, `ToolCall*`, `Reasoning*`, `TurnFinished`) are
+  unchanged: adapters and `ScriptedModel` scripts keep building them
+  with struct syntax.
+
 - The run-level hooks of `ChatMiddleware` take one context struct in
   place of positional arguments:
   `on_run_started(&RunStartInfo)`, `on_chat_request(&StepInfo, req)`,
@@ -551,19 +565,23 @@ and this project adheres to
     timeout that fires at the same instant.
   - `Terminated { reason }`: a middleware returned
     `HookAction::Terminate` from `on_run_started`.
-  - `ToolTerminated { tool_name, reason }`: a middleware (`AntiLoop`,
-    `MaxToolCalls`, or your own) returned `ToolDecision::Terminate`. It
-    now also names the refused tool.
+  - `ToolTerminated { tool_name, call_id, reason }`: a middleware
+    (`AntiLoop`, `MaxToolCalls`, or your own) returned
+    `ToolDecision::Terminate`. It now also names the refused tool and
+    carries the refused call's id.
 
-  `AbortReason` is `#[non_exhaustive]`. Its `Display` renders exactly
+  `AbortReason` is `#[non_exhaustive]`, and so are its struct variants
+  `Terminated` and `ToolTerminated`: match them with `..` and build them
+  with `AbortReason::terminated(reason)` /
+  `AbortReason::tool_terminated(tool_name, call_id, reason)`. Its `Display` renders exactly
   the old strings (`"timeout exceeded after 30s"`,
   `"cancelled by caller"`, or the middleware reason verbatim), so text
   shown to users or to a parent model (for example
   `SubAgentTool`'s `"sub-agent aborted: …"`) is unchanged.
   `JsonTracer`'s `run_finished` payload keeps `reason.detail` and
   gains `reason.abort_kind` (`timeout` / `cancelled` / `terminated` /
-  `tool_terminated` / `max_iterations`) plus `reason.tool_name` for
-  tool terminations.
+  `tool_terminated` / `max_iterations`) plus `reason.tool_name` and
+  `reason.call_id` for tool terminations.
 - Reaching `RunConfig::max_iterations` (or `RunOptions::max_iterations`
   / `SubAgentConfig::max_iterations`) is now an abort, not an error.
   The run returns `Ok` with
@@ -709,6 +727,19 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Engine-emitted chunks need `..` in patterns and a constructor outside
+`ailoop-core`:
+
+```rust
+// Before (1.0.0-rc.3)
+if let StreamChunk::StepStarted { run_id, step_id, iteration } = &chunk { /* .. */ }
+let chunk = StreamChunk::RunFinished { run_id, reason, usage, new_messages };
+
+// After
+if let StreamChunk::StepStarted { run_id, step_id, iteration, .. } = &chunk { /* .. */ }
+let chunk = StreamChunk::run_finished(run_id, reason, usage, new_messages);
+```
 
 Run-level hooks take a context struct; read the old arguments from its
 fields:

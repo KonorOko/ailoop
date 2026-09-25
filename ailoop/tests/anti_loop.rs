@@ -93,6 +93,7 @@ async fn tool_call_loop_aborts_on_third_identical_call() {
         FinishReason::Aborted(AbortReason::ToolTerminated {
             tool_name,
             reason: r,
+            ..
         }) => {
             assert_eq!(tool_name, "get_weather");
             assert!(

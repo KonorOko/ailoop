@@ -141,7 +141,7 @@ async fn hook_terminate_produces_terminated() {
     let outcome = chat.run("hi").await.expect("aborts are Ok");
 
     match outcome.finish_reason {
-        FinishReason::Aborted(ref r @ AbortReason::Terminated { ref reason }) => {
+        FinishReason::Aborted(ref r @ AbortReason::Terminated { ref reason, .. }) => {
             assert_eq!(reason, "quota exhausted");
             assert_eq!(r.to_string(), "quota exhausted");
         }
@@ -176,6 +176,7 @@ async fn tool_terminate_produces_tool_terminated_with_tool_name() {
             ref r @ AbortReason::ToolTerminated {
                 ref tool_name,
                 ref reason,
+                ..
             },
         ) => {
             assert_eq!(tool_name, "get_weather");

@@ -154,8 +154,12 @@ fn finish_reason_payload(r: &FinishReason) -> Value {
         FinishReason::Aborted(reason) => {
             o.insert("detail".into(), json!(reason.to_string()));
             o.insert("abort_kind".into(), json!(abort_kind_str(reason)));
-            if let AbortReason::ToolTerminated { tool_name, .. } = reason {
+            if let AbortReason::ToolTerminated {
+                tool_name, call_id, ..
+            } = reason
+            {
                 o.insert("tool_name".into(), json!(tool_name));
+                o.insert("call_id".into(), json!(call_id));
             }
         }
         FinishReason::Other(reason) => {
@@ -290,6 +294,7 @@ impl ChatMiddleware for JsonTracer {
                 step_id,
                 call_id,
                 content,
+                ..
             } => {
                 let mut p = serde_json::Map::new();
                 p.insert("run_id".into(), json!(run_id.to_string()));
@@ -305,6 +310,7 @@ impl ChatMiddleware for JsonTracer {
                 run_id,
                 step_id,
                 iteration,
+                ..
             } => {
                 let mut p = serde_json::Map::new();
                 p.insert("run_id".into(), json!(run_id.to_string()));
@@ -317,6 +323,7 @@ impl ChatMiddleware for JsonTracer {
                 step_id,
                 iteration,
                 new_messages_so_far,
+                ..
             } => {
                 let mut p = serde_json::Map::new();
                 p.insert("run_id".into(), json!(run_id.to_string()));
@@ -341,6 +348,7 @@ impl ChatMiddleware for JsonTracer {
                 before_count,
                 after_count,
                 strategy,
+                ..
             } => {
                 let mut p = serde_json::Map::new();
                 p.insert("run_id".into(), json!(run_id.to_string()));
@@ -467,12 +475,12 @@ mod tests {
             )
             .await;
         tracer
-            .on_chunk(&StreamChunk::HistoryCompacted {
-                run_id: run_id.clone(),
-                before_count: 12,
-                after_count: 4,
-                strategy: "truncate",
-            })
+            .on_chunk(&StreamChunk::history_compacted(
+                run_id.clone(),
+                12,
+                4,
+                "truncate",
+            ))
             .await;
         tracer
             .on_run_finished(&RunFinishedInfo::new(
@@ -753,11 +761,11 @@ mod tests {
                     delta: format!("task{label}-msg{i}"),
                 })
                 .await;
-                t.on_chunk(&StreamChunk::StepStarted {
-                    run_id: run_id.clone(),
-                    step_id: step_id.clone(),
-                    iteration: i,
-                })
+                t.on_chunk(&StreamChunk::step_started(
+                    run_id.clone(),
+                    step_id.clone(),
+                    i,
+                ))
                 .await;
             }
         };
@@ -784,10 +792,11 @@ mod tests {
 
     #[test]
     fn aborted_payload_carries_detail_and_abort_kind() {
-        let payload = finish_reason_payload(&FinishReason::Aborted(AbortReason::ToolTerminated {
-            tool_name: "get_weather".into(),
-            reason: "loop".into(),
-        }));
+        let payload = finish_reason_payload(&FinishReason::Aborted(AbortReason::tool_terminated(
+            "get_weather",
+            "toolu_1",
+            "loop",
+        )));
         assert_eq!(
             payload,
             json!({
@@ -795,6 +804,7 @@ mod tests {
                 "detail": "loop",
                 "abort_kind": "tool_terminated",
                 "tool_name": "get_weather",
+                "call_id": "toolu_1",
             })
         );
 

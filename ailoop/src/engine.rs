@@ -182,23 +182,13 @@ async fn run_finished_chunk(
     new_messages: Vec<Message>,
 ) -> StreamChunk {
     let original = (reason.clone(), usage, new_messages.clone());
-    let mut chunk = StreamChunk::RunFinished {
-        run_id: run_id.clone(),
-        reason,
-        usage,
-        new_messages,
-    };
+    let mut chunk = StreamChunk::run_finished(run_id.clone(), reason, usage, new_messages);
     for mw in middlewares {
         mw.on_chunk_mut(&mut chunk).await;
     }
     if !matches!(chunk, StreamChunk::RunFinished { .. }) {
         let (reason, usage, new_messages) = original;
-        chunk = StreamChunk::RunFinished {
-            run_id: run_id.clone(),
-            reason,
-            usage,
-            new_messages,
-        };
+        chunk = StreamChunk::run_finished(run_id.clone(), reason, usage, new_messages);
     }
     for mw in middlewares {
         mw.on_chunk(&chunk).await;
@@ -231,12 +221,8 @@ async fn abort_step(
             PendingCall::Run { id, .. } => (id, not_run_result(&reason)),
             PendingCall::Rejected { id, content } => (id, content),
         };
-        let mut chunk = StreamChunk::ToolResult {
-            run_id: run_id.clone(),
-            step_id: step_id.clone(),
-            call_id: id.clone(),
-            content: content.clone(),
-        };
+        let mut chunk =
+            StreamChunk::tool_result(run_id.clone(), step_id.clone(), id.clone(), content.clone());
         for mw in middlewares {
             mw.on_chunk_mut(&mut chunk).await;
         }
@@ -415,12 +401,12 @@ async fn history_compacted_chunk(
     run_id: &RunId,
     report: CompactionReport,
 ) -> StreamChunk {
-    let mut chunk = StreamChunk::HistoryCompacted {
-        run_id: run_id.clone(),
-        before_count: report.before,
-        after_count: report.after,
-        strategy: report.strategy,
-    };
+    let mut chunk = StreamChunk::history_compacted(
+        run_id.clone(),
+        report.before,
+        report.after,
+        report.strategy,
+    );
     for mw in middlewares {
         mw.on_chunk_mut(&mut chunk).await;
     }
@@ -578,7 +564,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 HookAction::Continue => {},
                 HookAction::Terminate {reason} => {
                     let chunk = fire_abort_hooks(
-                        &guard, AbortReason::Terminated { reason }, Usage::default(), vec![],
+                        &guard, AbortReason::terminated(reason), Usage::default(), vec![],
                     ).await;
                     yield chunk;
                     return;
@@ -587,7 +573,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
             };
         }
 
-        let mut chunk = StreamChunk::RunStarted { run_id: run_id.clone() };
+        let mut chunk = StreamChunk::run_started(run_id.clone());
         for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
         for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
         yield chunk;
@@ -649,7 +635,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
             }
 
             let step_id = StepId::new();
-            let mut chunk = StreamChunk::StepStarted { run_id: run_id.clone(), step_id: step_id.clone(), iteration };
+            let mut chunk = StreamChunk::step_started(run_id.clone(), step_id.clone(), iteration);
             for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
             for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
             yield chunk;
@@ -895,12 +881,12 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     // Nothing runs, so no tool hook fires: the synthesized
                     // error only goes out as a ToolResult chunk.
                     PendingCall::Rejected { id, content } => {
-                        let mut chunk = StreamChunk::ToolResult {
-                            run_id: run_id.clone(),
-                            step_id: step_id.clone(),
-                            call_id: id.clone(),
-                            content: content.clone(),
-                        };
+                        let mut chunk = StreamChunk::tool_result(
+                            run_id.clone(),
+                            step_id.clone(),
+                            id.clone(),
+                            content.clone(),
+                        );
                         for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
                         for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
                         yield chunk;
@@ -987,7 +973,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         ToolResultContent::error(format!("Tool skipped: {reason}"))
                     },
                     ToolDecision::Terminate {reason} => {
-                        let reason = AbortReason::ToolTerminated { tool_name: name.clone(), reason };
+                        let reason = AbortReason::tool_terminated(name.clone(), id.clone(), reason);
                         let current = PendingCall::Run { id, name, args };
                         let chunks = abort_step(
                             &guard, &step_id, reason, usage_run + delegated.total(),
@@ -1040,12 +1026,12 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     }
                 }
 
-                let mut chunk = StreamChunk::ToolResult {
-                    run_id: run_id.clone(),
-                    step_id: step_id.clone(),
-                    call_id: id.clone(),
-                    content: content.clone(),
-                };
+                let mut chunk = StreamChunk::tool_result(
+                    run_id.clone(),
+                    step_id.clone(),
+                    id.clone(),
+                    content.clone(),
+                );
                 for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
                 for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
                 yield chunk;
@@ -1092,12 +1078,12 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
             }
             run_msgs.complete_step();
 
-            let mut chunk = StreamChunk::StepFinished {
-                run_id: run_id.clone(),
-                step_id: step_id.clone(),
+            let mut chunk = StreamChunk::step_finished(
+                run_id.clone(),
+                step_id.clone(),
                 iteration,
-                new_messages_so_far: Arc::new(run_msgs.new_so_far().to_vec()),
-            };
+                Arc::new(run_msgs.new_so_far().to_vec()),
+            );
             for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
             for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
             yield chunk;
@@ -1507,7 +1493,7 @@ mod tests {
         let run_ids: Vec<&RunId> = chunks
             .iter()
             .filter_map(|c| match c {
-                StreamChunk::RunStarted { run_id }
+                StreamChunk::RunStarted { run_id, .. }
                 | StreamChunk::StepStarted { run_id, .. }
                 | StreamChunk::StepFinished { run_id, .. }
                 | StreamChunk::ToolResult { run_id, .. }
@@ -1612,7 +1598,7 @@ mod tests {
             "on_run_finished must fire exactly once on HookAction::Terminate"
         );
         match mw.last_reason.lock().unwrap().as_ref() {
-            Some(FinishReason::Aborted(AbortReason::Terminated { reason })) => {
+            Some(FinishReason::Aborted(AbortReason::Terminated { reason, .. })) => {
                 assert_eq!(reason, "budget exceeded")
             }
             other => panic!("expected Aborted reason, got {other:?}"),
@@ -1628,7 +1614,7 @@ mod tests {
         assert!(
             matches!(
                 finished,
-                FinishReason::Aborted(AbortReason::Terminated { ref reason })
+                FinishReason::Aborted(AbortReason::Terminated { ref reason, .. })
                     if reason == "budget exceeded"
             ),
             "RunFinished.reason mismatch: {finished:?}"

@@ -124,6 +124,7 @@ impl ChatMiddleware for TracingMiddleware {
                 before_count,
                 after_count,
                 strategy,
+                ..
             } => {
                 tracing::info!(
                     target: "ailoop.compaction",
@@ -276,12 +277,12 @@ mod tests {
                     &[],
                 ))
                 .await;
-                mw.on_chunk(&StreamChunk::HistoryCompacted {
-                    run_id: run_id.clone(),
-                    before_count: 12,
-                    after_count: 4,
-                    strategy: "truncate",
-                })
+                mw.on_chunk(&StreamChunk::history_compacted(
+                    run_id.clone(),
+                    12,
+                    4,
+                    "truncate",
+                ))
                 .await;
             });
         });

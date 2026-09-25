@@ -525,7 +525,7 @@ async fn hook_action_terminate_still_fires_on_run_finished() {
 
     assert_eq!(recorder.finished.load(Ordering::SeqCst), 1);
     match recorder.last_reason.lock().unwrap().as_ref() {
-        Some(FinishReason::Aborted(AbortReason::Terminated { reason })) => {
+        Some(FinishReason::Aborted(AbortReason::Terminated { reason, .. })) => {
             assert_eq!(reason, "no go")
         }
         other => panic!("expected Aborted reason, got {other:?}"),

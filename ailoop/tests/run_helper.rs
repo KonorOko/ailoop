@@ -191,7 +191,9 @@ async fn run_returns_ok_with_aborted_finish_reason_on_timeout() {
     let outcome = chat.run("hi").await.expect("aborted run is not Err");
 
     match &outcome.finish_reason {
-        FinishReason::Aborted(AbortReason::Terminated { reason }) => assert_eq!(reason, "policy"),
+        FinishReason::Aborted(AbortReason::Terminated { reason, .. }) => {
+            assert_eq!(reason, "policy")
+        }
         other => panic!("expected Aborted, got {other:?}"),
     }
     assert!(

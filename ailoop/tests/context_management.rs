@@ -225,7 +225,7 @@ async fn compacts_between_iterations_when_enabled() {
     let chunks: Vec<StreamChunk> = chunks.into_iter().map(|c| c.expect("no error")).collect();
 
     let run_id = match &chunks[0] {
-        StreamChunk::RunStarted { run_id } => run_id.clone(),
+        StreamChunk::RunStarted { run_id, .. } => run_id.clone(),
         other => panic!("no pre-run compaction expected, got {other:?}"),
     };
     let pos = |pred: &dyn Fn(&StreamChunk) -> bool| chunks.iter().position(pred).unwrap();
@@ -239,6 +239,7 @@ async fn compacts_between_iterations_when_enabled() {
             before_count,
             after_count,
             strategy,
+            ..
         } => {
             assert_eq!(compacted_run_id, &run_id);
             // 4 prior + kickoff + tool_use + tool_result → kickoff + pair.

@@ -157,12 +157,14 @@ pub enum StreamChunk {
     // Extend
     /// Engine has accepted the run; emitted exactly once per run
     /// before the first provider call.
+    #[non_exhaustive]
     RunStarted {
         /// Identifier shared by every chunk this run produces.
         run_id: RunId,
     },
     /// Engine is starting a step (one provider turn plus the tool
     /// calls it triggers).
+    #[non_exhaustive]
     StepStarted {
         /// Run this step belongs to.
         run_id: RunId,
@@ -175,6 +177,7 @@ pub enum StreamChunk {
     /// Engine has finished a step. Includes the cumulative messages
     /// added to history so far, so observers can snapshot
     /// mid-conversation without waiting for [`Self::RunFinished`].
+    #[non_exhaustive]
     StepFinished {
         /// Run this step belongs to.
         run_id: RunId,
@@ -193,6 +196,7 @@ pub enum StreamChunk {
     /// [`Self::ToolCallMalformed`], and for every call a run aborted
     /// before running (`"Tool not run: the run was aborted (<reason>)"`),
     /// so each call of a step gets exactly one `ToolResult`.
+    #[non_exhaustive]
     ToolResult {
         /// Run that owns the tool call.
         run_id: RunId,
@@ -206,6 +210,7 @@ pub enum StreamChunk {
     },
     /// Engine has finished the run. Emitted exactly once per run,
     /// even on aborts and middleware terminations.
+    #[non_exhaustive]
     RunFinished {
         /// Run that just finished.
         run_id: RunId,
@@ -235,6 +240,7 @@ pub enum StreamChunk {
     /// context-window overflow, right before the request is retried.
     /// Mid-run counts cover the whole history, including the messages
     /// the run has added so far.
+    #[non_exhaustive]
     HistoryCompacted {
         /// Run for which compaction ran. Shared with the
         /// engine-emitted chunks of the same run.
@@ -251,6 +257,83 @@ pub enum StreamChunk {
 }
 
 impl StreamChunk {
+    /// Build a [`StreamChunk::RunStarted`]. The engine-emitted variants
+    /// are `#[non_exhaustive]` so they can gain fields; these
+    /// constructors are how code outside `ailoop-core` builds them,
+    /// e.g. to unit-test a middleware's [`crate::ChatMiddleware::on_chunk`].
+    pub fn run_started(run_id: RunId) -> Self {
+        Self::RunStarted { run_id }
+    }
+
+    /// Build a [`StreamChunk::StepStarted`].
+    pub fn step_started(run_id: RunId, step_id: StepId, iteration: usize) -> Self {
+        Self::StepStarted {
+            run_id,
+            step_id,
+            iteration,
+        }
+    }
+
+    /// Build a [`StreamChunk::StepFinished`].
+    pub fn step_finished(
+        run_id: RunId,
+        step_id: StepId,
+        iteration: usize,
+        new_messages_so_far: Arc<Vec<Message>>,
+    ) -> Self {
+        Self::StepFinished {
+            run_id,
+            step_id,
+            iteration,
+            new_messages_so_far,
+        }
+    }
+
+    /// Build a [`StreamChunk::ToolResult`].
+    pub fn tool_result(
+        run_id: RunId,
+        step_id: StepId,
+        call_id: impl Into<String>,
+        content: ToolResultContent,
+    ) -> Self {
+        Self::ToolResult {
+            run_id,
+            step_id,
+            call_id: call_id.into(),
+            content,
+        }
+    }
+
+    /// Build a [`StreamChunk::RunFinished`].
+    pub fn run_finished(
+        run_id: RunId,
+        reason: FinishReason,
+        usage: Usage,
+        new_messages: Vec<Message>,
+    ) -> Self {
+        Self::RunFinished {
+            run_id,
+            reason,
+            usage,
+            new_messages,
+        }
+    }
+
+    /// Build a [`StreamChunk::HistoryCompacted`].
+    pub fn history_compacted(
+        run_id: RunId,
+        before_count: usize,
+        after_count: usize,
+        strategy: &'static str,
+    ) -> Self {
+        Self::HistoryCompacted {
+            run_id,
+            before_count,
+            after_count,
+            strategy,
+        }
+    }
+
     /// Closes a streamed tool call from its accumulated argument text.
     ///
     /// Returns [`StreamChunk::ToolCallFinished`] when `raw` parses to a
@@ -338,6 +421,7 @@ pub enum AbortReason {
     Cancelled,
     /// A middleware returned [`crate::HookAction::Terminate`] from
     /// [`crate::ChatMiddleware::on_run_started`].
+    #[non_exhaustive]
     Terminated {
         /// The middleware-supplied reason.
         reason: String,
@@ -345,9 +429,13 @@ pub enum AbortReason {
     /// A middleware returned [`crate::ToolDecision::Terminate`] from
     /// [`crate::ChatMiddleware::on_before_tool_call`] (e.g. `AntiLoop`
     /// or `MaxToolCalls`).
+    #[non_exhaustive]
     ToolTerminated {
         /// Name of the tool whose call was refused.
         tool_name: String,
+        /// Provider-assigned id of the refused call, the same as
+        /// `call_id` on [`crate::ToolCallInfo`].
+        call_id: String,
         /// The middleware-supplied reason.
         reason: String,
     },
@@ -356,6 +444,30 @@ pub enum AbortReason {
     /// Messages produced up to that point (including every tool
     /// result) are kept in `new_messages`.
     MaxIterations(usize),
+}
+
+impl AbortReason {
+    /// Build an [`AbortReason::Terminated`]. The struct variants are
+    /// `#[non_exhaustive]`; these constructors build them outside
+    /// `ailoop-core`.
+    pub fn terminated(reason: impl Into<String>) -> Self {
+        Self::Terminated {
+            reason: reason.into(),
+        }
+    }
+
+    /// Build an [`AbortReason::ToolTerminated`].
+    pub fn tool_terminated(
+        tool_name: impl Into<String>,
+        call_id: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::ToolTerminated {
+            tool_name: tool_name.into(),
+            call_id: call_id.into(),
+            reason: reason.into(),
+        }
+    }
 }
 
 impl fmt::Display for AbortReason {
@@ -486,11 +598,7 @@ mod tests {
             "policy"
         );
         assert_eq!(
-            AbortReason::ToolTerminated {
-                tool_name: "search".into(),
-                reason: "loop detected".into()
-            }
-            .to_string(),
+            AbortReason::tool_terminated("search", "toolu_1", "loop detected").to_string(),
             "loop detected"
         );
         assert_eq!(

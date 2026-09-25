@@ -375,6 +375,7 @@ where
                 reason,
                 usage,
                 new_messages,
+                ..
             } = chunk?
             {
                 finished = Some((run_id, reason, usage, new_messages));
@@ -521,12 +522,8 @@ where
 
         let prelude: BoxStream<'_, Result<StreamChunk, RunError<M::Error>>> = match report {
             Some(r) => {
-                let mut chunk = StreamChunk::HistoryCompacted {
-                    run_id,
-                    before_count: r.before,
-                    after_count: r.after,
-                    strategy: r.strategy,
-                };
+                let mut chunk =
+                    StreamChunk::history_compacted(run_id, r.before, r.after, r.strategy);
                 let middlewares = self.middlewares.clone();
                 Box::pin(futures::stream::once(async move {
                     for mw in &middlewares {
@@ -1626,6 +1623,7 @@ mod tests {
                 before_count,
                 after_count,
                 strategy,
+                ..
             } => {
                 assert!(after_count < before_count, "compaction must shrink history");
                 assert_eq!(strategy, "truncate");
@@ -1638,7 +1636,7 @@ mod tests {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.unwrap();
             match &chunk {
-                StreamChunk::RunStarted { run_id }
+                StreamChunk::RunStarted { run_id, .. }
                 | StreamChunk::StepStarted { run_id, .. }
                 | StreamChunk::StepFinished { run_id, .. }
                 | StreamChunk::ToolResult { run_id, .. }
