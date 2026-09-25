@@ -30,3 +30,8 @@ pub trait ProviderError {
         false
     }
 }
+
+/// A model that cannot fail never overflows. Lets mocks and
+/// infallible models (`type Error = Infallible`) satisfy a
+/// `ProviderError` bound without boilerplate.
+impl ProviderError for std::convert::Infallible {}

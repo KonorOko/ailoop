@@ -7,8 +7,8 @@
 //! ## Happy path
 //!
 //! ```no_run
-//! # async fn run<M: ailoop::CompletionModel + Send + Sync>(model: M)
-//! # -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn run<M>(model: M) -> Result<(), Box<dyn std::error::Error>>
+//! # where M: ailoop::CompletionModel + Send + Sync, M::Error: ailoop::ProviderError {
 //! let mut chat = ailoop::Conversation::builder(model)
 //!     .system_prompt("You are a helpful assistant.")
 //!     .build()?;

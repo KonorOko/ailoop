@@ -184,10 +184,18 @@ pub enum StreamChunk {
         /// consistent shape.
         new_messages: Vec<Message>,
     },
-    /// Emitted by `Conversation::stream` (not the engine) when history
-    /// compaction ran before the request was sent. Carries message
+    /// History compaction ran on behalf of this run. Carries message
     /// counts from before/after compaction and the strategy's name so
     /// observability middlewares can report what was dropped.
+    ///
+    /// Emitted by the history-backed `Conversation` path (never by
+    /// bare `run_chat`) at three points: as the first chunk when the
+    /// history was compacted before the run started; between a
+    /// `StepFinished` and the next `StepStarted` when compacting
+    /// between iterations is enabled; and inside a step after a
+    /// context-window overflow, right before the request is retried.
+    /// Mid-run counts cover the whole history, including the messages
+    /// the run has added so far.
     HistoryCompacted {
         /// Run for which compaction ran. Shared with the
         /// engine-emitted chunks of the same run.

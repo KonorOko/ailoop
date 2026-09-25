@@ -9,10 +9,14 @@ use ailoop_core::{
     FinishReason, HookAction, Message, RunConfig, RunId, StepId, StreamChunk, ToolDecision,
     ToolResultContent, Usage, UserBlock,
 };
+use ailoop_history::{CompactionError, CompactionReport, History};
 use ailoop_tools::{ToolActivation, ToolContext, ToolRegistry, errors::ToolRegistryError};
 use async_stream::try_stream;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
+
+/// Stream of engine chunks for one run.
+type EngineStream<'a, E> = BoxStream<'a, Result<StreamChunk, EngineError<E>>>;
 
 type AbortFuture = Pin<Box<dyn Future<Output = AbortReason> + Send>>;
 
@@ -113,6 +117,143 @@ macro_rules! bail_with_hooks {
     };
 }
 
+/// In-run context management switches for the [`History`]-backed
+/// engine path. Set from `ConversationBuilder`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ContextOptions {
+    /// Run [`History::compact_if_needed`] before every provider call
+    /// after the first one.
+    pub(crate) compact_between_iterations: bool,
+    /// On a context-overflow setup error, force a compaction and
+    /// reissue the request once.
+    pub(crate) recover_from_overflow: bool,
+}
+
+/// A [`History`] the engine appends to in place for the duration of a
+/// run, with rollback: until [`Self::commit`] runs, dropping this value
+/// restores the messages and pin mask captured at construction. That
+/// keeps the pre-existing contract that a run ending in `Err` (or a
+/// stream dropped mid-run) leaves the history exactly as it was when
+/// the run started, even when the run compacted it along the way.
+struct ManagedHistory<'a> {
+    history: &'a mut History,
+    rollback: Option<(Vec<Message>, Vec<bool>)>,
+    options: ContextOptions,
+}
+
+impl ManagedHistory<'_> {
+    fn commit(&mut self) {
+        self.rollback = None;
+    }
+}
+
+impl Drop for ManagedHistory<'_> {
+    fn drop(&mut self) {
+        if let Some((messages, pinned)) = self.rollback.take() {
+            self.history
+                .replace_messages(messages, pinned)
+                .expect("rollback state was captured from the same history");
+        }
+    }
+}
+
+enum RunContext<'a> {
+    /// [`run_chat`]: a caller-owned message vector, no compaction.
+    Plain(Vec<Message>),
+    /// `Conversation`: the live history, compactable mid-run.
+    Managed(ManagedHistory<'a>),
+}
+
+/// The context sent to the model plus an append-only log of what this
+/// run added. The two diverge once the context is compacted mid-run:
+/// `RunFinished.new_messages` and `StepFinished.new_messages_so_far`
+/// keep reporting everything the run produced, while the request (and
+/// the final history) carry the compacted context.
+struct RunMessages<'a> {
+    context: RunContext<'a>,
+    new_messages: Vec<Message>,
+}
+
+impl<'a> RunMessages<'a> {
+    fn context(&self) -> &[Message] {
+        match &self.context {
+            RunContext::Plain(messages) => messages,
+            RunContext::Managed(managed) => managed.history.messages(),
+        }
+    }
+
+    fn push(&mut self, message: Message) {
+        match &mut self.context {
+            RunContext::Plain(messages) => messages.push(message.clone()),
+            RunContext::Managed(managed) => managed.history.add_message(message.clone()),
+        }
+        self.new_messages.push(message);
+    }
+
+    fn new_so_far(&self) -> &[Message] {
+        &self.new_messages
+    }
+
+    /// Commit the run's changes to the managed history and hand back
+    /// the run's messages. Called exactly once, right before the
+    /// terminal `RunFinished` is built.
+    fn finish(&mut self) -> Vec<Message> {
+        if let RunContext::Managed(managed) = &mut self.context {
+            managed.commit();
+        }
+        std::mem::take(&mut self.new_messages)
+    }
+
+    fn managed(&mut self) -> Option<&mut ManagedHistory<'a>> {
+        match &mut self.context {
+            RunContext::Plain(_) => None,
+            RunContext::Managed(managed) => Some(managed),
+        }
+    }
+}
+
+/// Runs the history's compaction strategy (forced, or only when over
+/// budget) and reports whether it made progress, i.e. whether
+/// [`History::estimated_tokens`] went down.
+async fn compact(
+    history: &mut History,
+    force: bool,
+) -> Result<Option<(CompactionReport, bool)>, CompactionError> {
+    let before = history.estimated_tokens();
+    let report = if force {
+        history.force_compact().await?
+    } else {
+        match history.compact_if_needed().await? {
+            Some(report) => report,
+            None => return Ok(None),
+        }
+    };
+    let progressed = history.estimated_tokens() < before;
+    Ok(Some((report, progressed)))
+}
+
+/// Builds the [`StreamChunk::HistoryCompacted`] for `report` and runs
+/// it through the middleware chain like every engine-emitted chunk.
+async fn history_compacted_chunk(
+    middlewares: &[Arc<dyn ChatMiddleware>],
+    run_id: &RunId,
+    report: CompactionReport,
+) -> StreamChunk {
+    let mut chunk = StreamChunk::HistoryCompacted {
+        run_id: run_id.clone(),
+        before_count: report.before,
+        after_count: report.after,
+        strategy: report.strategy,
+    };
+    for mw in middlewares {
+        mw.on_chunk_mut(&mut chunk).await;
+    }
+    for mw in middlewares {
+        mw.on_chunk(&chunk).await;
+    }
+    chunk
+}
+
 /// Drives the agent loop end-to-end against a fixed `messages` slice and
 /// the supplied [`ToolRegistry`], yielding a stream of [`StreamChunk`]s
 /// that always terminates with a [`StreamChunk::RunFinished`].
@@ -123,14 +264,72 @@ macro_rules! bail_with_hooks {
 /// point leaves to the caller. Use this directly only when you need
 /// engine-level access without a `History` in the loop.
 ///
+/// Without a `History` there is nothing to compact: the context grows
+/// with every tool result for the whole run, and a context-window
+/// overflow from the provider surfaces as [`EngineError::Model`]. The
+/// in-run compaction and overflow recovery described on
+/// [`ConversationBuilder::compact_between_iterations`] and
+/// [`ConversationBuilder::recover_from_context_overflow`] are only
+/// available through [`Conversation`](crate::Conversation).
+///
 /// [`Conversation::run`]: crate::Conversation::run
 /// [`Conversation::stream`]: crate::Conversation::stream
+/// [`ConversationBuilder::compact_between_iterations`]: crate::ConversationBuilder::compact_between_iterations
+/// [`ConversationBuilder::recover_from_context_overflow`]: crate::ConversationBuilder::recover_from_context_overflow
 pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
     model: &'a M,
     messages: Vec<Message>,
     tools: &'a ToolRegistry,
     config: RunConfig,
 ) -> Result<BoxStream<'a, Result<StreamChunk, EngineError<M::Error>>>, EngineError<M::Error>> {
+    Ok(run_engine(
+        model,
+        RunContext::Plain(messages),
+        tools,
+        config,
+        |_| false,
+    ))
+}
+
+/// [`History`]-backed engine entry used by `Conversation`. The run
+/// appends to `history` in place and commits on `RunFinished`; on `Err`
+/// or when the stream is dropped mid-run, `history` is rolled back to
+/// its state at the call. `is_overflow` classifies model setup errors
+/// for [`ContextOptions::recover_from_overflow`].
+pub(crate) fn run_with_history<'a, M: CompletionModel + Sync + Send>(
+    model: &'a M,
+    history: &'a mut History,
+    tools: &'a ToolRegistry,
+    config: RunConfig,
+    options: ContextOptions,
+    is_overflow: fn(&M::Error) -> bool,
+) -> EngineStream<'a, M::Error> {
+    let rollback = Some((history.messages().to_vec(), history.pinned().to_vec()));
+    let managed = ManagedHistory {
+        history,
+        rollback,
+        options,
+    };
+    run_engine(
+        model,
+        RunContext::Managed(managed),
+        tools,
+        config,
+        is_overflow,
+    )
+}
+
+fn run_engine<'a, M: CompletionModel + Sync + Send>(
+    model: &'a M,
+    context: RunContext<'a>,
+    tools: &'a ToolRegistry,
+    config: RunConfig,
+    is_overflow: fn(&M::Error) -> bool,
+) -> EngineStream<'a, M::Error> {
+    let mut run_msgs = RunMessages {
+        context,
+        new_messages: Vec::new(),
+    };
     let run_id = config.run_id.clone().unwrap_or_default();
     // Snapshot the catalog + active set once at run start. Per-turn
     // `req.tools` and per-dispatch `ToolContext`s are built from these
@@ -158,7 +357,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
 
         for mw in &config.middlewares {
             let action = match race_abort(
-                mw.on_run_started(&run_id, &messages, &config),
+                mw.on_run_started(&run_id, run_msgs.context(), &config),
                 &mut abort_fut,
             ).await {
                 Ok(a) => a,
@@ -189,21 +388,57 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
         yield chunk;
 
         let mut iteration = 0;
-        let mut current_messages = messages.to_vec();
         let mut finish_reason = FinishReason::EndTurn;
         let mut usage_run = Usage::default();
-
+        // Cleared for the rest of the run once a proactive compaction
+        // fails to bring the history under budget: with the built-in
+        // strategies only turns before this run's kickoff can be
+        // dropped, so trying again every iteration would just repeat
+        // the work (and, with `SummarizeStrategy`, a model call).
+        let mut proactive_compaction = run_msgs
+            .managed()
+            .is_some_and(|m| m.options.compact_between_iterations);
 
         loop {
             if iteration >= config.max_iterations {
                 // Every previous iteration pushed its tool results before
-                // looping, so `current_messages` has no dangling tool_use.
-                let new_messages = current_messages.split_off(messages.len());
+                // looping, so the run's messages have no dangling tool_use.
+                let new_messages = run_msgs.finish();
                 let chunk = fire_abort_hooks(
                     &config.middlewares, &run_id, AbortReason::MaxIterations(config.max_iterations), usage_run, new_messages,
                 ).await;
                 yield chunk;
                 return;
+            }
+
+            // Iteration 0 is covered by the compaction `Conversation`
+            // runs before the engine starts.
+            if iteration > 0 && proactive_compaction {
+                let managed = run_msgs.managed().expect("proactive compaction implies a managed history");
+                let outcome = match race_abort(compact(managed.history, false), &mut abort_fut).await {
+                    Ok(outcome) => outcome,
+                    Err(reason) => {
+                        let new_messages = run_msgs.finish();
+                        let chunk = fire_abort_hooks(
+                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                        ).await;
+                        yield chunk;
+                        return;
+                    }
+                };
+                match outcome {
+                    Ok(None) => {}
+                    Ok(Some((report, progressed))) => {
+                        if !progressed || managed.history.needs_compaction() {
+                            proactive_compaction = false;
+                        }
+                        yield history_compacted_chunk(&config.middlewares, &run_id, report).await;
+                    }
+                    // Best effort: nothing to drop yet. The overflow
+                    // recovery below is the safety net.
+                    Err(CompactionError::NotEnoughHistory) => proactive_compaction = false,
+                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &config.middlewares, &run_id)?,
+                }
             }
 
             let step_id = StepId::new();
@@ -218,44 +453,91 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
 
             let mut tool_calls = Vec::new();
 
-            let mut req = ChatRequest::new(current_messages.clone(), config.max_tokens);
-            // Re-read the active set fresh each turn — a tool from the
-            // previous step may have called `ctx.tools().activate(...)`
-            // and that change must reach the model on this turn.
-            req.tools = Some({
-                let active = active_snapshot.lock().expect("active_snapshot lock");
-                catalog
-                    .iter()
-                    .filter(|(name, _)| active.contains(*name))
-                    .map(|(_, tool)| tool.tool_definition())
-                    .collect()
-            });
-            req.system_prompt = config.system_prompt.clone();
+            // At most one overflow recovery per iteration: the request
+            // is rebuilt from the compacted context and every
+            // `on_chat_request` runs again for the same `step_id`.
+            let mut overflow_recovered = false;
+            let mut adapter_stream = loop {
+                let mut req = ChatRequest::new(run_msgs.context().to_vec(), config.max_tokens);
+                // Re-read the active set fresh each turn — a tool from the
+                // previous step may have called `ctx.tools().activate(...)`
+                // and that change must reach the model on this turn.
+                req.tools = Some({
+                    let active = active_snapshot.lock().expect("active_snapshot lock");
+                    catalog
+                        .iter()
+                        .filter(|(name, _)| active.contains(*name))
+                        .map(|(_, tool)| tool.tool_definition())
+                        .collect()
+                });
+                req.system_prompt = config.system_prompt.clone();
 
-            for mw in &config.middlewares {
-                if let Err(reason) = race_abort(
-                    mw.on_chat_request(&run_id, &step_id, &mut req),
-                    &mut abort_fut,
-                ).await {
-                    let new_messages = current_messages.split_off(messages.len());
+                let mut aborted = None;
+                for mw in &config.middlewares {
+                    if let Err(reason) = race_abort(
+                        mw.on_chat_request(&run_id, &step_id, &mut req),
+                        &mut abort_fut,
+                    ).await {
+                        aborted = Some(reason);
+                        break;
+                    }
+                }
+                if let Some(reason) = aborted {
+                    let new_messages = run_msgs.finish();
                     let chunk = fire_abort_hooks(
                         &config.middlewares, &run_id, reason, usage_run, new_messages,
                     ).await;
                     yield chunk;
                     return;
                 }
-            }
 
-            let chat_stream_result = race_abort(model.chat_stream(req), &mut abort_fut).await;
-            let mut adapter_stream = match chat_stream_result {
-                Ok(r) => bail_with_hooks!(r.map_err(EngineError::Model), &config.middlewares, &run_id)?,
-                Err(reason) => {
-                    let new_messages = current_messages.split_off(messages.len());
-                    let chunk = fire_abort_hooks(
-                        &config.middlewares, &run_id, reason, usage_run, new_messages,
-                    ).await;
-                    yield chunk;
-                    return;
+                let error = match race_abort(model.chat_stream(req), &mut abort_fut).await {
+                    Ok(Ok(stream)) => break stream,
+                    Ok(Err(error)) => error,
+                    Err(reason) => {
+                        let new_messages = run_msgs.finish();
+                        let chunk = fire_abort_hooks(
+                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                        ).await;
+                        yield chunk;
+                        return;
+                    }
+                };
+
+                let recoverable = is_overflow(&error)
+                    && run_msgs.managed().is_some_and(|m| m.options.recover_from_overflow);
+                if !recoverable {
+                    bail_with_hooks!(Err::<(), _>(EngineError::Model(error)), &config.middlewares, &run_id)?;
+                    unreachable!();
+                }
+                if overflow_recovered {
+                    bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &config.middlewares, &run_id)?;
+                    unreachable!();
+                }
+                overflow_recovered = true;
+
+                let managed = run_msgs.managed().expect("recoverable implies a managed history");
+                let outcome = match race_abort(compact(managed.history, true), &mut abort_fut).await {
+                    Ok(outcome) => outcome,
+                    Err(reason) => {
+                        let new_messages = run_msgs.finish();
+                        let chunk = fire_abort_hooks(
+                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                        ).await;
+                        yield chunk;
+                        return;
+                    }
+                };
+                match outcome {
+                    Ok(Some((report, true))) => {
+                        yield history_compacted_chunk(&config.middlewares, &run_id, report).await;
+                    }
+                    // Nothing the strategy can drop, or dropping it did
+                    // not shrink the prompt: resending would fail again.
+                    Ok(_) | Err(CompactionError::NotEnoughHistory) => {
+                        bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &config.middlewares, &run_id)?;
+                    }
+                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &config.middlewares, &run_id)?,
                 }
             };
 
@@ -272,9 +554,9 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                             assistant_blocks.push(AssistantBlock::text(text_buf));
                         }
                         if !assistant_blocks.is_empty() {
-                            current_messages.push(Message::Assistant { blocks: assistant_blocks });
+                            run_msgs.push(Message::Assistant { blocks: assistant_blocks });
                         }
-                        let new_messages = current_messages.split_off(messages.len());
+                        let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
                             &config.middlewares, &run_id, reason, usage_run, new_messages,
                         ).await;
@@ -354,7 +636,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             }
 
             if !assistant_blocks.is_empty() {
-                current_messages.push(Message::Assistant { blocks: assistant_blocks });
+                run_msgs.push(Message::Assistant { blocks: assistant_blocks });
             }
 
             let mut tools_result = Vec::new();
@@ -376,9 +658,9 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                 }
                 if let Some(abort_reason) = abort_reason {
                     if !tools_result.is_empty() {
-                        current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
+                        run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
                     }
-                    let new_messages = current_messages.split_off(messages.len());
+                    let new_messages = run_msgs.finish();
                     let chunk = fire_abort_hooks(
                         &config.middlewares, &run_id, abort_reason, usage_run, new_messages,
                     ).await;
@@ -393,9 +675,9 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                     Ok(d) => d,
                     Err(reason) => {
                         if !tools_result.is_empty() {
-                            current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
+                            run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
                         }
-                        let new_messages = current_messages.split_off(messages.len());
+                        let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
                             &config.middlewares, &run_id, reason, usage_run, new_messages,
                         ).await;
@@ -432,9 +714,9 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                             Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id)?,
                             Err(reason) => {
                                 if !tools_result.is_empty() {
-                                    current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
+                                    run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
                                 }
-                                let new_messages = current_messages.split_off(messages.len());
+                                let new_messages = run_msgs.finish();
                                 let chunk = fire_abort_hooks(
                                     &config.middlewares, &run_id, reason, usage_run, new_messages,
                                 ).await;
@@ -448,9 +730,9 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                     },
                     ToolDecision::Terminate {reason} => {
                         if !tools_result.is_empty() {
-                            current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
+                            run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
                         }
-                        let new_messages = current_messages.split_off(messages.len());
+                        let new_messages = run_msgs.finish();
                         let reason = AbortReason::ToolTerminated { tool_name: name.clone(), reason };
                         let chunk = fire_abort_hooks(
                             &config.middlewares, &run_id, reason, usage_run, new_messages,
@@ -475,8 +757,8 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                         // left it as) must land in history so the next
                         // assistant turn isn't missing a tool_result.
                         tools_result.push(UserBlock::tool_result(id.clone(), content.clone()));
-                        current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
-                        let new_messages = current_messages.split_off(messages.len());
+                        run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
+                        let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
                             &config.middlewares, &run_id, reason, usage_run, new_messages,
                         ).await;
@@ -494,8 +776,8 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
                         // history isn't left with a tool_call missing
                         // its tool_result on the next assistant turn.
                         tools_result.push(UserBlock::tool_result(id.clone(), content.clone()));
-                        current_messages.push(Message::User { blocks: std::mem::take(&mut tools_result) });
-                        let new_messages = current_messages.split_off(messages.len());
+                        run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
+                        let new_messages = run_msgs.finish();
                         let chunk = fire_abort_hooks(
                             &config.middlewares, &run_id, reason, usage_run, new_messages,
                         ).await;
@@ -518,14 +800,14 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             }
 
             if !tools_result.is_empty() {
-                current_messages.push(Message::User { blocks: tools_result });
+                run_msgs.push(Message::User { blocks: tools_result });
             }
 
             let mut chunk = StreamChunk::StepFinished {
                 run_id: run_id.clone(),
                 step_id: step_id.clone(),
                 iteration,
-                new_messages_so_far: Arc::new(current_messages[messages.len()..].to_vec()),
+                new_messages_so_far: Arc::new(run_msgs.new_so_far().to_vec()),
             };
             for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
             for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
@@ -538,7 +820,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
             iteration += 1;
         }
 
-        let new_messages = current_messages.split_off(messages.len());
+        let new_messages = run_msgs.finish();
 
         for mw in &config.middlewares {
             mw.on_run_finished(&run_id, &finish_reason, &usage_run, &new_messages).await;
@@ -555,7 +837,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
         yield chunk;
     };
 
-    Ok(Box::pin(stream))
+    Box::pin(stream)
 }
 
 async fn run_tool_chain(
