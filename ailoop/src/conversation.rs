@@ -27,6 +27,12 @@ use crate::{
 /// [`ailoop_core::CharTokenizer`] this corresponds to roughly 400 KB of
 /// transcript before compaction kicks in.
 ///
+/// Only the history's messages count against this budget. The default
+/// bakes the headroom into the number itself; when overriding it, you
+/// can instead set `max_tokens` to the model's context window and
+/// express the headroom explicitly with
+/// [`HistoryBuilder::reserved_tokens`].
+///
 /// Override via
 /// [`ConversationBuilder::with_history`](ConversationBuilder::with_history)
 /// when your model has a smaller window, when you want compaction to
@@ -527,8 +533,8 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// so this constructor is infallible.
     ///
     /// Compose with [`with_history`](Self::with_history) if you want
-    /// the resumed conversation to use a different budget, tokenizer
-    /// or strategy than the default — the seeded messages and pin mask
+    /// the resumed conversation to use a different budget, reserve,
+    /// tokenizer or strategy than the default — the seeded messages and pin mask
     /// are preserved regardless of call order.
     pub fn from_snapshot(model: M, snapshot: ConversationSnapshot) -> Self {
         let mut builder = Self::new(model);
@@ -679,7 +685,9 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// conversation's message vector and drives compaction. Replaces
     /// the [default][DEFAULT_HISTORY_MAX_TOKENS] (`100_000` tokens with
     /// the fallback [`ailoop_core::CharTokenizer`]) — call this whenever you need a
-    /// different budget, a real tokenizer for accurate sizing, a custom
+    /// different budget, a
+    /// [reserve](HistoryBuilder::reserved_tokens) for the system prompt,
+    /// tool schemas and output, a real tokenizer for accurate sizing, a custom
     /// [`CompactionStrategy`](ailoop_history::CompactionStrategy)
     /// (e.g. [`SummarizeStrategy`](ailoop_history::SummarizeStrategy)),
     /// or a non-default `preserve_n_last`.
@@ -687,7 +695,8 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// ```ignore
     /// Conversation::builder(model)
     ///     .with_history(
-    ///         History::builder(150_000)
+    ///         History::builder(200_000)
+    ///             .reserved_tokens(20_000)
     ///             .tokenizer(Box::new(my_tokenizer)),
     ///     )
     ///     .build()?;
@@ -695,7 +704,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     ///
     /// Composes with [`from_snapshot`](Self::from_snapshot): the
     /// seeded message vector and pin mask are preserved regardless of
-    /// call order, only the budget / tokenizer / strategy /
+    /// call order, only the budget / reserve / tokenizer / strategy /
     /// `preserve_n_last` come from this builder. Successive calls
     /// overwrite each other.
     pub fn with_history(mut self, history: HistoryBuilder) -> Self {
@@ -1478,6 +1487,63 @@ mod tests {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Runs one turn and reports whether it opened with
+    /// `HistoryCompacted`.
+    async fn first_chunk_is_compaction(chat: &mut Conversation<MockModel>) -> bool {
+        let mut stream = chat.stream("kickoff").await.expect("stream should start");
+        let first = stream.next().await.expect("at least one chunk").unwrap();
+        while stream.next().await.is_some() {}
+        matches!(first, StreamChunk::HistoryCompacted { .. })
+    }
+
+    fn big_turns() -> Vec<Message> {
+        // ~300 tokens under CharTokenizer (len()/4): fits in 2_000 but
+        // not in 2_000 - 1_800.
+        let big = "x".repeat(200);
+        (0..3)
+            .flat_map(|_| {
+                [
+                    Message::user(big.clone()),
+                    Message::assistant_text(big.clone()),
+                ]
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn with_history_respects_reserved_tokens() {
+        for (reserved, expect_compaction) in [(0, false), (1_800, true)] {
+            let mut chat = Conversation::builder(MockModel)
+                .with_history(History::builder(2_000).reserved_tokens(reserved))
+                .build()
+                .expect("builder should succeed");
+            chat.history.extend(big_turns());
+            assert_eq!(
+                first_chunk_is_compaction(&mut chat).await,
+                expect_compaction,
+                "reserved_tokens = {reserved}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn from_snapshot_respects_reserved_tokens() {
+        for (reserved, expect_compaction) in [(0, false), (1_800, true)] {
+            let turns = big_turns();
+            let pinned = vec![false; turns.len()];
+            let snapshot = ConversationSnapshot::new(turns, pinned).unwrap();
+            let mut chat = ConversationBuilder::from_snapshot(MockModel, snapshot)
+                .with_history(History::builder(2_000).reserved_tokens(reserved))
+                .build()
+                .expect("builder should succeed");
+            assert_eq!(
+                first_chunk_is_compaction(&mut chat).await,
+                expect_compaction,
+                "reserved_tokens = {reserved}"
+            );
         }
     }
 

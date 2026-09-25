@@ -10,6 +10,23 @@ and this project adheres to
 
 ### Added
 
+- `HistoryBuilder::reserved_tokens(n)` (default 0): headroom subtracted
+  from `max_tokens` before `History::compact_if_needed` compares it with
+  `estimated_tokens()`. The estimate counts only the history's messages,
+  but the same context window also has to fit the system prompt, the
+  tool schemas, the requested output `max_tokens`, and the tokenizer's
+  estimation error (`CharTokenizer` is a `len() / 4` heuristic).
+  Previously the only way to leave room for those was to shrink
+  `max_tokens` by a guessed factor; now `max_tokens` can be set to the
+  model's context window and the slack stated explicitly. The effective
+  threshold is `max_tokens.saturating_sub(reserved)`, so a reserve at or
+  above `max_tokens` never panics: every call compacts, and
+  `CompactionError::NotEnoughHistory` surfaces once only the preserved
+  tail is left. The reserve is builder configuration, not snapshot
+  state: it applies through `History::from_messages` and
+  `ConversationBuilder::with_history` (including after
+  `from_snapshot`), and is not persisted in `ConversationSnapshot`.
+  `estimated_tokens()` is unchanged.
 - Re-export `CacheControl`, `SystemBlock`, `SystemPrompt`, and
   `ToolResultBlock` from the `ailoop` façade. Downstream crates that
   write custom `ChatMiddleware`s (setting `SystemPrompt::Blocks` with
