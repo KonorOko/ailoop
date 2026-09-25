@@ -63,8 +63,8 @@ use crate::RunConfig;
 ///   [`StreamChunk::ToolCallFinished`] and [`StreamChunk::ToolResult`];
 /// - keeps per-run state keyed by [`RunId`] (and per-step state by
 ///   [`StepId`]), guards all of it with a lock, since hooks take
-///   `&self`, and drops a run's entries in [`Self::on_run_finished`] /
-///   [`Self::on_run_error`].
+///   `&self`, and drops a run's entries in [`Self::on_run_finished`],
+///   [`Self::on_run_error`] and [`Self::on_run_dropped`].
 #[async_trait::async_trait]
 #[allow(unused_variables)]
 pub trait ChatMiddleware: Send + Sync {
@@ -124,7 +124,8 @@ pub trait ChatMiddleware: Send + Sync {
     /// Fired once per run after the engine emits its
     /// [`StreamChunk::RunFinished`]. Always fires — including aborted
     /// runs and runs terminated by middleware — so observers see a
-    /// consistent close. `new_messages` covers everything the engine
+    /// consistent close, unless the run fails ([`Self::on_run_error`])
+    /// or its stream is dropped first ([`Self::on_run_dropped`]). `new_messages` covers everything the engine
     /// added to history this run. When the run was aborted mid-step,
     /// every `tool_use` in it still has its `tool_result`: completed
     /// calls keep theirs, the rest get a synthesized error.
@@ -228,6 +229,30 @@ pub trait ChatMiddleware: Send + Sync {
         partial_messages: &[Message],
     ) {
     }
+    /// Fired when the caller drops a run's stream before the run
+    /// closed: a `select!` that picks another branch, an outer timeout,
+    /// a client that disconnects. Neither [`Self::on_run_finished`] nor
+    /// [`Self::on_run_error`] fires for that run, so this is where
+    /// per-run state keyed by `run_id` has to be released; without it,
+    /// a long-lived middleware keeps every dropped run's entry forever.
+    ///
+    /// Each middleware gets exactly one closing hook per run:
+    /// `on_run_finished`, `on_run_error` or this one. A drop that lands
+    /// while the engine is already firing a closing hook reaches only
+    /// the middlewares that have not been called yet; a middleware
+    /// whose closing hook was interrupted at an `.await` gets nothing
+    /// more, so a closing hook should release its state before its
+    /// first `.await`. The hook fires even when the drop interrupts
+    /// [`Self::on_run_started`], possibly for a middleware that was not
+    /// asked yet, so removing an entry that is not there must be fine.
+    /// A stream dropped before it was ever polled never started a run
+    /// and fires nothing.
+    ///
+    /// It runs synchronously inside the stream's `Drop`, so it cannot
+    /// await and must not block: guard per-run state with a
+    /// `std::sync::Mutex` (or `try_lock` an async one) and only clean
+    /// up. There is no usage or message list; the run did not finish.
+    fn on_run_dropped(&self, run_id: &RunId) {}
 
     // tools
     /// Fired before the engine invokes a tool. Return

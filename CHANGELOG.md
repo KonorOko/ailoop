@@ -10,6 +10,22 @@ and this project adheres to
 
 ### Added
 
+- `ChatMiddleware::on_run_dropped(&self, run_id)`: a third closing
+  hook, fired when the caller drops a run's stream before the run
+  closed (a `select!` that picks another branch, an outer timeout, a
+  client that disconnects). Before, a dropped run fired neither
+  `on_run_finished` nor `on_run_error`, so a middleware that kept
+  per-run state keyed by `RunId`, the pattern the trait docs
+  recommend, never released it and a long-lived conversation grew it
+  without bound. Each middleware now gets exactly one of
+  `on_run_finished`, `on_run_error` or `on_run_dropped` per run; a drop
+  during the closing hooks only reaches the middlewares not called yet.
+  The hook is synchronous because it runs inside `Drop`: it must not
+  block, only clean up (use a `std::sync::Mutex` or `try_lock`). A
+  stream dropped before its first poll never started a run and fires
+  nothing. The default does nothing, so existing middlewares compile
+  unchanged.
+
 - `ConversationBuilder::max_iterations(n)`: a default iteration cap for
   every run of a conversation, like `ConversationBuilder::max_tokens`.
   Before, the only way to change the cap was per run with
