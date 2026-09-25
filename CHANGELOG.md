@@ -53,10 +53,10 @@ and this project adheres to
   `ToolResult` chunk and the middleware hooks. `ToolContext::detached`
   mints a synthetic one.
 
-- `ApprovalRequest::call_id` and `ApprovalRequest::with_call_id`.
-  `ApprovalMiddleware` fills it, so an approval UI or verifier can
-  tell apart two identical calls in one step and match its decision
-  to the `ToolResult` chunk. `ApprovalRequest::new` leaves it empty.
+- `ApprovalRequest::call_id`, so an approval UI or verifier can tell
+  apart two identical calls in one step and match its decision to the
+  `ToolResult` chunk. `ApprovalRequest::new(call, args)` takes the
+  call's `ToolCallInfo`, so the id is always set.
 
 - `JsonTracer` writes `call_id` on `before_tool_call` and
   `after_tool_call` lines, and `TracingMiddleware` adds a `call_id`
@@ -91,8 +91,8 @@ and this project adheres to
   `messages` (the context sent to the model on the step that produced
   the call, after every middleware's `on_chat_request`). The type is
   `#[non_exhaustive]` so more context can be added without breaking
-  callbacks; `ApprovalRequest::new` plus `with_tags` / `with_messages`
-  build one outside the crate, e.g. to unit-test a verifier. Its
+  callbacks; `ApprovalRequest::new(ToolCallInfo, args)` plus
+  `with_tags` / `with_messages` build one outside the crate, e.g. to unit-test a verifier. Its
   rustdoc describes a model-based risky-action verifier: tags pick what
   gets reviewed, the verifier allows, denies or escalates to a human,
   it fails closed on error or timeout, and it reads intent from the

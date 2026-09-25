@@ -255,9 +255,7 @@ pub struct ApprovalRequest {
     /// Step (model turn) that produced the call.
     pub step_id: StepId,
     /// Provider-assigned id of the call, the same as `call_id` on
-    /// [`ToolCallInfo`] and on the `ToolResult` chunk. Empty unless set
-    /// with [`with_call_id`](Self::with_call_id);
-    /// [`ApprovalMiddleware`] always fills it.
+    /// [`ToolCallInfo`] and on the `ToolResult` chunk.
     pub call_id: String,
     /// Wire name of the tool.
     pub tool_name: String,
@@ -279,26 +277,21 @@ pub struct ApprovalRequest {
 }
 
 impl ApprovalRequest {
-    /// A request with empty `call_id`, `tags` and `messages`; set them
-    /// with [`with_call_id`](Self::with_call_id),
+    /// A request for the call `call` with arguments `args`. The run,
+    /// step, call id and tool name come from `call`; `tags` and
+    /// `messages` start empty, set them with
     /// [`with_tags`](Self::with_tags) and
     /// [`with_messages`](Self::with_messages).
-    pub fn new(run_id: RunId, step_id: StepId, tool_name: impl Into<String>, args: Value) -> Self {
+    pub fn new(call: ToolCallInfo, args: Value) -> Self {
         Self {
-            run_id,
-            step_id,
-            call_id: String::new(),
-            tool_name: tool_name.into(),
+            run_id: call.run_id,
+            step_id: call.step_id,
+            call_id: call.call_id,
+            tool_name: call.name,
             args,
             tags: Arc::from([]),
             messages: Arc::from([]),
         }
-    }
-
-    /// Replace `call_id`.
-    pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
-        self.call_id = call_id.into();
-        self
     }
 
     /// Replace `tags`.
@@ -455,15 +448,9 @@ impl ChatMiddleware for ApprovalMiddleware {
             .get(&call.name)
             .cloned()
             .unwrap_or_else(|| Arc::from([]));
-        let req = ApprovalRequest::new(
-            call.run_id.clone(),
-            call.step_id.clone(),
-            &call.name,
-            args.clone(),
-        )
-        .with_call_id(&call.call_id)
-        .with_tags(tags)
-        .with_messages(messages);
+        let req = ApprovalRequest::new(call.clone(), args.clone())
+            .with_tags(tags)
+            .with_messages(messages);
         (self.callback)(req).await
     }
 
@@ -493,6 +480,18 @@ mod tests {
         let mut req = ChatRequest::new(vec![Message::user("hi")], 1024);
         mw.on_chat_request(&StepInfo::new(run_id.clone(), StepId::new()), &mut req)
             .await;
+    }
+
+    #[test]
+    fn approval_request_new_takes_identity_from_call() {
+        let call = ToolCallInfo::new(RunId::new(), StepId::new(), "toolu_1", "rm");
+        let req = ApprovalRequest::new(call.clone(), serde_json::json!({"path": "/tmp"}));
+        assert_eq!(req.run_id, call.run_id);
+        assert_eq!(req.step_id, call.step_id);
+        assert_eq!(req.call_id, "toolu_1");
+        assert_eq!(req.tool_name, "rm");
+        assert!(req.tags.is_empty());
+        assert!(req.messages.is_empty());
     }
 
     #[tokio::test]
