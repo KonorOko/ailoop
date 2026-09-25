@@ -199,6 +199,10 @@ impl ApprovalMiddleware {
 
     /// Wire the callback for tool calls whose name appears in `names`.
     /// Other tool calls pass through with `Continue`.
+    ///
+    /// Matching is by exact wire name at call time, independent of
+    /// whether the tool is currently active — so listing a deferred
+    /// tool here gates it once a handler activates it mid-run.
     pub fn for_named<I, S, F, Fut>(names: I, callback: F) -> Self
     where
         I: IntoIterator<Item = S>,
