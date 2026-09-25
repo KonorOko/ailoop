@@ -409,6 +409,12 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `AnthropicApiErrorKind::Api` is `AnthropicApiErrorKind::ServerError`,
+  the name `AzureOpenAIApiErrorKind` already uses for the same case.
+  It maps Anthropic's `api_error` (a generic server-side failure), but
+  `Api` next to `Other` read as "any API error". It is still transient
+  for `RetryingModel`.
+
 - `AnthropicClient::from_env` / `from_env_var` return
   `Result<Self, AnthropicError>` instead of `Result<Self, VarError>`,
   like `AzureOpenAIClient::from_env`. A missing or non-Unicode key is
@@ -866,6 +872,16 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Rename the Anthropic server-error kind:
+
+```rust
+// Before (1.0.0-rc.3)
+AnthropicApiErrorKind::Api => { /* ... */ }
+
+// After
+AnthropicApiErrorKind::ServerError => { /* ... */ }
+```
 
 Match the typed error from `AnthropicClient::from_env`:
 

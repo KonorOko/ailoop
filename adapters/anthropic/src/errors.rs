@@ -48,8 +48,10 @@ pub enum AnthropicApiErrorKind {
     /// Permanent unless the caller compacts and retries explicitly.
     RequestTooLarge,
     /// `api_error` — generic server-side failure with no further
-    /// classification. Treated as transient.
-    Api,
+    /// classification. Treated as transient. Named like the Azure
+    /// adapter's `AzureOpenAIApiErrorKind::ServerError` rather than
+    /// after the wire string, which would read as "any API error".
+    ServerError,
     /// Forward-compatibility variant for any future `error.type`
     /// strings. Treated conservatively as transient so unknown
     /// variants don't strand requests on a retryable code.
@@ -69,7 +71,7 @@ impl AnthropicApiErrorKind {
             "permission_error" => Self::Permission,
             "not_found_error" => Self::NotFound,
             "request_too_large" => Self::RequestTooLarge,
-            "api_error" => Self::Api,
+            "api_error" => Self::ServerError,
             other => Self::Other(other.to_string()),
         }
     }
@@ -180,7 +182,7 @@ fn classify_kind(
         // on a future error type that's actually retryable.
         AnthropicApiErrorKind::Overloaded
         | AnthropicApiErrorKind::RateLimit
-        | AnthropicApiErrorKind::Api
+        | AnthropicApiErrorKind::ServerError
         | AnthropicApiErrorKind::Other(_) => RetryClassification::Transient { retry_after },
         AnthropicApiErrorKind::Authentication
         | AnthropicApiErrorKind::Permission
@@ -350,7 +352,7 @@ mod tests {
         // The phrase only means overflow on an invalid_request_error.
         assert_eq!(
             AnthropicApiErrorKind::from_error("api_error", "prompt is too long"),
-            AnthropicApiErrorKind::Api,
+            AnthropicApiErrorKind::ServerError,
         );
     }
 
