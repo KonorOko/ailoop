@@ -60,6 +60,10 @@ impl ToolContext {
     /// Construct a context bound to a real run. Used by the engine on
     /// each tool dispatch — tests and standalone callers want
     /// [`Self::detached`] instead.
+    ///
+    /// Engine plumbing, hidden from the docs and not covered by semver:
+    /// its signature may change in any release.
+    #[doc(hidden)]
     pub fn new(
         run_id: RunId,
         step_id: StepId,
@@ -274,6 +278,10 @@ impl ToolActivation {
     /// Construct a handle backed by a shared catalog and a per-run
     /// active set. Used by the engine; downstream callers rarely
     /// build this themselves.
+    ///
+    /// Engine plumbing, hidden from the docs and not covered by semver:
+    /// its signature may change in any release.
+    #[doc(hidden)]
     pub fn new(
         catalog: Arc<IndexMap<String, Arc<dyn ToolDyn>>>,
         active: Arc<Mutex<IndexSet<String>>>,

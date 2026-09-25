@@ -361,6 +361,13 @@ and this project adheres to
 
 ### Changed
 
+- `ToolContext::new`, `ToolActivation::new`, `ToolRegistry::catalog_arc`
+  and `ToolRegistry::snapshot_active` are hidden from the docs and not
+  covered by semver. They are the engine's plumbing: their signatures
+  expose `indexmap` types and have changed twice in this release
+  (`call_id`, `cancellation`). Tools and tests build a context with
+  `ToolContext::detached()`, whose signature is stable.
+
 - `RunFinished.usage`, `RunOutcome.usage` and the `usage` passed to
   `ChatMiddleware::on_run_finished` now mean **everything the run
   spent**: its own provider turns plus usage reported by tools.

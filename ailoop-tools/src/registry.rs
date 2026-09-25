@@ -196,6 +196,10 @@ impl ToolRegistry {
     /// at the start of each run and hands it to every per-dispatch
     /// [`ToolActivation`](crate::ToolActivation) so that `list_*` reads are cheap and don't
     /// reach back into the registry.
+    ///
+    /// Engine plumbing, hidden from the docs and not covered by semver:
+    /// its signature may change in any release.
+    #[doc(hidden)]
     pub fn catalog_arc(&self) -> Arc<IndexMap<String, Arc<dyn ToolDyn>>> {
         Arc::new(self.tools.clone())
     }
@@ -205,6 +209,10 @@ impl ToolRegistry {
     /// hands to every [`ToolActivation`](crate::ToolActivation) for this run; mutations
     /// inside a tool handler are visible to the engine on the next
     /// turn without touching the underlying registry.
+    ///
+    /// Engine plumbing, hidden from the docs and not covered by semver:
+    /// its signature may change in any release.
+    #[doc(hidden)]
     pub fn snapshot_active(&self) -> Arc<Mutex<IndexSet<String>>> {
         Arc::new(Mutex::new(self.active_tools.clone()))
     }
