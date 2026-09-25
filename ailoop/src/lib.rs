@@ -104,7 +104,7 @@ pub mod advanced {
     pub use crate::engine::run_chat;
 }
 pub use json_tracer::JsonTracer;
-pub use middleware::ApprovalMiddleware;
+pub use middleware::{ApprovalMiddleware, ApprovalRequest};
 pub use sanitize::{Sanitize, TextRewriter, ToolArgsRewriter, ToolResultRewriter};
 pub use sub_agent::{DEFAULT_WRAP_UP_INSTRUCTION, SubAgentConfig, SubAgentTool, WrapUp};
 #[cfg(feature = "tracing")]

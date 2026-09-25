@@ -10,6 +10,20 @@ and this project adheres to
 
 ### Added
 
+- `ApprovalRequest` (re-exported from `ailoop`): what an approval
+  callback receives for one gated call. Public fields `run_id`,
+  `step_id`, `tool_name`, `args`, `tags` (the tool's declared tags) and
+  `messages` (the context sent to the model on the step that produced
+  the call, after every middleware's `on_chat_request`). The type is
+  `#[non_exhaustive]` so more context can be added without breaking
+  callbacks; `ApprovalRequest::new` plus `with_tags` / `with_messages`
+  build one outside the crate, e.g. to unit-test a verifier. Its
+  rustdoc describes a model-based risky-action verifier: tags pick what
+  gets reviewed, the verifier allows, denies or escalates to a human,
+  it fails closed on error or timeout, and it reads intent from the
+  user's text only, never from tool results, which can carry injected
+  instructions.
+
 - `ToolContext::report_usage(Usage)` and `UsageSink` (re-exported from
   `ailoop`): a tool that spends tokens outside the engine's own
   provider turns (a sub-agent, a tool that calls an LLM directly)
@@ -311,6 +325,25 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- Approval callbacks take an `ApprovalRequest` instead of
+  `(String, Value)`: `ConversationBuilder::with_approval`,
+  `with_approval_for_tags`, `with_approval_for_all`,
+  `ApprovalMiddleware::approve_all` and `ApprovalMiddleware::for_named`.
+  A callback that only saw the tool name and arguments could not tell
+  a reasonable call from a dangerous one: `rm -rf build/` is fine after
+  "clean the build" and alarming after "summarize this file". The
+  request now carries the user's messages, the tool's tags and the run
+  and step ids, and freezing the two-argument form for 1.0 would have
+  made adding them later a breaking change. To fill `messages`,
+  `ApprovalMiddleware` records each step's request in
+  `on_chat_request`, keyed by run so one instance can be shared across
+  concurrent runs, and drops it in `on_run_finished` / `on_run_error`.
+  The messages are copied once per step into an `Arc<[Message]>` shared
+  by every gated call of that step, and only when a gate is installed.
+  `tags` is filled for gates installed through the builder, which sees
+  the whole tool catalog; `approve_all` and `for_named` leave it
+  empty. The call id is not included yet.
+
 - `Conversation::run`, `run_with_options`, `stream`,
   `stream_with_options`, the `RunStream` error item and
   `advanced::run_chat` (both its result and its stream items) now fail
@@ -466,6 +499,24 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Approval callbacks take one `ApprovalRequest`; read the name and
+arguments from its fields:
+
+```rust
+// Before
+.with_approval(|name, args| async move {
+    ask_human(&name, &args).await
+})
+
+// After
+.with_approval(|req| async move {
+    ask_human(&req.tool_name, &req.args).await
+})
+```
+
+The same applies to `with_approval_for_tags`, `with_approval_for_all`,
+`ApprovalMiddleware::approve_all` and `ApprovalMiddleware::for_named`.
 
 A failed run returns `RunError`. `?` into `EngineError` still compiles;
 direct matches go through `.kind()`:

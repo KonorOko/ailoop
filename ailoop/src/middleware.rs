@@ -1,9 +1,9 @@
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use ailoop_core::{
-    ChatMiddleware, ChatRequest, ReasoningEffort, RunId, StepId, SystemBlock, SystemPrompt,
-    ToolChoice, ToolDecision,
+    ChatMiddleware, ChatRequest, FinishReason, Message, ReasoningEffort, RunId, StepId,
+    SystemBlock, SystemPrompt, ToolChoice, ToolDecision, ToolTag, Usage,
 };
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -163,8 +163,146 @@ impl ChatMiddleware for RequestDefaultsMiddleware {
     }
 }
 
+/// What an approval callback receives for one gated tool call.
+///
+/// Built by [`ApprovalMiddleware`] right before the engine runs the
+/// tool. Fields are public so a callback can read or move them out
+/// directly (`req.tool_name`, `req.args`); the type is
+/// `#[non_exhaustive]` so new context can be added without breaking
+/// callbacks. Use [`new`](Self::new) plus the `with_*` setters to build
+/// one outside the crate, e.g. to unit-test a verifier.
+///
+/// # Model-based verifier
+///
+/// The callback is async and can call any
+/// [`CompletionModel`](ailoop_core::CompletionModel), so a risky-action
+/// verifier fits here. Recommended shape:
+///
+/// 1. **Tags decide what gets reviewed.** Gate only what needs it with
+///    [`with_approval_for_tags`](crate::ConversationBuilder::with_approval_for_tags)
+///    (or the default [`with_approval`](crate::ConversationBuilder::with_approval)
+///    for `Destructive` / `WritesFiles`); everything else runs without
+///    paying for a verifier call.
+/// 2. **The verifier judges the call against the user's intent** and
+///    answers allow, deny or escalate. Allow → [`ToolDecision::Continue`];
+///    deny → [`ToolDecision::Skip`] with a reason the model can read.
+/// 3. **A human handles what the verifier escalates.**
+///
+/// Fail closed: bound the verifier with a timeout and treat a model
+/// error, a timeout or an unparseable answer as deny or escalate,
+/// never as `Continue`.
+///
+/// Take intent only from what the user wrote. [`messages`](Self::messages)
+/// also carries tool results (`UserBlock::ToolResult`) and earlier
+/// assistant turns; those can contain text injected by a web page, a
+/// file or an MCP server, so hand them to the verifier as untrusted
+/// data, not as instructions. `rm -rf build/` is reasonable after "clean
+/// the build" and alarming after "summarize this file" — the user's
+/// text, not a tool's output, is what tells the two apart.
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use ailoop::{ApprovalRequest, Message, ToolDecision, UserBlock};
+///
+/// enum Verdict { Allow, Deny(String), Escalate }
+///
+/// // Your verifier: prompt a model with `intent` and the call, parse
+/// // its answer. Errors surface as `Err`.
+/// async fn verify(intent: &str, req: &ApprovalRequest) -> Result<Verdict, String> {
+///     # let _ = (intent, req);
+///     # unimplemented!()
+/// }
+/// async fn ask_human(req: &ApprovalRequest) -> ToolDecision {
+///     # let _ = req;
+///     # unimplemented!()
+/// }
+///
+/// async fn gate(req: ApprovalRequest) -> ToolDecision {
+///     // User-authored text only; tool results are not intent.
+///     let intent: Vec<&str> = req
+///         .messages
+///         .iter()
+///         .filter_map(|m| match m {
+///             Message::User { blocks } => Some(blocks),
+///             _ => None,
+///         })
+///         .flatten()
+///         .filter_map(|b| match b {
+///             UserBlock::Text { text, .. } => Some(text.as_str()),
+///             _ => None,
+///         })
+///         .collect();
+///     let intent = intent.join("\n");
+///
+///     match tokio::time::timeout(Duration::from_secs(10), verify(&intent, &req)).await {
+///         Ok(Ok(Verdict::Allow)) => ToolDecision::Continue,
+///         Ok(Ok(Verdict::Deny(reason))) => ToolDecision::Skip { reason },
+///         // Escalation, verifier error and timeout all go to a human.
+///         Ok(Ok(Verdict::Escalate)) | Ok(Err(_)) | Err(_) => ask_human(&req).await,
+///     }
+/// }
+///
+/// # fn wire(builder: ailoop::ConversationBuilder<impl ailoop::CompletionModel>) {
+/// let builder = builder.with_approval(gate);
+/// # let _ = builder;
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ApprovalRequest {
+    /// Run the call belongs to.
+    pub run_id: RunId,
+    /// Step (model turn) that produced the call.
+    pub step_id: StepId,
+    /// Wire name of the tool.
+    pub tool_name: String,
+    /// Arguments the tool will run with, after every earlier
+    /// middleware's `on_before_tool_call_mut`.
+    pub args: Value,
+    /// Tags the tool declares. Filled when the gate was installed with
+    /// a `ConversationBuilder::with_approval*` method; empty for
+    /// [`ApprovalMiddleware::approve_all`] and
+    /// [`ApprovalMiddleware::for_named`], which do not see the
+    /// registry.
+    pub tags: Arc<[ToolTag]>,
+    /// Context sent to the model on the step that produced this call,
+    /// as left by every middleware's `on_chat_request` (it can be
+    /// compacted or rewritten relative to the stored history). The call
+    /// being approved is not in it — see `tool_name` / `args`. Shared,
+    /// not copied, between the gated calls of a step.
+    pub messages: Arc<[Message]>,
+}
+
+impl ApprovalRequest {
+    /// A request with empty `tags` and `messages`; set them with
+    /// [`with_tags`](Self::with_tags) and
+    /// [`with_messages`](Self::with_messages).
+    pub fn new(run_id: RunId, step_id: StepId, tool_name: impl Into<String>, args: Value) -> Self {
+        Self {
+            run_id,
+            step_id,
+            tool_name: tool_name.into(),
+            args,
+            tags: Arc::from([]),
+            messages: Arc::from([]),
+        }
+    }
+
+    /// Replace `tags`.
+    pub fn with_tags(mut self, tags: impl Into<Arc<[ToolTag]>>) -> Self {
+        self.tags = tags.into();
+        self
+    }
+
+    /// Replace `messages`.
+    pub fn with_messages(mut self, messages: impl Into<Arc<[Message]>>) -> Self {
+        self.messages = messages.into();
+        self
+    }
+}
+
 pub(crate) type ApprovalCallback =
-    Arc<dyn Fn(String, Value) -> BoxFuture<'static, ToolDecision> + Send + Sync>;
+    Arc<dyn Fn(ApprovalRequest) -> BoxFuture<'static, ToolDecision> + Send + Sync>;
 
 enum GatePolicy {
     All,
@@ -179,22 +317,30 @@ enum GatePolicy {
 /// gate, or via [`for_named`](Self::for_named) for an explicit set of
 /// tool names. For tag-based gating, use the builder method
 /// `ConversationBuilder::with_approval`.
+///
+/// The callback receives an [`ApprovalRequest`] with the call and the
+/// context the model saw on that step; see its docs for the
+/// model-based verifier pattern. To fill `messages`, the middleware
+/// records each step's request in `on_chat_request`, so it must sit
+/// after any middleware that rewrites `req.messages` (the builder
+/// always puts it last). That state is keyed by [`RunId`] — one
+/// instance can be shared across concurrent runs — and dropped in
+/// `on_run_finished` / `on_run_error`.
 pub struct ApprovalMiddleware {
     callback: ApprovalCallback,
     policy: GatePolicy,
+    tags: HashMap<String, Arc<[ToolTag]>>,
+    contexts: Mutex<HashMap<RunId, Arc<[Message]>>>,
 }
 
 impl ApprovalMiddleware {
     /// Wire the callback for every tool call, regardless of tags.
     pub fn approve_all<F, Fut>(callback: F) -> Self
     where
-        F: Fn(String, Value) -> Fut + Send + Sync + 'static,
+        F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ToolDecision> + Send + 'static,
     {
-        Self {
-            callback: wrap_callback(callback),
-            policy: GatePolicy::All,
-        }
+        Self::new(wrap_callback(callback), GatePolicy::All, HashMap::new())
     }
 
     /// Wire the callback for tool calls whose name appears in `names`.
@@ -207,26 +353,41 @@ impl ApprovalMiddleware {
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
-        F: Fn(String, Value) -> Fut + Send + Sync + 'static,
+        F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ToolDecision> + Send + 'static,
     {
-        Self {
-            callback: wrap_callback(callback),
-            policy: GatePolicy::ByName(names.into_iter().map(Into::into).collect()),
-        }
+        Self::new(
+            wrap_callback(callback),
+            GatePolicy::ByName(names.into_iter().map(Into::into).collect()),
+            HashMap::new(),
+        )
     }
 
-    pub(crate) fn from_parts(callback: ApprovalCallback, names: HashSet<String>) -> Self {
-        Self {
-            callback,
-            policy: GatePolicy::ByName(names),
-        }
+    pub(crate) fn from_parts(
+        callback: ApprovalCallback,
+        names: HashSet<String>,
+        tags: HashMap<String, Arc<[ToolTag]>>,
+    ) -> Self {
+        Self::new(callback, GatePolicy::ByName(names), tags)
     }
 
-    pub(crate) fn from_parts_all(callback: ApprovalCallback) -> Self {
+    pub(crate) fn from_parts_all(
+        callback: ApprovalCallback,
+        tags: HashMap<String, Arc<[ToolTag]>>,
+    ) -> Self {
+        Self::new(callback, GatePolicy::All, tags)
+    }
+
+    fn new(
+        callback: ApprovalCallback,
+        policy: GatePolicy,
+        tags: HashMap<String, Arc<[ToolTag]>>,
+    ) -> Self {
         Self {
             callback,
-            policy: GatePolicy::All,
+            policy,
+            tags,
+            contexts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -236,28 +397,119 @@ impl ApprovalMiddleware {
             GatePolicy::ByName(set) => set.contains(name),
         }
     }
+
+    fn contexts(&self) -> std::sync::MutexGuard<'_, HashMap<RunId, Arc<[Message]>>> {
+        // Poisoning only means another thread panicked mid-insert; the
+        // map itself is still consistent.
+        self.contexts.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[cfg(test)]
+    fn tracked_runs(&self) -> usize {
+        self.contexts().len()
+    }
 }
 
 pub(crate) fn wrap_callback<F, Fut>(callback: F) -> ApprovalCallback
 where
-    F: Fn(String, Value) -> Fut + Send + Sync + 'static,
+    F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ToolDecision> + Send + 'static,
 {
-    Arc::new(move |name, args| Box::pin(callback(name, args)) as BoxFuture<'static, ToolDecision>)
+    Arc::new(move |req| Box::pin(callback(req)) as BoxFuture<'static, ToolDecision>)
 }
 
 #[async_trait::async_trait]
 impl ChatMiddleware for ApprovalMiddleware {
+    async fn on_chat_request(&self, run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+        // One copy per step, shared by every gated call of the step.
+        // Overwrites the previous step (and a same-step retry after
+        // context-overflow recovery).
+        let messages: Arc<[Message]> = Arc::from(req.messages.as_slice());
+        self.contexts().insert(run_id.clone(), messages);
+    }
+
     async fn on_before_tool_call(
         &self,
-        _run_id: &RunId,
-        _step_id: &StepId,
+        run_id: &RunId,
+        step_id: &StepId,
         name: &str,
         args: &Value,
     ) -> ToolDecision {
         if !self.should_gate(name) {
             return ToolDecision::Continue;
         }
-        (self.callback)(name.to_string(), args.clone()).await
+        let messages = self
+            .contexts()
+            .get(run_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::from([]));
+        let tags = self
+            .tags
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Arc::from([]));
+        let req = ApprovalRequest::new(run_id.clone(), step_id.clone(), name, args.clone())
+            .with_tags(tags)
+            .with_messages(messages);
+        (self.callback)(req).await
+    }
+
+    async fn on_run_finished(
+        &self,
+        run_id: &RunId,
+        _reason: &FinishReason,
+        _usage: &Usage,
+        _new_messages: &[Message],
+    ) {
+        self.contexts().remove(run_id);
+    }
+
+    async fn on_run_error(
+        &self,
+        run_id: &RunId,
+        _err: &(dyn std::error::Error + Send + Sync),
+        _partial_messages: &[Message],
+    ) {
+        self.contexts().remove(run_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gate() -> ApprovalMiddleware {
+        ApprovalMiddleware::approve_all(|_req| async { ToolDecision::Continue })
+    }
+
+    async fn record_step(mw: &ApprovalMiddleware, run_id: &RunId) {
+        let mut req = ChatRequest::new(vec![Message::user("hi")], 1024);
+        mw.on_chat_request(run_id, &StepId::new(), &mut req).await;
+    }
+
+    #[tokio::test]
+    async fn run_context_is_dropped_on_run_finished() {
+        let mw = gate();
+        let run_id = RunId::new();
+        record_step(&mw, &run_id).await;
+        assert_eq!(mw.tracked_runs(), 1);
+
+        mw.on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
+            .await;
+        assert_eq!(mw.tracked_runs(), 0);
+    }
+
+    #[tokio::test]
+    async fn run_context_is_dropped_on_run_error() {
+        let mw = gate();
+        let run_id = RunId::new();
+        record_step(&mw, &run_id).await;
+        let other = RunId::new();
+        record_step(&mw, &other).await;
+        assert_eq!(mw.tracked_runs(), 2);
+
+        let err = std::io::Error::other("boom");
+        mw.on_run_error(&run_id, &err, &[]).await;
+        assert_eq!(mw.tracked_runs(), 1, "only the failed run is dropped");
     }
 }

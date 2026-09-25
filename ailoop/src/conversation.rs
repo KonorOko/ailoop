@@ -8,14 +8,19 @@ use ailoop_prompts::{Prompt, PromptSection};
 use ailoop_tools::{ToolDyn, ToolRegistry, UsageSink};
 use futures::{Stream, StreamExt, stream::BoxStream};
 use serde_json::Value;
-use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use crate::{
     engine::{ContextOptions, run_with_history},
     errors::{BuildError, EngineError, RunError},
     middleware::{
-        ApprovalCallback, ApprovalMiddleware, RequestDefaults, RequestDefaultsMiddleware,
-        SystemPromptMiddleware, ToolPromptGroup, wrap_callback,
+        ApprovalCallback, ApprovalMiddleware, ApprovalRequest, RequestDefaults,
+        RequestDefaultsMiddleware, SystemPromptMiddleware, ToolPromptGroup, wrap_callback,
     },
 };
 
@@ -895,6 +900,12 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// Run `callback` before every Destructive or WritesFiles tool call;
     /// the callback's [`ToolDecision`] is forwarded to the engine.
     ///
+    /// The callback receives an [`ApprovalRequest`]: the tool name,
+    /// args and tags, the run and step ids, and the messages sent to the
+    /// model on that step (so a verifier can check the call against
+    /// what the user asked for). See [`ApprovalRequest`] for the
+    /// model-based verifier pattern.
+    ///
     /// Tool name resolution happens at `build()` time over the **whole
     /// registered catalog**, not just the initial active set. Tools that
     /// start deferred (via [`initial_active_tools`](Self::initial_active_tools))
@@ -906,7 +917,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// [`ToolDecision`]: ailoop_core::ToolDecision
     pub fn with_approval<F, Fut>(self, callback: F) -> Self
     where
-        F: Fn(String, serde_json::Value) -> Fut + Send + Sync + 'static,
+        F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ailoop_core::ToolDecision> + Send + 'static,
     {
         self.with_approval_for_tags(&[ToolTag::Destructive, ToolTag::WritesFiles], callback)
@@ -921,7 +932,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// capability-filtered tools activated at runtime are covered too.
     pub fn with_approval_for_tags<F, Fut>(mut self, tags: &[ToolTag], callback: F) -> Self
     where
-        F: Fn(String, serde_json::Value) -> Fut + Send + Sync + 'static,
+        F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ailoop_core::ToolDecision> + Send + 'static,
     {
         self.approval = Some(ApprovalSpec {
@@ -936,7 +947,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// surfaced to the human.
     pub fn with_approval_for_all<F, Fut>(mut self, callback: F) -> Self
     where
-        F: Fn(String, serde_json::Value) -> Fut + Send + Sync + 'static,
+        F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ailoop_core::ToolDecision> + Send + 'static,
     {
         self.approval = Some(ApprovalSpec {
@@ -1158,25 +1169,26 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         }
 
         if let Some(spec) = self.approval {
+            // Resolve over the whole catalog, not just the initial
+            // active set: deferred and capability-filtered tools can be
+            // activated mid-run via `ctx.tools().activate(...)` and must
+            // still hit the gate (and carry their tags when they do).
+            let tool_tags: HashMap<String, Arc<[ToolTag]>> = tools
+                .all_tools()
+                .map(|tool| {
+                    let def = tool.tool_definition();
+                    (def.name, Arc::from(def.tags))
+                })
+                .collect();
             let approval_mw = match spec.tags {
-                None => ApprovalMiddleware::from_parts_all(spec.callback),
+                None => ApprovalMiddleware::from_parts_all(spec.callback, tool_tags),
                 Some(tags) => {
-                    // Resolve over the whole catalog, not just the
-                    // initial active set: deferred and
-                    // capability-filtered tools can be activated
-                    // mid-run via `ctx.tools().activate(...)` and must
-                    // still hit the gate.
-                    let names: HashSet<String> = tools
-                        .all_tools()
-                        .filter(|tool| {
-                            tool.tool_definition()
-                                .tags
-                                .iter()
-                                .any(|tag| tags.contains(tag))
-                        })
-                        .map(|tool| tool.tool_definition().name)
+                    let names: HashSet<String> = tool_tags
+                        .iter()
+                        .filter(|(_, tool_tags)| tool_tags.iter().any(|tag| tags.contains(tag)))
+                        .map(|(name, _)| name.clone())
                         .collect();
-                    ApprovalMiddleware::from_parts(spec.callback, names)
+                    ApprovalMiddleware::from_parts(spec.callback, names, tool_tags)
                 }
             };
             middlewares.push(Arc::new(approval_mw));
@@ -1315,7 +1327,7 @@ mod tests {
                 name: "untagged",
                 tags: vec![],
             })
-            .with_approval(move |_name, _args| {
+            .with_approval(move |_req| {
                 let c = counter_cb.clone();
                 async move {
                     c.fetch_add(1, Ordering::SeqCst);
@@ -1345,7 +1357,7 @@ mod tests {
                 name: "delete_file",
                 tags: vec![ToolTag::Destructive],
             })
-            .with_approval_for_tags(&[ToolTag::ReadOnly], move |_name, _args| {
+            .with_approval_for_tags(&[ToolTag::ReadOnly], move |_req| {
                 let c = counter_cb.clone();
                 async move {
                     c.fetch_add(1, Ordering::SeqCst);
@@ -1370,7 +1382,7 @@ mod tests {
                 name: "untagged",
                 tags: vec![],
             })
-            .with_approval_for_all(move |_name, _args| {
+            .with_approval_for_all(move |_req| {
                 let c = counter_cb.clone();
                 async move {
                     c.fetch_add(1, Ordering::SeqCst);
@@ -1434,7 +1446,7 @@ mod tests {
                 name: "delete_file",
                 tags: vec![ToolTag::Destructive],
             })
-            .with_approval(|_name, _args| async move {
+            .with_approval(|_req| async move {
                 ToolDecision::Skip {
                     reason: "user denied".into(),
                 }
@@ -1468,7 +1480,7 @@ mod tests {
                 tags: vec![ToolTag::Destructive],
             })
             .with_capabilities(&[ToolTag::ReadOnly])
-            .with_approval(move |_name, _args| {
+            .with_approval(move |_req| {
                 let c = counter_cb.clone();
                 async move {
                     c.fetch_add(1, Ordering::SeqCst);
