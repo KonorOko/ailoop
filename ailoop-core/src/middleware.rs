@@ -125,8 +125,9 @@ pub trait ChatMiddleware: Send + Sync {
     /// [`StreamChunk::RunFinished`]. Always fires — including aborted
     /// runs and runs terminated by middleware — so observers see a
     /// consistent close. `new_messages` covers everything the engine
-    /// added to history this run; partial tool results are preserved
-    /// when the run was aborted mid-step.
+    /// added to history this run. When the run was aborted mid-step,
+    /// every `tool_use` in it still has its `tool_result`: completed
+    /// calls keep theirs, the rest get a synthesized error.
     ///
     /// [`StreamChunk::RunFinished`]: crate::StreamChunk::RunFinished
     async fn on_run_finished(
@@ -355,9 +356,15 @@ pub enum ToolDecision {
     /// Abort the run before executing this tool. The engine surfaces
     /// it as [`crate::FinishReason::Aborted`] carrying
     /// [`crate::AbortReason::ToolTerminated`] (with the tool's name)
-    /// and fires [`ChatMiddleware::on_run_finished`]; results of tool
-    /// calls in the same step that already completed are preserved in
-    /// `new_messages`. Which calls those are follows the execution
+    /// and fires [`ChatMiddleware::on_run_finished`].
+    ///
+    /// Every call of the step still gets a `tool_result` in
+    /// `new_messages`, in the model's order: calls that already
+    /// completed keep their result, and this call and those that did
+    /// not run get an `is_error` result reading
+    /// `"Tool not run: the run was aborted (<reason>)"`, each also
+    /// emitted as a [`crate::StreamChunk::ToolResult`] (no tool hook
+    /// fires for them). Which calls completed follows the execution
     /// order, which is not guaranteed between calls of a step; see
     /// [Tool calls within a step](ChatMiddleware#tool-calls-within-a-step).
     Terminate {

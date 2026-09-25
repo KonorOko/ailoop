@@ -652,7 +652,8 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         // produced before the abort so history stays
                         // consistent — only blocks closed by their `*End`
                         // chunk are in `assistant_blocks`, partial tool
-                        // calls (start without end) are not.
+                        // calls (start without end) are not. The finished
+                        // calls never ran, so `abort_step` answers them.
                         if !text_buf.is_empty() {
                             assistant_blocks.push(AssistantBlock::text(text_buf));
                         }
@@ -661,7 +662,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         }
                         let chunks = abort_step(
                             &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
-                            &mut run_msgs, Vec::new(), Vec::new(),
+                            &mut run_msgs, Vec::new(), tool_calls,
                         ).await;
                         for chunk in chunks { yield chunk; }
                         return;
@@ -764,9 +765,12 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
             // `ChatMiddleware` docs leave the order between calls of a
             // step open so they can run concurrently later. What must
             // hold either way: per-call hook order, `tools_result` in
-            // the model's order, and completed results kept on abort.
+            // the model's order, and on abort every call answered:
+            // completed calls keep their result, the rest get an error
+            // from `abort_step`.
             let mut tools_result = Vec::new();
-            for call in tool_calls {
+            let mut pending = tool_calls.into_iter();
+            while let Some(call) = pending.next() {
                 // Only tools in the run's active set can run. A name the
                 // model was never shown (deferred, or not registered at
                 // all) gets the same "not found" reply either way. The
@@ -816,9 +820,10 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     }
                 }
                 if let Some(abort_reason) = abort_reason {
+                    let current = PendingCall::Run { id, name, args };
                     let chunks = abort_step(
                         &config.middlewares, &run_id, &step_id, abort_reason, usage_run + delegated.total(),
-                        &mut run_msgs, tools_result, Vec::new(),
+                        &mut run_msgs, tools_result, std::iter::once(current).chain(pending),
                     ).await;
                     for chunk in chunks { yield chunk; }
                     return;
@@ -830,9 +835,10 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 ).await {
                     Ok(d) => d,
                     Err(reason) => {
+                        let current = PendingCall::Run { id, name, args };
                         let chunks = abort_step(
                             &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
-                            &mut run_msgs, tools_result, Vec::new(),
+                            &mut run_msgs, tools_result, std::iter::once(current).chain(pending),
                         ).await;
                         for chunk in chunks { yield chunk; }
                         return;
@@ -862,9 +868,10 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                             },
                             Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id, usage_run + delegated.total(), run_msgs)?,
                             Err(reason) => {
+                                let current = PendingCall::Run { id, name, args };
                                 let chunks = abort_step(
                                     &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
-                                    &mut run_msgs, tools_result, Vec::new(),
+                                    &mut run_msgs, tools_result, std::iter::once(current).chain(pending),
                                 ).await;
                                 for chunk in chunks { yield chunk; }
                                 return;
@@ -876,9 +883,10 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     },
                     ToolDecision::Terminate {reason} => {
                         let reason = AbortReason::ToolTerminated { tool_name: name.clone(), reason };
+                        let current = PendingCall::Run { id, name, args };
                         let chunks = abort_step(
                             &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
-                            &mut run_msgs, tools_result, Vec::new(),
+                            &mut run_msgs, tools_result, std::iter::once(current).chain(pending),
                         ).await;
                         for chunk in chunks { yield chunk; }
                         return;
@@ -902,7 +910,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         tools_result.push(UserBlock::tool_result(id.clone(), content.clone()));
                         let chunks = abort_step(
                             &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
-                            &mut run_msgs, tools_result, Vec::new(),
+                            &mut run_msgs, tools_result, pending,
                         ).await;
                         for chunk in chunks { yield chunk; }
                         return;
@@ -920,7 +928,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         tools_result.push(UserBlock::tool_result(id.clone(), content.clone()));
                         let chunks = abort_step(
                             &config.middlewares, &run_id, &step_id, reason, usage_run + delegated.total(),
-                            &mut run_msgs, tools_result, Vec::new(),
+                            &mut run_msgs, tools_result, pending,
                         ).await;
                         for chunk in chunks { yield chunk; }
                         return;
@@ -1581,10 +1589,104 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(
-            user_tool_result_ids.contains(&"toolu_a"),
-            "first tool's ToolResult must be preserved in history, got {user_tool_result_ids:?}"
+        assert_eq!(
+            user_tool_result_ids,
+            vec!["toolu_a", "toolu_b"],
+            "every tool_call needs its ToolResult in history"
         );
+    }
+
+    /// `Terminate` on the first of two calls leaves neither call without
+    /// a `tool_result`: both get a synthesized error, in the model's
+    /// order, and each goes out as a `ToolResult` chunk.
+    #[tokio::test]
+    async fn tool_terminate_on_first_call_answers_every_call() {
+        struct TerminateMw;
+
+        #[async_trait::async_trait]
+        impl ChatMiddleware for TerminateMw {
+            async fn on_before_tool_call(&self, _: &ToolCallInfo, _: &Value) -> ToolDecision {
+                ToolDecision::Terminate {
+                    reason: "policy".into(),
+                }
+            }
+        }
+
+        let turn = vec![
+            StreamChunk::ToolCallFinished {
+                id: "toolu_a".into(),
+                name: "get_weather".into(),
+                args: json!({}),
+            },
+            StreamChunk::ToolCallFinished {
+                id: "toolu_b".into(),
+                name: "get_weather".into(),
+                args: json!({}),
+            },
+            StreamChunk::TurnFinished {
+                reason: FinishReason::ToolUse,
+                usage: Usage::default(),
+                service_tier: None,
+            },
+        ];
+        let model = ScriptedModel::new([turn]);
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(GetWeather)).unwrap();
+        let mut config = RunConfig::default();
+        config.middlewares = vec![Arc::new(TerminateMw)];
+
+        let chunks: Vec<_> = run_chat(&model, vec![Message::user("hi")], &registry, config)
+            .await
+            .expect("run_chat should start")
+            .map(|c| c.expect("aborts are not errors"))
+            .collect()
+            .await;
+
+        let chunk_ids: Vec<&str> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::ToolResult { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chunk_ids, vec!["toolu_a", "toolu_b"]);
+
+        let Some(StreamChunk::RunFinished {
+            reason: FinishReason::Aborted(AbortReason::ToolTerminated { .. }),
+            new_messages,
+            ..
+        }) = chunks.last()
+        else {
+            panic!(
+                "expected RunFinished{{ToolTerminated}} last, got {:?}",
+                chunks.last()
+            );
+        };
+        let Some(Message::User { blocks }) = new_messages.last() else {
+            panic!("expected a user message with the results, got {new_messages:?}");
+        };
+        let results: Vec<(&str, &ToolResultContent)> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                UserBlock::ToolResult {
+                    call_id, content, ..
+                } => Some((call_id.as_str(), content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            results.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec!["toolu_a", "toolu_b"]
+        );
+        for (_, content) in results {
+            assert!(content.is_error);
+            assert_eq!(
+                content.blocks,
+                vec![ailoop_core::ToolResultBlock::Text {
+                    text: "Tool not run: the run was aborted (policy)".into()
+                }]
+            );
+        }
     }
 
     fn tokens(input: u32, output: u32) -> Usage {
