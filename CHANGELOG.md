@@ -778,6 +778,14 @@ and this project adheres to
 
 ### Fixed
 
+- Adding `Usage` values (`+`, `+=`) saturates each counter at
+  `u64::MAX` instead of overflowing. Before, an overflow panicked in
+  debug builds, and inside `UsageSink::report` it did so with the lock
+  held, poisoning it for every later report; in release builds it
+  wrapped around silently and left a wrong total, which is worse for
+  billing. `Add` cannot return an error, and a counter stuck at the
+  maximum is harmless.
+
 - The Azure OpenAI adapter silently dropped mid-stream error events.
   When the service fails after the response has started, it sends
   `data: {"error":{...}}` in place of a chunk. The adapter parsed that

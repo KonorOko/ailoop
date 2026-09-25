@@ -520,6 +520,11 @@ impl fmt::Display for AbortReason {
 /// context-size indicator built from the final turn's `input_tokens`,
 /// per-turn latency or service-tier attribution, online tokenizer
 /// calibration, and similar uses.
+///
+/// Adding two `Usage` values (`+`, `+=`) saturates each counter at
+/// `u64::MAX` instead of overflowing: a total that sticks at the
+/// maximum is harmless, while a panic inside a hook or a silent
+/// wrap-around in a billing total is not.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Usage {
@@ -557,29 +562,28 @@ impl Add for Usage {
 
     fn add(self, other: Usage) -> Usage {
         Usage {
-            input_tokens: self.input_tokens + other.input_tokens,
-            output_tokens: self.output_tokens + other.output_tokens,
-            cached_input_tokens: self.cached_input_tokens + other.cached_input_tokens,
-            cache_creation_input_tokens: self.cache_creation_input_tokens
-                + other.cache_creation_input_tokens,
-            cache_creation_5m_tokens: self.cache_creation_5m_tokens
-                + other.cache_creation_5m_tokens,
-            cache_creation_1h_tokens: self.cache_creation_1h_tokens
-                + other.cache_creation_1h_tokens,
-            reasoning_tokens: self.reasoning_tokens + other.reasoning_tokens,
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            cached_input_tokens: self
+                .cached_input_tokens
+                .saturating_add(other.cached_input_tokens),
+            cache_creation_input_tokens: self
+                .cache_creation_input_tokens
+                .saturating_add(other.cache_creation_input_tokens),
+            cache_creation_5m_tokens: self
+                .cache_creation_5m_tokens
+                .saturating_add(other.cache_creation_5m_tokens),
+            cache_creation_1h_tokens: self
+                .cache_creation_1h_tokens
+                .saturating_add(other.cache_creation_1h_tokens),
+            reasoning_tokens: self.reasoning_tokens.saturating_add(other.reasoning_tokens),
         }
     }
 }
 
 impl std::ops::AddAssign for Usage {
     fn add_assign(&mut self, other: Usage) {
-        self.input_tokens += other.input_tokens;
-        self.output_tokens += other.output_tokens;
-        self.cached_input_tokens += other.cached_input_tokens;
-        self.cache_creation_input_tokens += other.cache_creation_input_tokens;
-        self.cache_creation_5m_tokens += other.cache_creation_5m_tokens;
-        self.cache_creation_1h_tokens += other.cache_creation_1h_tokens;
-        self.reasoning_tokens += other.reasoning_tokens;
+        *self = *self + other;
     }
 }
 
@@ -674,5 +678,27 @@ mod tests {
                 other => panic!("expected ToolCallMalformed for {raw:?}, got {other:?}"),
             }
         }
+    }
+
+    fn filled(n: u64) -> Usage {
+        Usage {
+            input_tokens: n,
+            output_tokens: n,
+            cached_input_tokens: n,
+            cache_creation_input_tokens: n,
+            cache_creation_5m_tokens: n,
+            cache_creation_1h_tokens: n,
+            reasoning_tokens: n,
+        }
+    }
+
+    #[test]
+    fn usage_addition_saturates_instead_of_overflowing() {
+        let near_max = filled(u64::MAX - 1);
+        assert_eq!(near_max + filled(5), filled(u64::MAX));
+
+        let mut total = near_max;
+        total += filled(5);
+        assert_eq!(total, filled(u64::MAX));
     }
 }
