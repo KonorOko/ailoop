@@ -409,6 +409,11 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `ToolRegistry::activate_tool` / `deactivate_tool` are `activate` /
+  `deactivate`, matching `ToolActivation::activate` / `deactivate` (the
+  handle tools use for the same operation at runtime) and the
+  registry's own `activate_by_tags` / `deactivate_by_tags`.
+
 - `ApprovalMiddleware::for_named` is `ApprovalMiddleware::approve_named`,
   so both constructors say what they gate: `approve_all(callback)` and
   `approve_named(names, callback)`.
@@ -810,6 +815,18 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Rename the `ToolRegistry` activation methods:
+
+```rust
+// Before (1.0.0-rc.3)
+registry.activate_tool("search")?;
+registry.deactivate_tool("search")?;
+
+// After
+registry.activate("search")?;
+registry.deactivate("search")?;
+```
 
 Rename `ApprovalMiddleware::for_named`:
 

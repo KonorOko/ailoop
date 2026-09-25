@@ -20,7 +20,7 @@ use thiserror::Error;
 pub enum ToolRegistryError {
     /// No tool with the requested name is registered. Returned by
     /// [`ToolRegistry::tool_call`](crate::ToolRegistry::tool_call) and
-    /// [`ToolRegistry::activate_tool`](crate::ToolRegistry::activate_tool).
+    /// [`ToolRegistry::activate`](crate::ToolRegistry::activate).
     #[error("Tool '{0}' not found")]
     NotFound(String),
 

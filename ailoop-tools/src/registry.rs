@@ -270,7 +270,7 @@ impl ToolRegistry {
     /// Add `tool_name` to the active set. Returns
     /// [`ToolRegistryError::NotFound`] when the tool was never
     /// registered. No-op when the tool is already active.
-    pub fn activate_tool(&mut self, tool_name: &str) -> Result<(), ToolRegistryError> {
+    pub fn activate(&mut self, tool_name: &str) -> Result<(), ToolRegistryError> {
         if !self.tools.contains_key(tool_name) {
             return Err(ToolRegistryError::NotFound(tool_name.to_string()));
         }
@@ -280,10 +280,10 @@ impl ToolRegistry {
 
     /// Remove `tool_name` from the active set. Silent no-op for an
     /// unknown name (asymmetric with
-    /// [`activate_tool`](Self::activate_tool), which errors): the
+    /// [`activate`](Self::activate), which errors): the
     /// "tool is no longer active" state is the same whether the tool
     /// exists or not, so the call is idempotent.
-    pub fn deactivate_tool(&mut self, tool_name: &str) -> Result<(), ToolRegistryError> {
+    pub fn deactivate(&mut self, tool_name: &str) -> Result<(), ToolRegistryError> {
         self.active_tools.shift_remove(tool_name);
         Ok(())
     }
@@ -489,7 +489,7 @@ mod tests {
             }))
             .unwrap();
 
-        registry.deactivate_tool("fetch").unwrap();
+        registry.deactivate("fetch").unwrap();
         assert!(names(registry.active_tools()).is_empty());
         assert_eq!(names(registry.inactive_tools()), vec!["fetch"]);
     }
@@ -572,14 +572,14 @@ mod tests {
                 .register(Arc::new(TaggedTool { name, tags }))
                 .unwrap();
         }
-        registry.deactivate_tool("lookup").unwrap();
+        registry.deactivate("lookup").unwrap();
 
         registry.retain_by_tags(&[ToolTag::ReadOnly]);
 
         assert_eq!(names(registry.all_tools()), vec!["fetch", "lookup"]);
         assert_eq!(names(registry.active_tools()), vec!["fetch"]);
         assert!(matches!(
-            registry.activate_tool("rm"),
+            registry.activate("rm"),
             Err(ToolRegistryError::NotFound(_))
         ));
     }

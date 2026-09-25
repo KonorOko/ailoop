@@ -1190,12 +1190,12 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         if let Some(initial_active) = self.initial_active {
             tools.deactivate_all();
             for name in initial_active {
-                // `activate_tool` errors only on unknown names; the
+                // `activate` errors only on unknown names; the
                 // documented contract is to silently skip names not in
                 // the (capability-filtered) catalog so that
                 // `initial_active_tools` composes cleanly with
                 // `capabilities`.
-                let _ = tools.activate_tool(&name);
+                let _ = tools.activate(&name);
             }
         }
 

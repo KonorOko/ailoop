@@ -330,7 +330,7 @@ impl ToolActivation {
 
     /// Remove `name` from the active set. Idempotent — silently
     /// no-ops for unknown names (consistent with
-    /// [`ToolRegistry::deactivate_tool`](crate::ToolRegistry::deactivate_tool)).
+    /// [`ToolRegistry::deactivate`](crate::ToolRegistry::deactivate)).
     /// Returns [`ToolActivationError::Detached`] for detached handles.
     pub fn deactivate(&self, name: &str) -> Result<(), ToolActivationError> {
         let inner = self.inner.as_ref().ok_or(ToolActivationError::Detached)?;
