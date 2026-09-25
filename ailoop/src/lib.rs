@@ -73,9 +73,10 @@ pub use ailoop_core::{
 };
 pub use ailoop_derive::{ToolJsonType, ailoop_tool};
 pub use ailoop_history::{
-    CompactionError, CompactionStrategy, ConversationSnapshot, FromMessagesError, History,
-    HistoryBuilder, HistoryStore, InMemoryHistoryStore, JsonFileHistoryStore,
-    JsonFileHistoryStoreError, SummarizeStrategy, TruncateStrategy,
+    CompactionError, CompactionOutput, CompactionStats, CompactionStrategy, ConversationSnapshot,
+    DEFAULT_SUMMARIZER_PROMPT, FromMessagesError, History, HistoryBuilder, HistoryStore,
+    InMemoryHistoryStore, JsonFileHistoryStore, JsonFileHistoryStoreError, SummarizeStrategy,
+    TruncateStrategy,
 };
 pub use ailoop_prompts::{Prompt, PromptBuilder, PromptSection};
 // Note: `ToolJsonType` is also re-exported above from `ailoop_derive` as

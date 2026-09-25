@@ -10,6 +10,13 @@ and this project adheres to
 
 ### Added
 
+- The `ailoop` facade re-exports `CompactionOutput`, `CompactionStats`
+  and `DEFAULT_SUMMARIZER_PROMPT`. Implementing `CompactionStrategy`
+  means returning a `CompactionOutput`, and `History::compact_if_needed`
+  / `force_compact` return `CompactionStats`, so both had to be imported
+  from `ailoop-history` directly; everything else from the sub-crates
+  was already reachable through `ailoop`.
+
 - `Usage::new(input_tokens, output_tokens)` builds a `Usage` with the
   other counters at zero. `Usage` is `#[non_exhaustive]`, so a tool
   outside the crate that reports its own spend through

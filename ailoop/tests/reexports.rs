@@ -35,3 +35,20 @@ fn hook_contexts_are_constructible_from_the_facade() {
     let error = RunErrorInfo::new(&run_id, &err, &usage, &[]);
     assert_eq!(error.error.to_string(), "boom");
 }
+
+/// The compaction types a custom `CompactionStrategy` returns, and the
+/// stats `History` reports, are nameable from the facade.
+#[tokio::test]
+async fn compaction_types_are_reexported() {
+    let out = ailoop::CompactionOutput::new(vec![ailoop::Message::user("hi")], vec![false]);
+    assert_eq!(out.messages.len(), out.pinned.len());
+    assert!(!ailoop::DEFAULT_SUMMARIZER_PROMPT.is_empty());
+
+    let mut history = ailoop::History::builder(1_000).preserve_n_last(1).build();
+    history.add_message(ailoop::Message::user("one"));
+    history.add_message(ailoop::Message::assistant_text("two"));
+    history.add_message(ailoop::Message::user("three"));
+    let stats: ailoop::CompactionStats = history.force_compact().await.unwrap();
+    assert_eq!(stats.strategy, "truncate");
+    assert!(stats.after <= stats.before);
+}
