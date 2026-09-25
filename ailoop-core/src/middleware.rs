@@ -42,6 +42,13 @@ pub trait ChatMiddleware: Send + Sync {
     /// inject defaults, switch model parameters per-turn, or strip
     /// fields. The façade's per-builder defaults are wired through an
     /// internal middleware that runs ahead of any user-supplied one.
+    ///
+    /// The façade's system-prompt assembly runs *after* user
+    /// middlewares, so `req.system_prompt` is `None` when a user
+    /// middleware sees it inside a `Conversation`. Whatever a user
+    /// middleware writes there is not replaced: it is appended after
+    /// the builder's system prompt, and per-block `cache_control` on a
+    /// [`crate::SystemPrompt::Blocks`] value is preserved.
     async fn on_chat_request(&self, run_id: &RunId, step_id: &StepId, req: &mut ChatRequest) {}
     /// Fired for every [`StreamChunk`] the engine emits, including
     /// chunks the engine itself synthesizes

@@ -2,7 +2,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use ailoop_core::{
-    ChatMiddleware, ChatRequest, ReasoningEffort, RunId, StepId, ToolChoice, ToolDecision,
+    ChatMiddleware, ChatRequest, ReasoningEffort, RunId, StepId, SystemBlock, SystemPrompt,
+    ToolChoice, ToolDecision,
 };
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -18,6 +19,11 @@ pub(crate) struct ToolPromptGroup {
     pub(crate) section: PromptSection,
 }
 
+/// Renders the builder's system prompt (base + active tool-group
+/// sections) and composes it with whatever a user middleware already
+/// wrote to `req.system_prompt`. Runs after user middlewares so it sees
+/// the final `req.tools`; see [`compose_system_prompt`] for the merge
+/// rule.
 pub(crate) struct SystemPromptMiddleware {
     pub(crate) base: Prompt,
     pub(crate) tools_sections: Vec<ToolPromptGroup>,
@@ -42,7 +48,45 @@ impl ChatMiddleware for SystemPromptMiddleware {
             }
         }
 
-        req.system_prompt = Some(prompt.render().into());
+        req.system_prompt = Some(compose_system_prompt(
+            prompt.render(),
+            req.system_prompt.take(),
+        ));
+    }
+}
+
+/// Merge the builder-rendered prompt with a user-supplied one.
+///
+/// Inside a `Conversation` the engine hands middlewares a request with
+/// `system_prompt: None`, so a `Some(_)` here was put there by a user
+/// middleware. The builder prompt goes first (stable prefix, better
+/// prompt-cache hits) and the user's goes after it:
+///
+/// - no user prompt → the builder prompt, as before;
+/// - empty builder prompt → the user prompt, untouched;
+/// - `Plain + Plain` → one string, separated by a blank line;
+/// - user `Blocks` → `Blocks`, with the builder prompt as a leading
+///   block without cache breakpoint and the user's blocks (and their
+///   `cache_control`) preserved as-is.
+fn compose_system_prompt(builder: String, user: Option<SystemPrompt>) -> SystemPrompt {
+    let Some(user) = user else {
+        return builder.into();
+    };
+    let builder = builder.trim_end();
+    if builder.is_empty() {
+        return user;
+    }
+    match user {
+        SystemPrompt::Plain(user) => SystemPrompt::Plain(format!("{builder}\n\n{user}")),
+        SystemPrompt::Blocks(user) => {
+            let mut blocks = Vec::with_capacity(user.len() + 1);
+            blocks.push(SystemBlock::new(builder));
+            blocks.extend(user);
+            SystemPrompt::Blocks(blocks)
+        }
+        // `SystemPrompt` is `#[non_exhaustive]`; fall back to flattening
+        // any future variant to text rather than dropping it.
+        other => SystemPrompt::Plain(format!("{builder}\n\n{}", other.as_text())),
     }
 }
 
