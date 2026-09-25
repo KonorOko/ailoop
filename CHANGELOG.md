@@ -409,6 +409,14 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `AzureOpenAIError::Provider` carries `kind: AzureOpenAIApiErrorKind`
+  instead of the raw `error_type: String`, mirroring
+  `AnthropicError::Provider`. The kind comes from the event's `code`
+  (falling back to `type`) with the same mapping as HTTP errors, so
+  `RetryingModel` and `ProviderError::is_context_overflow` read it like
+  an `Api` error instead of treating every mid-stream failure as
+  permanent and never an overflow.
+
 - `CompactionReport` is `CompactionStats`. It sat next to
   `CompactionOutput` with a near-synonym name for a different shape:
   `CompactionOutput` is what a `CompactionStrategy` returns (the new
@@ -712,6 +720,14 @@ and this project adheres to
 
 ### Fixed
 
+- The Azure OpenAI adapter silently dropped mid-stream error events.
+  When the service fails after the response has started, it sends
+  `data: {"error":{...}}` in place of a chunk. The adapter parsed that
+  payload as an empty chunk and ended the stream without a finish
+  reason, so the run finished as if the model had stopped. The stream
+  now yields `AzureOpenAIError::Provider` with the typed kind and the
+  service's message.
+
 - `Conversation::run` / `run_with_options` panicked ("engine guarantees
   a RunFinished chunk before the stream terminates") when a middleware's
   `on_chunk_mut` replaced the terminal `RunFinished` with another
@@ -835,6 +851,16 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Match the typed kind on Azure mid-stream errors:
+
+```rust
+// Before (1.0.0-rc.3)
+AzureOpenAIError::Provider { error_type, message } => { /* ... */ }
+
+// After
+AzureOpenAIError::Provider { kind, message } => { /* ... */ }
+```
 
 Rename `CompactionReport`:
 

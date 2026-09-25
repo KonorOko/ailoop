@@ -19,6 +19,24 @@ pub(crate) struct ChatCompletionsChunk {
     pub choices: Vec<Choice>,
     #[serde(default)]
     pub usage: Option<Usage>,
+    /// Set when the service fails after the response started: the
+    /// stream carries `data: {"error":{...}}` instead of a chunk, with
+    /// the same `code` / `type` / `message` object as the HTTP error
+    /// envelope. `null` deserializes to `None`.
+    #[serde(default)]
+    pub error: Option<StreamError>,
+}
+
+/// Error object of a mid-stream error event. Every field is optional:
+/// only `message` is reliably present.
+#[derive(Debug, Deserialize)]
+pub(crate) struct StreamError {
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default, rename = "type")]
+    pub error_type: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -126,14 +126,16 @@ pub enum AzureOpenAIError {
     #[error("malformed event payload: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// Mid-stream error event delivered over SSE. Carries the raw
-    /// `error.type` / message because Azure's SSE events do not expose
-    /// the same `error.code` shape as HTTP-envelope errors. Treated as
-    /// permanent — there is no typed signal to drive a retry decision.
-    #[error("Azure OpenAI error event: {error_type}: {message}")]
+    /// Mid-stream error event delivered over SSE: the service failed
+    /// after the response started and sent `{"error":{...}}` in place
+    /// of a chunk. No HTTP headers are available at this layer, so
+    /// `retry_after` is intentionally absent; `kind` is derived from
+    /// the event's `code` (or `type` when `code` is missing) with the
+    /// same mapping as [`Api`](Self::Api).
+    #[error("Azure OpenAI error event ({kind:?}): {message}")]
     Provider {
-        /// Raw `error.type` string from the event payload.
-        error_type: String,
+        /// Typed category derived from the event payload.
+        kind: AzureOpenAIApiErrorKind,
         /// Human-readable message from the event payload.
         message: String,
     },
@@ -197,14 +199,11 @@ impl Retryable for AzureOpenAIError {
                     RetryClassification::Permanent
                 }
             }
+            AzureOpenAIError::Provider { kind, .. } => classify_kind(kind, None),
             AzureOpenAIError::Http(_) => RetryClassification::Transient { retry_after: None },
-            // Parsing failures are deterministic. Mid-stream `Provider`
-            // events on Azure are rare and we don't have a typed `kind`
-            // to drive a smart decision — treat as permanent rather than
-            // looping on something that's almost certainly an API bug.
+            // Parsing failures are deterministic.
             AzureOpenAIError::Sse(_)
             | AzureOpenAIError::Json(_)
-            | AzureOpenAIError::Provider { .. }
             | AzureOpenAIError::Config(_)
             | AzureOpenAIError::UnsupportedContent { .. } => RetryClassification::Permanent,
         }
@@ -212,13 +211,16 @@ impl Retryable for AzureOpenAIError {
 }
 
 impl ProviderError for AzureOpenAIError {
-    /// `true` for [`AzureOpenAIApiErrorKind::ContextOverflow`]. Azure
-    /// validates the context length before streaming, so the signal only
-    /// arrives as an HTTP error envelope.
+    /// `true` for [`AzureOpenAIApiErrorKind::ContextOverflow`], whether
+    /// it arrived as an HTTP error envelope or as a mid-stream error
+    /// event.
     fn is_context_overflow(&self) -> bool {
         matches!(
             self,
             AzureOpenAIError::Api {
+                kind: AzureOpenAIApiErrorKind::ContextOverflow,
+                ..
+            } | AzureOpenAIError::Provider {
                 kind: AzureOpenAIApiErrorKind::ContextOverflow,
                 ..
             }
@@ -312,8 +314,33 @@ mod tests {
             message: "bad field".into(),
             retry_after: None,
         };
+        let event = AzureOpenAIError::Provider {
+            kind: AzureOpenAIApiErrorKind::ContextOverflow,
+            message: "too long".into(),
+        };
         assert!(overflow.is_context_overflow());
+        assert!(event.is_context_overflow());
         assert!(!other.is_context_overflow());
+    }
+
+    #[test]
+    fn provider_event_is_classified_by_kind() {
+        let server = AzureOpenAIError::Provider {
+            kind: AzureOpenAIApiErrorKind::ServerError,
+            message: "boom".into(),
+        };
+        assert_eq!(
+            server.retry_classification(),
+            RetryClassification::Transient { retry_after: None },
+        );
+        let filtered = AzureOpenAIError::Provider {
+            kind: AzureOpenAIApiErrorKind::ContentFilter,
+            message: "blocked".into(),
+        };
+        assert_eq!(
+            filtered.retry_classification(),
+            RetryClassification::Permanent
+        );
     }
 
     #[test]

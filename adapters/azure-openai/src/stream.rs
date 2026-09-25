@@ -1,5 +1,5 @@
-use crate::errors::AzureOpenAIError;
-use crate::events::ChatCompletionsChunk;
+use crate::errors::{AzureOpenAIApiErrorKind, AzureOpenAIError};
+use crate::events::{ChatCompletionsChunk, StreamError};
 
 use ailoop_core::{FinishReason, StreamChunk, Usage};
 use async_stream::try_stream;
@@ -31,6 +31,18 @@ pub fn process_response(
     process_events(Box::pin(events))
 }
 
+/// Build the typed error for a mid-stream error event. `code` is the
+/// stable field; `type` is the fallback when an endpoint omits it.
+fn provider_error(error: StreamError) -> AzureOpenAIError {
+    let code = error.code.or(error.error_type).unwrap_or_default();
+    AzureOpenAIError::Provider {
+        kind: AzureOpenAIApiErrorKind::from_error_code(&code),
+        message: error
+            .message
+            .unwrap_or_else(|| "an error occurred during streaming".into()),
+    }
+}
+
 struct ToolCallState {
     id: String,
     name: String,
@@ -57,6 +69,14 @@ where
 
         while let Some(chunk) = events.next().await {
             let chunk = chunk?;
+
+            // A failure after the response started arrives as an event
+            // whose payload is `{"error":{...}}`. Without this check it
+            // deserializes as a chunk with no choices and the stream ends
+            // without a finish reason.
+            if let Some(error) = chunk.error {
+                Err(provider_error(error))?;
+            }
 
             // Usage chunks arrive after `finish_reason`, just before [DONE].
             // Intermediate chunks carry `usage: null`, which deserializes to
@@ -426,6 +446,66 @@ mod tests {
             .filter(|c| matches!(c, StreamChunk::TurnFinished { .. }))
             .count();
         assert_eq!(count, 1);
+    }
+
+    async fn run_until_error(
+        events: Vec<Result<ChatCompletionsChunk, AzureOpenAIError>>,
+    ) -> (Vec<StreamChunk>, Option<AzureOpenAIError>) {
+        let mut out = Vec::new();
+        let mut s = process_events(stream::iter(events));
+        while let Some(chunk) = s.next().await {
+            match chunk {
+                Ok(c) => out.push(c),
+                Err(e) => return (out, Some(e)),
+            }
+        }
+        (out, None)
+    }
+
+    #[tokio::test]
+    async fn mid_stream_error_event_surfaces_as_typed_provider_error() {
+        let events = vec![
+            parse(r#"{"choices":[{"index":0,"delta":{"content":"Hel"}}]}"#),
+            parse(
+                r#"{"error":{"code":"server_error","type":"server_error","message":"The server had an error"}}"#,
+            ),
+            parse(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#),
+        ];
+        let (chunks, err) = run_until_error(events).await;
+        assert!(
+            matches!(chunks.as_slice(), [StreamChunk::TextDelta { .. }]),
+            "only the text before the error is emitted, got {chunks:?}"
+        );
+        match err {
+            Some(AzureOpenAIError::Provider { kind, message }) => {
+                assert_eq!(kind, AzureOpenAIApiErrorKind::ServerError);
+                assert_eq!(message, "The server had an error");
+            }
+            other => panic!("expected Provider error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn error_event_falls_back_to_type_and_default_message() {
+        let events = vec![parse(r#"{"error":{"type":"context_length_exceeded"}}"#)];
+        let (_, err) = run_until_error(events).await;
+        match err {
+            Some(AzureOpenAIError::Provider { kind, message }) => {
+                assert_eq!(kind, AzureOpenAIApiErrorKind::ContextOverflow);
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected Provider error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn null_error_field_is_not_an_error() {
+        let events = vec![
+            parse(r#"{"choices":[{"index":0,"delta":{"content":"ok"}}],"error":null}"#),
+            parse(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#),
+        ];
+        let (_, err) = run_until_error(events).await;
+        assert!(err.is_none(), "unexpected error: {err:?}");
     }
 
     fn parse_sse_fixture(text: &str) -> Vec<Result<ChatCompletionsChunk, AzureOpenAIError>> {
