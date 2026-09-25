@@ -603,13 +603,13 @@ mod tests {
                         saw_call = true;
                     }
                 }
-                Message::User { blocks } => {
+                Message::User { blocks }
                     if blocks.iter().any(
                         |b| matches!(b, UserBlock::ToolResult { call_id, .. } if call_id == "c1"),
-                    ) {
-                        assert!(saw_call, "tool_result must follow its tool_call");
-                        saw_result = true;
-                    }
+                    ) =>
+                {
+                    assert!(saw_call, "tool_result must follow its tool_call");
+                    saw_result = true;
                 }
                 _ => {}
             }

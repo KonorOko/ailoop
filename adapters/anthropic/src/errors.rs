@@ -48,8 +48,10 @@ pub enum AnthropicApiErrorKind {
     /// Permanent unless the caller compacts and retries explicitly.
     RequestTooLarge,
     /// `api_error` — generic server-side failure with no further
-    /// classification. Treated as transient.
-    Api,
+    /// classification. Treated as transient. Named like the Azure
+    /// adapter's `AzureOpenAIApiErrorKind::ServerError` rather than
+    /// after the wire string, which would read as "any API error".
+    ServerError,
     /// Forward-compatibility variant for any future `error.type`
     /// strings. Treated conservatively as transient so unknown
     /// variants don't strand requests on a retryable code.
@@ -69,7 +71,7 @@ impl AnthropicApiErrorKind {
             "permission_error" => Self::Permission,
             "not_found_error" => Self::NotFound,
             "request_too_large" => Self::RequestTooLarge,
-            "api_error" => Self::Api,
+            "api_error" => Self::ServerError,
             other => Self::Other(other.to_string()),
         }
     }
@@ -92,7 +94,7 @@ fn is_prompt_too_long(message: &str) -> bool {
     message.to_ascii_lowercase().contains("prompt is too long")
 }
 
-/// Failure surface of [`AnthropicModel::chat_stream`](crate::AnthropicModel)
+/// Failure surface of [`AnthropicChatModel::chat_stream`](crate::AnthropicChatModel)
 /// and the surrounding HTTP / SSE plumbing.
 ///
 /// Wrapped by the façade as
@@ -113,6 +115,7 @@ pub enum AnthropicError {
     /// and `Retry-After` was inspected. `retry_after` is `None` when the
     /// header was missing or unparseable.
     #[error("Anthropic API error ({status}, {kind:?}): {message}")]
+    #[non_exhaustive]
     Api {
         /// HTTP status code returned by the API.
         status: StatusCode,
@@ -151,12 +154,20 @@ pub enum AnthropicError {
     /// the typed `kind` lets callers (e.g. `RetryingModel<M>`) match on
     /// `AnthropicApiErrorKind::Overloaded` without parsing strings.
     #[error("Anthropic error event ({kind:?}): {message}")]
+    #[non_exhaustive]
     Provider {
         /// Typed category derived from the event payload.
         kind: AnthropicApiErrorKind,
         /// Human-readable message from the event payload.
         message: String,
     },
+
+    /// Configuration error surfaced from
+    /// [`AnthropicClient::from_env`](crate::AnthropicClient::from_env) /
+    /// [`from_env_var`](crate::AnthropicClient::from_env_var): the API
+    /// key variable is missing or not valid Unicode. Permanent.
+    #[error("missing required configuration: {0}")]
+    Config(String),
 }
 
 /// Map an Anthropic-typed `AnthropicApiErrorKind` to a retry decision. Used both
@@ -173,7 +184,7 @@ fn classify_kind(
         // on a future error type that's actually retryable.
         AnthropicApiErrorKind::Overloaded
         | AnthropicApiErrorKind::RateLimit
-        | AnthropicApiErrorKind::Api
+        | AnthropicApiErrorKind::ServerError
         | AnthropicApiErrorKind::Other(_) => RetryClassification::Transient { retry_after },
         AnthropicApiErrorKind::Authentication
         | AnthropicApiErrorKind::Permission
@@ -200,7 +211,9 @@ impl Retryable for AnthropicError {
             }
             AnthropicError::Http(_) => RetryClassification::Transient { retry_after: None },
             // Parse failures are deterministic — retrying won't change the bytes.
-            AnthropicError::Sse(_) | AnthropicError::Json(_) => RetryClassification::Permanent,
+            AnthropicError::Sse(_) | AnthropicError::Json(_) | AnthropicError::Config(_) => {
+                RetryClassification::Permanent
+            }
         }
     }
 }
@@ -341,7 +354,7 @@ mod tests {
         // The phrase only means overflow on an invalid_request_error.
         assert_eq!(
             AnthropicApiErrorKind::from_error("api_error", "prompt is too long"),
-            AnthropicApiErrorKind::Api,
+            AnthropicApiErrorKind::ServerError,
         );
     }
 

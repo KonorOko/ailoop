@@ -10,6 +10,18 @@ and this project adheres to
 
 ### Added
 
+- `ToolRegistry` implements `Default` (an empty registry, same as
+  `ToolRegistry::new()`), so it works with `..Default::default()`,
+  `#[derive(Default)]` on structs that hold one, and
+  `std::mem::take`.
+
+- Minimum supported Rust version: 1.88, declared as `rust-version` on
+  every crate. Edition 2024 needs 1.85, and the let chains used across
+  the crates were stabilized in 1.88 (1.87 fails to compile them).
+  With it, Cargo reports an old toolchain up front instead of failing
+  on a syntax error, and the MSRV-aware resolver picks dependency
+  versions that still build on 1.88. CI checks it.
+
 - `RunConfig` implements `Debug`. Middlewares are shown as a count,
   since they are trait objects.
 
@@ -409,6 +421,42 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- The `Api` and `Provider` variants of `AnthropicError` and
+  `AzureOpenAIError` are `#[non_exhaustive]`, so the adapters can
+  surface more of the response later (a request id, the raw error
+  body) without another breaking change. Patterns outside the crate
+  need `..`, and code outside the crate can no longer build these
+  variants; the adapters are the only producers.
+
+- `AnthropicApiErrorKind::Api` is `AnthropicApiErrorKind::ServerError`,
+  the name `AzureOpenAIApiErrorKind` already uses for the same case.
+  It maps Anthropic's `api_error` (a generic server-side failure), but
+  `Api` next to `Other` read as "any API error". It is still transient
+  for `RetryingModel`.
+
+- `AnthropicClient::from_env` / `from_env_var` return
+  `Result<Self, AnthropicError>` instead of `Result<Self, VarError>`,
+  like `AzureOpenAIClient::from_env`. A missing or non-Unicode key is
+  the new `AnthropicError::Config(String)`, whose message names the
+  variable (`VarError` only says "environment variable not found"), and
+  a single error type covers both configuring and calling the adapter.
+  `Config` is permanent for `RetryingModel`. Code that propagates the
+  error with `?` into `Box<dyn Error>` or `anyhow` is unaffected.
+
+- `AnthropicModel` is `AnthropicChatModel`, matching
+  `AzureOpenAIChatModel`. Both adapters now name the model type after
+  the API it drives, which leaves room for other endpoints of the same
+  provider without an asymmetric name. `AnthropicClient::model` and
+  `CompletionClient::completion_model` return it as before.
+
+- `AzureOpenAIError::Provider` carries `kind: AzureOpenAIApiErrorKind`
+  instead of the raw `error_type: String`, mirroring
+  `AnthropicError::Provider`. The kind comes from the event's `code`
+  (falling back to `type`) with the same mapping as HTTP errors, so
+  `RetryingModel` and `ProviderError::is_context_overflow` read it like
+  an `Api` error instead of treating every mid-stream failure as
+  permanent and never an overflow.
+
 - `CompactionReport` is `CompactionStats`. It sat next to
   `CompactionOutput` with a near-synonym name for a different shape:
   `CompactionOutput` is what a `CompactionStrategy` returns (the new
@@ -712,6 +760,14 @@ and this project adheres to
 
 ### Fixed
 
+- The Azure OpenAI adapter silently dropped mid-stream error events.
+  When the service fails after the response has started, it sends
+  `data: {"error":{...}}` in place of a chunk. The adapter parsed that
+  payload as an empty chunk and ended the stream without a finish
+  reason, so the run finished as if the model had stopped. The stream
+  now yields `AzureOpenAIError::Provider` with the typed kind and the
+  service's message.
+
 - `Conversation::run` / `run_with_options` panicked ("engine guarantees
   a RunFinished chunk before the stream terminates") when a middleware's
   `on_chunk_mut` replaced the terminal `RunFinished` with another
@@ -835,6 +891,62 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Add `..` when destructuring adapter `Api` / `Provider` errors:
+
+```rust
+// Before (1.0.0-rc.3)
+AnthropicError::Api { status, kind, message, retry_after } => { /* ... */ }
+
+// After
+AnthropicError::Api { status, kind, message, retry_after, .. } => { /* ... */ }
+```
+
+Rename the Anthropic server-error kind:
+
+```rust
+// Before (1.0.0-rc.3)
+AnthropicApiErrorKind::Api => { /* ... */ }
+
+// After
+AnthropicApiErrorKind::ServerError => { /* ... */ }
+```
+
+Match the typed error from `AnthropicClient::from_env`:
+
+```rust
+// Before (1.0.0-rc.3)
+match AnthropicClient::from_env() {
+    Err(std::env::VarError::NotPresent) => { /* ... */ }
+    // ...
+}
+
+// After
+match AnthropicClient::from_env() {
+    Err(AnthropicError::Config(msg)) => { /* ... */ }
+    // ...
+}
+```
+
+Rename the Anthropic model type:
+
+```rust
+// Before (1.0.0-rc.3)
+let model: AnthropicModel = client.model("claude-sonnet-4-6");
+
+// After
+let model: AnthropicChatModel = client.model("claude-sonnet-4-6");
+```
+
+Match the typed kind on Azure mid-stream errors:
+
+```rust
+// Before (1.0.0-rc.3)
+AzureOpenAIError::Provider { error_type, message } => { /* ... */ }
+
+// After
+AzureOpenAIError::Provider { kind, message, .. } => { /* ... */ }
+```
 
 Rename `CompactionReport`:
 

@@ -3,6 +3,7 @@ name = "ailoop-derive"
 description = "Procedural macros for ailoop (#[ailoop_tool], #[derive(ToolJsonType)])"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true

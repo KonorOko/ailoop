@@ -2,7 +2,7 @@
 //!
 //! Implements [`CompletionClient`] / [`CompletionModel`] against
 //! Anthropic's `POST /v1/messages` streaming endpoint (Server-Sent
-//! Events). Plug an [`AnthropicModel`] into a
+//! Events). Plug an [`AnthropicChatModel`] into a
 //! [`Conversation`](https://docs.rs/ailoop) by chaining
 //! `Conversation::builder(client.model("claude-…"))`.
 //!
@@ -25,7 +25,7 @@
 //! ## Mini-index
 //!
 //! - [`AnthropicClient`] — connection + auth + header configuration.
-//! - [`AnthropicModel`] — the [`CompletionModel`] implementation
+//! - [`AnthropicChatModel`] — the [`CompletionModel`] implementation
 //!   built by [`AnthropicClient::model`] /
 //!   [`CompletionClient::completion_model`](ailoop_core::CompletionClient::completion_model).
 //! - [`AnthropicError`] / [`AnthropicApiErrorKind`] — typed failure
@@ -56,5 +56,5 @@ mod tokenizer;
 
 pub use client::AnthropicClient;
 pub use errors::{AnthropicApiErrorKind, AnthropicError};
-pub use model::AnthropicModel;
+pub use model::AnthropicChatModel;
 pub use tokenizer::OnlineCalibratedTokenizer;

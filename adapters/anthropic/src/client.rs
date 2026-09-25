@@ -3,7 +3,8 @@ use std::env::VarError;
 use ailoop_core::CompletionClient;
 use reqwest::Client as HttpClient;
 
-use crate::model::AnthropicModel;
+use crate::errors::AnthropicError;
+use crate::model::AnthropicChatModel;
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1/messages";
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -14,7 +15,7 @@ const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 /// endpoints), the `anthropic-version` to send on every request, and
 /// the comma-joined `anthropic-beta` feature list. Cheap to clone —
 /// the inner `reqwest::Client` is reference-counted, so a single
-/// configured instance can fan out across many [`AnthropicModel`]s.
+/// configured instance can fan out across many [`AnthropicChatModel`]s.
 #[derive(Clone)]
 pub struct AnthropicClient {
     pub(crate) http_client: HttpClient,
@@ -36,17 +37,23 @@ impl AnthropicClient {
 
     /// Read [`API_KEY_ENV`](Self::API_KEY_ENV) (loading `.env` first
     /// if present) and build a client with the public endpoint.
-    /// Returns [`VarError`] when the variable is missing or unset.
-    pub fn from_env() -> Result<Self, VarError> {
+    /// Returns [`AnthropicError::Config`] when the variable is missing
+    /// or not valid Unicode.
+    pub fn from_env() -> Result<Self, AnthropicError> {
         Self::from_env_var(Self::API_KEY_ENV)
     }
 
     /// Like [`from_env`](Self::from_env) but reads `name` instead of
     /// the default variable. Useful when multiple keys live in the
     /// same environment.
-    pub fn from_env_var(name: &str) -> Result<Self, VarError> {
+    pub fn from_env_var(name: &str) -> Result<Self, AnthropicError> {
         dotenvy::dotenv().ok();
-        let api_key = std::env::var(name)?;
+        let api_key = std::env::var(name).map_err(|e| match e {
+            VarError::NotPresent => AnthropicError::Config(format!("{name} is required")),
+            VarError::NotUnicode(_) => {
+                AnthropicError::Config(format!("{name} is not valid Unicode"))
+            }
+        })?;
 
         Ok(Self::new(api_key))
     }
@@ -80,19 +87,37 @@ impl AnthropicClient {
         self
     }
 
-    /// Take ownership of the client and produce an [`AnthropicModel`]
+    /// Take ownership of the client and produce an [`AnthropicChatModel`]
     /// bound to `model` (e.g. `"claude-sonnet-4-6"`). Use when one
     /// client maps to one model; for one-to-many use
     /// [`CompletionClient::completion_model`] which clones internally.
-    pub fn model(self, model: impl Into<String>) -> AnthropicModel {
-        AnthropicModel::new(self, model)
+    pub fn model(self, model: impl Into<String>) -> AnthropicChatModel {
+        AnthropicChatModel::new(self, model)
     }
 }
 
 impl CompletionClient for AnthropicClient {
-    type Model = AnthropicModel;
+    type Model = AnthropicChatModel;
 
     fn completion_model(&self, model_name: impl Into<String>) -> Self::Model {
-        AnthropicModel::new(self.clone(), model_name.into())
+        AnthropicChatModel::new(self.clone(), model_name.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_key_is_a_typed_config_error() {
+        let err = AnthropicClient::from_env_var("AILOOP_TEST_UNSET_ANTHROPIC_KEY")
+            .err()
+            .expect("variable is not set");
+        match err {
+            AnthropicError::Config(msg) => {
+                assert!(msg.contains("AILOOP_TEST_UNSET_ANTHROPIC_KEY"), "{msg}");
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
     }
 }

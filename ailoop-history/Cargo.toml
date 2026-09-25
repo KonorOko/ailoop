@@ -3,6 +3,7 @@ name = "ailoop-history"
 description = "Conversation history management and compaction for ailoop"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
