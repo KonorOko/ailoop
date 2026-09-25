@@ -216,6 +216,12 @@ far and state clearly what remains unverified or unfinished.";
 /// with `is_error: true`. A wrap-up turn that yields no text is also
 /// reported with `is_error: true`.
 ///
+/// A completion gate on the child ([`ChatMiddleware::on_turn_end`]
+/// returning `Continue`) runs after the wrap-up turn and wins: the
+/// extra iteration hits `max_iterations` (or the run keeps going until
+/// the hard `timeout`), and the parent gets the abort. Gates on a
+/// child with wrap-up should stop asking to continue near the budget.
+///
 /// ```
 /// use std::time::Duration;
 /// let config = ailoop::SubAgentConfig::new()

@@ -17,7 +17,10 @@ and this project adheres to
   run. Returning `ContinueDecision::Continue { blocks }` (or
   `ContinueDecision::continue_with(text)`) adds a user message and
   runs another iteration of the same run. The first `Continue` wins,
-  and the remaining middlewares are not asked for that turn. Until now
+  and the remaining middlewares are not asked for that turn. A
+  `Continue` with no blocks counts as `Stop` (and the next middleware
+  is asked), since continuing without a new user message would send a
+  request that ends on the assistant's own turn. Until now
   this took an outer loop around `stream_with_options`, which reset
   `iteration` to 0, split `usage` across runs and emitted one
   `RunFinished` per attempt. With the hook, iterations keep counting,
@@ -30,8 +33,13 @@ and this project adheres to
   `max_iterations`, so a gate that never passes ends the run with
   `AbortReason::MaxIterations`. If the turn also completed tool calls
   (possible with `MaxTokens`), the injected blocks join the tool
-  results in one user message, so the history never has two user
-  messages in a row. The default returns `ContinueDecision::Stop`, so
+  results in one user message instead of following them as a second
+  one. A turn that produced no assistant content at all (an empty
+  `EndTurn`) leaves nothing between the previous user message and the
+  injected one; providers merge consecutive user turns. A gate in a
+  `SubAgentTool` child can override the wrap-up turn of
+  `SubAgentConfig::wrap_up`, so it should let `EndTurn` through once
+  the budget is nearly spent. The default returns `ContinueDecision::Stop`, so
   existing middlewares are unaffected. The rustdoc of
   `on_chat_request` now also explains how to track the current
   iteration: record `StepStarted { iteration }` from `on_chunk` and

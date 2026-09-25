@@ -830,8 +830,10 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
             }
             let continue_run = continue_blocks.is_some();
 
-            // Tool results and injected blocks share one user message so
-            // the history never has two user turns in a row.
+            // Tool results and injected blocks share one user message
+            // rather than two consecutive ones. After an empty turn (no
+            // assistant blocks) the injected message follows the previous
+            // user message directly; providers merge the two.
             let mut user_blocks = tools_result;
             user_blocks.extend(continue_blocks.unwrap_or_default());
             if !user_blocks.is_empty() {
@@ -892,7 +894,8 @@ async fn run_tool_chain(
 }
 
 /// Asks every middleware's [`ChatMiddleware::on_turn_end`] in
-/// registration order; the first `Continue` wins. `new_messages` is the
+/// registration order; the first non-empty `Continue` wins (an empty
+/// one counts as `Stop`, so the next middleware is asked). `new_messages` is the
 /// run's messages so far; `pending` are this step's tool results that
 /// have not been pushed yet (only non-empty when the model stopped
 /// without `ToolUse` after completing tool calls), appended so the hook
@@ -921,7 +924,9 @@ async fn run_turn_end_chain(
     for mw in chain {
         match mw.on_turn_end(run_id, step_id, reason, new_messages).await {
             ContinueDecision::Stop => continue,
-            decision @ ContinueDecision::Continue { .. } => return decision,
+            ContinueDecision::Continue { blocks } if !blocks.is_empty() => {
+                return ContinueDecision::Continue { blocks };
+            }
             _ => continue,
         }
     }

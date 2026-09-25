@@ -411,3 +411,43 @@ async fn injected_blocks_share_the_tool_result_message() {
         other => panic!("expected a user message, got {other:?}"),
     }
 }
+
+/// Returns `Continue` with no blocks, which would otherwise continue
+/// the run without a new user message.
+struct EmptyContinue(AtomicUsize);
+
+#[async_trait::async_trait]
+impl ChatMiddleware for EmptyContinue {
+    async fn on_turn_end(
+        &self,
+        _run_id: &RunId,
+        _step_id: &StepId,
+        _reason: &FinishReason,
+        _new_messages: &[Message],
+    ) -> ContinueDecision {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        ContinueDecision::Continue { blocks: vec![] }
+    }
+}
+
+/// An empty `Continue` counts as `Stop`: the run finishes instead of
+/// sending a request that ends on the assistant's turn, and the next
+/// middleware is still asked.
+#[tokio::test]
+async fn empty_continue_counts_as_stop() {
+    let model = ScriptedModel::new([
+        text_turn("done", FinishReason::EndTurn, usage(1, 1)),
+        text_turn("unreachable", FinishReason::EndTurn, usage(1, 1)),
+    ]);
+    let registry = ToolRegistry::new();
+    let empty = Arc::new(EmptyContinue(AtomicUsize::new(0)));
+    let gate = Gate::failing(0);
+    let chunks = run(&model, &registry, vec![empty.clone(), gate.clone()], 10).await;
+
+    let (reason, _, new_messages) = run_finished(&chunks);
+    assert!(matches!(reason, FinishReason::EndTurn));
+    assert_eq!(step_iterations(&chunks), vec![0]);
+    assert_eq!(new_messages.len(), 1);
+    assert_eq!(empty.0.load(Ordering::SeqCst), 1);
+    assert_eq!(gate.calls(), 1, "the next middleware is still asked");
+}
