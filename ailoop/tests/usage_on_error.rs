@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use ailoop::{
-    ChatMiddleware, Conversation, EngineError, FinishReason, History, Message, RunError, RunId,
+    ChatMiddleware, Conversation, EngineError, FinishReason, History, RunError, RunErrorInfo,
     StreamChunk, SubAgentTool, ToolContext, ToolDefinition, ToolDyn, ToolResultContent, Usage,
 };
 use ailoop_core::testing::{ScriptedError, ScriptedModel, ScriptedTurn};
@@ -48,14 +48,8 @@ struct Spy {
 
 #[async_trait]
 impl ChatMiddleware for Spy {
-    async fn on_run_error(
-        &self,
-        _: &RunId,
-        _: &(dyn std::error::Error + Send + Sync),
-        usage: &Usage,
-        _: &[Message],
-    ) {
-        self.run_errors.lock().unwrap().push(*usage);
+    async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
+        self.run_errors.lock().unwrap().push(*run.usage);
     }
 }
 

@@ -1722,7 +1722,7 @@ mod tests {
     // middleware has run.
 
     use ailoop_core::testing::ScriptedModel;
-    use ailoop_core::{FinishReason, RunId, StepId, ToolChoice, Usage};
+    use ailoop_core::{FinishReason, RunId, RunStartInfo, StepInfo, ToolChoice, Usage};
     use std::sync::Mutex;
 
     #[derive(Clone, Default)]
@@ -1744,7 +1744,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ChatMiddleware for RecordingMiddleware {
-        async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+        async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
             *self.out.lock().unwrap() = Some(Recorded {
                 temperature: req.temperature,
                 top_p: req.top_p,
@@ -1840,7 +1840,7 @@ mod tests {
         struct Override;
         #[async_trait::async_trait]
         impl ChatMiddleware for Override {
-            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
                 req.temperature = Some(1.0);
             }
         }
@@ -1937,7 +1937,7 @@ mod tests {
         struct Override;
         #[async_trait::async_trait]
         impl ChatMiddleware for Override {
-            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
                 req.max_tokens = 77;
             }
         }
@@ -1996,7 +1996,7 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl ChatMiddleware for Recorder {
-            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
                 self.captures.lock().unwrap().push(req.messages.clone());
             }
         }
@@ -2116,13 +2116,8 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl ChatMiddleware for ConfigSpy {
-            async fn on_run_started(
-                &self,
-                _run_id: &RunId,
-                _messages: &[Message],
-                config: &RunConfig,
-            ) -> ailoop_core::HookAction {
-                *self.captured.lock().unwrap() = Some(config.max_iterations);
+            async fn on_run_started(&self, run: &RunStartInfo<'_>) -> ailoop_core::HookAction {
+                *self.captured.lock().unwrap() = Some(run.config.max_iterations);
                 ailoop_core::HookAction::Continue
             }
         }
@@ -2149,13 +2144,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ChatMiddleware for MaxIterationsSpy {
-        async fn on_run_started(
-            &self,
-            _run_id: &RunId,
-            _messages: &[Message],
-            config: &RunConfig,
-        ) -> ailoop_core::HookAction {
-            *self.captured.lock().unwrap() = Some(config.max_iterations);
+        async fn on_run_started(&self, run: &RunStartInfo<'_>) -> ailoop_core::HookAction {
+            *self.captured.lock().unwrap() = Some(run.config.max_iterations);
             ailoop_core::HookAction::Continue
         }
     }

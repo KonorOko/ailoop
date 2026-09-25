@@ -7,11 +7,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ailoop::{Conversation, History, Message, ToolDefinition, ToolResultContent};
+use ailoop::{Conversation, History, Message, RunStartInfo, ToolDefinition, ToolResultContent};
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{
-    AbortReason, AssistantBlock, CancellationToken, FinishReason, RunConfig, StreamChunk, ToolTag,
-    Usage,
+    AbortReason, AssistantBlock, CancellationToken, FinishReason, StreamChunk, ToolTag, Usage,
 };
 use ailoop_tools::{ToolContext, ToolDyn};
 use async_trait::async_trait;
@@ -166,17 +165,12 @@ async fn run_returns_ok_with_aborted_finish_reason_on_timeout() {
     // ScriptedModel turn that triggers an immediate Aborted via
     // HookAction::Terminate. The blocking model + cancellation path is
     // covered in `reliability.rs`.
-    use ailoop_core::{ChatMiddleware, HookAction, RunId};
+    use ailoop_core::{ChatMiddleware, HookAction};
 
     struct AbortingMw;
     #[async_trait]
     impl ChatMiddleware for AbortingMw {
-        async fn on_run_started(
-            &self,
-            _run_id: &RunId,
-            _messages: &[Message],
-            _config: &RunConfig,
-        ) -> HookAction {
+        async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> HookAction {
             HookAction::Terminate {
                 reason: "policy".into(),
             }

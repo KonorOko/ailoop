@@ -10,6 +10,9 @@ and this project adheres to
 
 ### Added
 
+- `RunConfig` implements `Debug`. Middlewares are shown as a count,
+  since they are trait objects.
+
 - `ChatMiddleware::on_run_dropped(&self, run_id)`: a third closing
   hook, fired when the caller drops a run's stream before the run
   closed (a `select!` that picks another branch, an outer timeout, a
@@ -398,6 +401,24 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- The run-level hooks of `ChatMiddleware` take one context struct in
+  place of positional arguments:
+  `on_run_started(&RunStartInfo)`, `on_chat_request(&StepInfo, req)`,
+  `on_run_finished(&RunFinishedInfo)`, `on_turn_end(&TurnEndInfo)` and
+  `on_run_error(&RunErrorInfo)`. Each positional argument added to a
+  hook broke every middleware that overrode it; this release alone
+  added `usage` and `partial_messages` to `on_run_error` that way. The
+  structs are `#[non_exhaustive]`, so later releases can add fields
+  without breaking implementations. Their fields are public and have
+  the old parameters' names, except `err`, which is now `error`. The
+  borrowed ones (`RunStartInfo`, `RunFinishedInfo`, `TurnEndInfo`,
+  `RunErrorInfo`) borrow from the engine for the duration of the hook,
+  so nothing is cloned. Each has a `new(...)` constructor for
+  unit-testing a middleware. `ChatRequest` stays a separate argument of
+  `on_chat_request` because the hook borrows it mutably, like `args` in
+  the tool hooks. `on_run_dropped(run_id)` and the chunk hooks are
+  unchanged.
+
 - `RunConfig::default().max_iterations` is now 25 (was 10). One
   iteration is one model turn plus the tool calls it triggers. Every
   `ContinueDecision::Continue` from `on_turn_end` also counts, and a
@@ -687,6 +708,48 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Run-level hooks take a context struct; read the old arguments from its
+fields:
+
+```rust
+use ailoop::{RunErrorInfo, RunFinishedInfo, RunStartInfo, StepInfo, TurnEndInfo};
+
+// Before (1.0.0-rc.3)
+async fn on_run_started(&self, run_id: &RunId, messages: &[Message], config: &RunConfig) -> HookAction {
+    self.start(run_id, config.max_iterations);
+    HookAction::Continue
+}
+async fn on_chat_request(&self, run_id: &RunId, step_id: &StepId, req: &mut ChatRequest) { /* .. */ }
+async fn on_run_finished(&self, run_id: &RunId, reason: &FinishReason, usage: &Usage, new_messages: &[Message]) {
+    self.finish(run_id, usage);
+}
+async fn on_run_error(&self, run_id: &RunId, err: &(dyn Error + Send + Sync)) {
+    self.fail(run_id, err);
+}
+
+// After
+async fn on_run_started(&self, run: &RunStartInfo<'_>) -> HookAction {
+    self.start(run.run_id, run.config.max_iterations);
+    HookAction::Continue
+}
+async fn on_chat_request(&self, step: &StepInfo, req: &mut ChatRequest) {
+    // step.run_id, step.step_id
+}
+async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
+    self.finish(run.run_id, run.usage);
+}
+async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
+    self.fail(run.run_id, run.error); // also run.usage, run.partial_messages
+}
+async fn on_turn_end(&self, turn: &TurnEndInfo<'_>) -> ContinueDecision {
+    // turn.run_id, turn.step_id, turn.reason, turn.new_messages
+    ContinueDecision::Stop
+}
+```
+
+To unit-test a middleware, build the context with its constructor,
+e.g. `RunFinishedInfo::new(&run_id, &FinishReason::EndTurn, &usage, &[])`.
 
 To keep the old cap of 10 iterations, set it explicitly:
 

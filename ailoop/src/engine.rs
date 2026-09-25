@@ -7,8 +7,9 @@ use std::time::Duration;
 use crate::errors::{EngineError, RunError};
 use ailoop_core::{
     AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
-    ContinueDecision, FinishReason, HookAction, Message, RunConfig, RunId, StepId, StreamChunk,
-    ToolCallInfo, ToolDecision, ToolResultContent, Usage, UserBlock,
+    ContinueDecision, FinishReason, HookAction, Message, RunConfig, RunErrorInfo, RunFinishedInfo,
+    RunId, RunStartInfo, StepId, StepInfo, StreamChunk, ToolCallInfo, ToolDecision,
+    ToolResultContent, TurnEndInfo, Usage, UserBlock,
 };
 use ailoop_history::{CompactionError, CompactionReport, History};
 use ailoop_tools::{
@@ -115,8 +116,13 @@ impl RunGuard {
 
     async fn finished(&self, reason: &FinishReason, usage: &Usage, new_messages: &[Message]) {
         for mw in self.pending() {
-            mw.on_run_finished(&self.run_id, reason, usage, new_messages)
-                .await;
+            mw.on_run_finished(&RunFinishedInfo::new(
+                &self.run_id,
+                reason,
+                usage,
+                new_messages,
+            ))
+            .await;
         }
     }
 
@@ -127,8 +133,13 @@ impl RunGuard {
         partial_messages: &[Message],
     ) {
         for mw in self.pending() {
-            mw.on_run_error(&self.run_id, err, usage, partial_messages)
-                .await;
+            mw.on_run_error(&RunErrorInfo::new(
+                &self.run_id,
+                err,
+                usage,
+                partial_messages,
+            ))
+            .await;
         }
     }
 }
@@ -551,7 +562,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
 
         for mw in &config.middlewares {
             let action = match race_abort(
-                mw.on_run_started(&run_id, run_msgs.context(), &config),
+                mw.on_run_started(&RunStartInfo::new(&run_id, run_msgs.context(), &config)),
                 &mut abort_fut,
             ).await {
                 Ok(a) => a,
@@ -669,9 +680,10 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 req.system_prompt = config.system_prompt.clone();
 
                 let mut aborted = None;
+                let step = StepInfo::new(run_id.clone(), step_id.clone());
                 for mw in &config.middlewares {
                     if let Err(reason) = race_abort(
-                        mw.on_chat_request(&run_id, &step_id, &mut req),
+                        mw.on_chat_request(&step, &mut req),
                         &mut abort_fut,
                     ).await {
                         aborted = Some(reason);
@@ -1216,7 +1228,10 @@ async fn run_turn_end_chain(
         &owned
     };
     for mw in chain {
-        match mw.on_turn_end(run_id, step_id, reason, new_messages).await {
+        match mw
+            .on_turn_end(&TurnEndInfo::new(run_id, step_id, reason, new_messages))
+            .await
+        {
             ContinueDecision::Stop => continue,
             ContinueDecision::Continue { blocks } if !blocks.is_empty() => {
                 return ContinueDecision::Continue { blocks };
@@ -1566,25 +1581,14 @@ mod tests {
 
         #[async_trait::async_trait]
         impl ChatMiddleware for AbortingMw {
-            async fn on_run_started(
-                &self,
-                _run_id: &RunId,
-                _messages: &[Message],
-                _config: &RunConfig,
-            ) -> HookAction {
+            async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> HookAction {
                 HookAction::Terminate {
                     reason: "budget exceeded".into(),
                 }
             }
-            async fn on_run_finished(
-                &self,
-                _run_id: &RunId,
-                reason: &FinishReason,
-                _usage: &Usage,
-                _new_messages: &[Message],
-            ) {
+            async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
                 self.finished_count.fetch_add(1, Ordering::SeqCst);
-                *self.last_reason.lock().unwrap() = Some(reason.clone());
+                *self.last_reason.lock().unwrap() = Some(run.reason.clone());
             }
         }
 

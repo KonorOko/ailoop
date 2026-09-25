@@ -37,8 +37,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ailoop_core::{
-    AbortReason, ChatMiddleware, ChatRequest, FinishReason, HookAction, Message, RunConfig, RunId,
-    StepId, StreamChunk, ToolCallInfo, ToolDecision, ToolResultContent, Usage,
+    AbortReason, ChatMiddleware, ChatRequest, FinishReason, HookAction, RunErrorInfo,
+    RunFinishedInfo, RunStartInfo, StepInfo, StreamChunk, ToolCallInfo, ToolDecision,
+    ToolResultContent, Usage,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -197,25 +198,20 @@ fn tool_result_body(r: &ToolResultContent) -> String {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for JsonTracer {
-    async fn on_run_started(
-        &self,
-        run_id: &RunId,
-        messages: &[Message],
-        config: &RunConfig,
-    ) -> HookAction {
+    async fn on_run_started(&self, run: &RunStartInfo<'_>) -> HookAction {
         let mut p = serde_json::Map::new();
-        p.insert("run_id".into(), json!(run_id.to_string()));
-        p.insert("messages".into(), json!(messages.len()));
-        p.insert("max_iterations".into(), json!(config.max_iterations));
-        p.insert("max_tokens".into(), json!(config.max_tokens));
+        p.insert("run_id".into(), json!(run.run_id.to_string()));
+        p.insert("messages".into(), json!(run.messages.len()));
+        p.insert("max_iterations".into(), json!(run.config.max_iterations));
+        p.insert("max_tokens".into(), json!(run.config.max_tokens));
         self.emit("run_started", p).await;
         HookAction::Continue
     }
 
-    async fn on_chat_request(&self, run_id: &RunId, step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, step: &StepInfo, req: &mut ChatRequest) {
         let mut p = serde_json::Map::new();
-        p.insert("run_id".into(), json!(run_id.to_string()));
-        p.insert("step_id".into(), json!(step_id.to_string()));
+        p.insert("run_id".into(), json!(step.run_id.to_string()));
+        p.insert("step_id".into(), json!(step.step_id.to_string()));
         p.insert("messages".into(), json!(req.messages.len()));
         p.insert(
             "tools".into(),
@@ -361,33 +357,21 @@ impl ChatMiddleware for JsonTracer {
         }
     }
 
-    async fn on_run_finished(
-        &self,
-        run_id: &RunId,
-        reason: &FinishReason,
-        usage: &Usage,
-        new_messages: &[Message],
-    ) {
+    async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
         let mut p = serde_json::Map::new();
-        p.insert("run_id".into(), json!(run_id.to_string()));
-        p.insert("reason".into(), finish_reason_payload(reason));
-        p.insert("usage".into(), usage_payload(usage));
-        p.insert("new_messages".into(), json!(new_messages.len()));
+        p.insert("run_id".into(), json!(run.run_id.to_string()));
+        p.insert("reason".into(), finish_reason_payload(run.reason));
+        p.insert("usage".into(), usage_payload(run.usage));
+        p.insert("new_messages".into(), json!(run.new_messages.len()));
         self.emit("run_finished", p).await;
     }
 
-    async fn on_run_error(
-        &self,
-        run_id: &RunId,
-        err: &(dyn std::error::Error + Send + Sync),
-        usage: &Usage,
-        partial_messages: &[Message],
-    ) {
+    async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
         let mut p = serde_json::Map::new();
-        p.insert("run_id".into(), json!(run_id.to_string()));
-        p.insert("error".into(), json!(err.to_string()));
-        p.insert("usage".into(), usage_payload(usage));
-        p.insert("partial_messages".into(), json!(partial_messages.len()));
+        p.insert("run_id".into(), json!(run.run_id.to_string()));
+        p.insert("error".into(), json!(run.error.to_string()));
+        p.insert("usage".into(), usage_payload(run.usage));
+        p.insert("partial_messages".into(), json!(run.partial_messages.len()));
         self.emit("run_error", p).await;
     }
 
@@ -428,7 +412,7 @@ impl ChatMiddleware for JsonTracer {
 mod tests {
     use super::*;
     use ailoop_core::testing::ScriptedModel;
-    use ailoop_core::{Message, RunConfig};
+    use ailoop_core::{Message, RunConfig, RunId, StepId};
     use ailoop_tools::ToolRegistry;
     use futures::StreamExt;
     use serde_json::Value;
@@ -463,7 +447,11 @@ mod tests {
         let step_id = StepId::new();
 
         tracer
-            .on_run_started(&run_id, &[Message::user("hi")], &RunConfig::default())
+            .on_run_started(&RunStartInfo::new(
+                &run_id,
+                &[Message::user("hi")],
+                &RunConfig::default(),
+            ))
             .await;
         tracer
             .on_before_tool_call(
@@ -487,7 +475,12 @@ mod tests {
             })
             .await;
         tracer
-            .on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
+            .on_run_finished(&RunFinishedInfo::new(
+                &run_id,
+                &FinishReason::EndTurn,
+                &Usage::default(),
+                &[],
+            ))
             .await;
 
         let lines = close_and_read(tracer, path);

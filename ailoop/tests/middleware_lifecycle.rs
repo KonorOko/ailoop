@@ -7,10 +7,13 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ailoop::{Message, ToolDefinition, ToolResultContent, advanced::run_chat};
+use ailoop::{
+    Message, RunErrorInfo, RunFinishedInfo, RunStartInfo, StepInfo, ToolDefinition,
+    ToolResultContent, advanced::run_chat,
+};
 use ailoop_core::testing::{ScriptedError, ScriptedModel};
 use ailoop_core::{
-    ChatMiddleware, ChatRequest, FinishReason, HookAction, RunConfig, RunId, StepId, StreamChunk,
+    ChatMiddleware, ChatRequest, FinishReason, HookAction, RunConfig, RunId, StreamChunk,
     ToolCallInfo, ToolDecision, Usage,
 };
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
@@ -42,17 +45,12 @@ impl RecordingMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for RecordingMiddleware {
-    async fn on_run_started(
-        &self,
-        _run_id: &RunId,
-        _messages: &[Message],
-        _config: &RunConfig,
-    ) -> HookAction {
+    async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> HookAction {
         self.push("on_run_started");
         HookAction::Continue
     }
 
-    async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, _req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, _req: &mut ChatRequest) {
         self.push("on_chat_request");
     }
 
@@ -91,23 +89,11 @@ impl ChatMiddleware for RecordingMiddleware {
         self.push("on_after_tool_call");
     }
 
-    async fn on_run_finished(
-        &self,
-        _run_id: &RunId,
-        _reason: &FinishReason,
-        _usage: &Usage,
-        _new_messages: &[Message],
-    ) {
+    async fn on_run_finished(&self, _run: &RunFinishedInfo<'_>) {
         self.push("on_run_finished");
     }
 
-    async fn on_run_error(
-        &self,
-        _run_id: &RunId,
-        _err: &(dyn std::error::Error + Send + Sync),
-        _usage: &Usage,
-        _: &[Message],
-    ) {
+    async fn on_run_error(&self, _run: &RunErrorInfo<'_>) {
         self.push("on_run_error");
     }
 
@@ -338,12 +324,7 @@ struct StallingMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for StallingMiddleware {
-    async fn on_run_started(
-        &self,
-        _run_id: &RunId,
-        _messages: &[Message],
-        _config: &RunConfig,
-    ) -> HookAction {
+    async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> HookAction {
         self.log.push("on_run_started");
         if self.in_started {
             std::future::pending::<()>().await;
@@ -351,13 +332,7 @@ impl ChatMiddleware for StallingMiddleware {
         HookAction::Continue
     }
 
-    async fn on_run_finished(
-        &self,
-        _run_id: &RunId,
-        _reason: &FinishReason,
-        _usage: &Usage,
-        _new_messages: &[Message],
-    ) {
+    async fn on_run_finished(&self, _run: &RunFinishedInfo<'_>) {
         self.log.push("on_run_finished");
         if !self.in_started {
             std::future::pending::<()>().await;

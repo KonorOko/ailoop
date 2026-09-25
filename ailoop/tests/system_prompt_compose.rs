@@ -13,8 +13,8 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use ailoop::{
-    CacheControl, ChatMiddleware, ChatRequest, CompletionModel, Conversation, FinishReason, RunId,
-    StepId, StreamChunk, SystemBlock, SystemPrompt, Usage, ailoop_tool,
+    CacheControl, ChatMiddleware, ChatRequest, CompletionModel, Conversation, FinishReason,
+    StepInfo, StreamChunk, SystemBlock, SystemPrompt, Usage, ailoop_tool,
 };
 use futures::stream::BoxStream;
 use tempfile::NamedTempFile;
@@ -70,7 +70,7 @@ struct SetSystemPrompt(SystemPrompt);
 
 #[async_trait::async_trait]
 impl ChatMiddleware for SetSystemPrompt {
-    async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         req.system_prompt = Some(self.0.clone());
     }
 }

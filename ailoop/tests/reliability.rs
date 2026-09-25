@@ -9,11 +9,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use ailoop::{Message, ToolDefinition, ToolResultContent, advanced::run_chat};
+use ailoop::{
+    Message, RunFinishedInfo, RunStartInfo, ToolDefinition, ToolResultContent, advanced::run_chat,
+};
 use ailoop_core::testing::{ScriptedError, ScriptedModel};
 use ailoop_core::{
     AbortReason, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason,
-    HookAction, RunConfig, RunId, StreamChunk, ToolCallInfo, ToolDecision, Usage,
+    HookAction, RunConfig, StreamChunk, ToolCallInfo, ToolDecision, Usage,
 };
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use async_trait::async_trait;
@@ -92,15 +94,9 @@ struct RunFinishedRecorder {
 
 #[async_trait]
 impl ChatMiddleware for RunFinishedRecorder {
-    async fn on_run_finished(
-        &self,
-        _run_id: &RunId,
-        reason: &FinishReason,
-        _usage: &Usage,
-        _new_messages: &[Message],
-    ) {
+    async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
         self.finished.fetch_add(1, Ordering::SeqCst);
-        *self.last_reason.lock().unwrap() = Some(reason.clone());
+        *self.last_reason.lock().unwrap() = Some(run.reason.clone());
     }
 }
 
@@ -508,12 +504,7 @@ async fn hook_action_terminate_still_fires_on_run_finished() {
 
     #[async_trait]
     impl ChatMiddleware for AbortingMw {
-        async fn on_run_started(
-            &self,
-            _run_id: &RunId,
-            _messages: &[Message],
-            _config: &RunConfig,
-        ) -> HookAction {
+        async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> HookAction {
             HookAction::Terminate {
                 reason: "no go".into(),
             }

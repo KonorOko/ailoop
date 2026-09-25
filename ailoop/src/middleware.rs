@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use ailoop_core::{
-    ChatMiddleware, ChatRequest, FinishReason, Message, ReasoningEffort, RunId, StepId,
-    SystemBlock, SystemPrompt, ToolCallInfo, ToolChoice, ToolDecision, ToolTag, Usage,
+    ChatMiddleware, ChatRequest, Message, ReasoningEffort, RunErrorInfo, RunFinishedInfo, RunId,
+    StepId, StepInfo, SystemBlock, SystemPrompt, ToolCallInfo, ToolChoice, ToolDecision, ToolTag,
 };
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -31,7 +31,7 @@ pub(crate) struct SystemPromptMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for SystemPromptMiddleware {
-    async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         let mut prompt = self.base.clone();
 
         if let Some(tools) = &req.tools {
@@ -132,7 +132,7 @@ pub(crate) struct RequestDefaultsMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for RequestDefaultsMiddleware {
-    async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         if req.temperature.is_none() {
             req.temperature = self.defaults.temperature;
         }
@@ -433,12 +433,12 @@ where
 
 #[async_trait::async_trait]
 impl ChatMiddleware for ApprovalMiddleware {
-    async fn on_chat_request(&self, run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, step: &StepInfo, req: &mut ChatRequest) {
         // One copy per step, shared by every gated call of the step.
         // Overwrites the previous step (and a same-step retry after
         // context-overflow recovery).
         let messages: Arc<[Message]> = Arc::from(req.messages.as_slice());
-        self.contexts().insert(run_id.clone(), messages);
+        self.contexts().insert(step.run_id.clone(), messages);
     }
 
     async fn on_before_tool_call(&self, call: &ToolCallInfo, args: &Value) -> ToolDecision {
@@ -467,24 +467,12 @@ impl ChatMiddleware for ApprovalMiddleware {
         (self.callback)(req).await
     }
 
-    async fn on_run_finished(
-        &self,
-        run_id: &RunId,
-        _reason: &FinishReason,
-        _usage: &Usage,
-        _new_messages: &[Message],
-    ) {
-        self.contexts().remove(run_id);
+    async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
+        self.contexts().remove(run.run_id);
     }
 
-    async fn on_run_error(
-        &self,
-        run_id: &RunId,
-        _err: &(dyn std::error::Error + Send + Sync),
-        _usage: &Usage,
-        _partial_messages: &[Message],
-    ) {
-        self.contexts().remove(run_id);
+    async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
+        self.contexts().remove(run.run_id);
     }
 
     fn on_run_dropped(&self, run_id: &RunId) {
@@ -495,6 +483,7 @@ impl ChatMiddleware for ApprovalMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ailoop_core::{FinishReason, Usage};
 
     fn gate() -> ApprovalMiddleware {
         ApprovalMiddleware::approve_all(|_req| async { ToolDecision::Continue })
@@ -502,7 +491,8 @@ mod tests {
 
     async fn record_step(mw: &ApprovalMiddleware, run_id: &RunId) {
         let mut req = ChatRequest::new(vec![Message::user("hi")], 1024);
-        mw.on_chat_request(run_id, &StepId::new(), &mut req).await;
+        mw.on_chat_request(&StepInfo::new(run_id.clone(), StepId::new()), &mut req)
+            .await;
     }
 
     #[tokio::test]
@@ -512,8 +502,13 @@ mod tests {
         record_step(&mw, &run_id).await;
         assert_eq!(mw.tracked_runs(), 1);
 
-        mw.on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
-            .await;
+        mw.on_run_finished(&RunFinishedInfo::new(
+            &run_id,
+            &FinishReason::EndTurn,
+            &Usage::default(),
+            &[],
+        ))
+        .await;
         assert_eq!(mw.tracked_runs(), 0);
     }
 
@@ -527,7 +522,8 @@ mod tests {
         assert_eq!(mw.tracked_runs(), 2);
 
         let err = std::io::Error::other("boom");
-        mw.on_run_error(&run_id, &err, &Usage::default(), &[]).await;
+        mw.on_run_error(&RunErrorInfo::new(&run_id, &err, &Usage::default(), &[]))
+            .await;
         assert_eq!(mw.tracked_runs(), 1, "only the failed run is dropped");
     }
 }

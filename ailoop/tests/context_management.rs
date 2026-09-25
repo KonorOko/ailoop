@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use ailoop::{
     AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, Conversation, EngineError,
-    FinishReason, History, Message, RunError, RunId, StreamChunk, ToolDefinition,
+    FinishReason, History, Message, RunError, RunErrorInfo, StepInfo, StreamChunk, ToolDefinition,
     ToolResultContent, Usage, UserBlock,
 };
 use ailoop_core::testing::{ScriptedError, ScriptedModel, ScriptedTurn};
@@ -91,16 +91,10 @@ struct Counters {
 
 #[async_trait]
 impl ChatMiddleware for Counters {
-    async fn on_chat_request(&self, _: &RunId, _: &ailoop::StepId, _: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, _: &mut ChatRequest) {
         self.chat_requests.fetch_add(1, Ordering::SeqCst);
     }
-    async fn on_run_error(
-        &self,
-        _: &RunId,
-        _: &(dyn std::error::Error + Send + Sync),
-        _: &Usage,
-        _: &[Message],
-    ) {
+    async fn on_run_error(&self, _run: &RunErrorInfo<'_>) {
         self.run_errors.fetch_add(1, Ordering::SeqCst);
     }
 }

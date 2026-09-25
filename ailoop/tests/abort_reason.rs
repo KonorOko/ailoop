@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use ailoop::{
     AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
-    Conversation, FinishReason, HookAction, Message, RunConfig, RunId, RunOptions, StreamChunk,
-    ToolCallInfo, ToolDecision, ToolDefinition, ToolResultContent, Usage, UserBlock,
+    Conversation, FinishReason, HookAction, Message, RunErrorInfo, RunFinishedInfo, RunOptions,
+    RunStartInfo, StreamChunk, ToolCallInfo, ToolDecision, ToolDefinition, ToolResultContent,
+    Usage, UserBlock,
 };
 use ailoop_core::testing::{ScriptedError, ScriptedModel};
 use ailoop_tools::{ToolContext, ToolDyn};
@@ -124,12 +125,7 @@ async fn hook_terminate_produces_terminated() {
 
     #[async_trait]
     impl ChatMiddleware for Deny {
-        async fn on_run_started(
-            &self,
-            _run_id: &RunId,
-            _messages: &[Message],
-            _config: &RunConfig,
-        ) -> HookAction {
+        async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> HookAction {
             HookAction::Terminate {
                 reason: "quota exhausted".into(),
             }
@@ -198,23 +194,11 @@ struct LifecycleCounter {
 
 #[async_trait]
 impl ChatMiddleware for LifecycleCounter {
-    async fn on_run_finished(
-        &self,
-        _run_id: &RunId,
-        _reason: &FinishReason,
-        _usage: &Usage,
-        _new_messages: &[Message],
-    ) {
+    async fn on_run_finished(&self, _run: &RunFinishedInfo<'_>) {
         self.finished.fetch_add(1, Ordering::SeqCst);
     }
 
-    async fn on_run_error(
-        &self,
-        _run_id: &RunId,
-        _err: &(dyn std::error::Error + Send + Sync),
-        _usage: &Usage,
-        _: &[Message],
-    ) {
+    async fn on_run_error(&self, _run: &RunErrorInfo<'_>) {
         self.errored.fetch_add(1, Ordering::SeqCst);
     }
 }

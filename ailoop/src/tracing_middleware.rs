@@ -11,8 +11,8 @@
 //! span for the whole run.
 
 use ailoop_core::{
-    ChatMiddleware, ChatRequest, FinishReason, HookAction, Message, RunConfig, RunId, StepId,
-    StreamChunk, ToolCallInfo, ToolDecision, ToolResultContent, Usage,
+    ChatMiddleware, ChatRequest, HookAction, RunErrorInfo, RunFinishedInfo, RunStartInfo, StepInfo,
+    StreamChunk, ToolCallInfo, ToolDecision, ToolResultContent,
 };
 use serde_json::Value;
 
@@ -34,26 +34,21 @@ impl TracingMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for TracingMiddleware {
-    async fn on_run_started(
-        &self,
-        run_id: &RunId,
-        messages: &[Message],
-        _config: &RunConfig,
-    ) -> HookAction {
+    async fn on_run_started(&self, run: &RunStartInfo<'_>) -> HookAction {
         tracing::info!(
             target: "ailoop.run",
-            run_id = %run_id,
-            messages = messages.len(),
+            run_id = %run.run_id,
+            messages = run.messages.len(),
             "run started",
         );
         HookAction::Continue
     }
 
-    async fn on_chat_request(&self, run_id: &RunId, step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, step: &StepInfo, req: &mut ChatRequest) {
         tracing::debug!(
             target: "ailoop.step",
-            run_id = %run_id,
-            step_id = %step_id,
+            run_id = %step.run_id,
+            step_id = %step.step_id,
             tools = req.tools.as_ref().map(|t| t.len()).unwrap_or(0),
             messages = req.messages.len(),
             "sending chat request",
@@ -160,38 +155,26 @@ impl ChatMiddleware for TracingMiddleware {
         }
     }
 
-    async fn on_run_finished(
-        &self,
-        run_id: &RunId,
-        reason: &FinishReason,
-        usage: &Usage,
-        new_messages: &[Message],
-    ) {
+    async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
         tracing::info!(
             target: "ailoop.run",
-            run_id = %run_id,
-            reason = ?reason,
-            input_tokens = usage.input_tokens,
-            output_tokens = usage.output_tokens,
-            new_messages = new_messages.len(),
+            run_id = %run.run_id,
+            reason = ?run.reason,
+            input_tokens = run.usage.input_tokens,
+            output_tokens = run.usage.output_tokens,
+            new_messages = run.new_messages.len(),
             "run finished",
         );
     }
 
-    async fn on_run_error(
-        &self,
-        run_id: &RunId,
-        err: &(dyn std::error::Error + Send + Sync),
-        usage: &Usage,
-        partial_messages: &[Message],
-    ) {
+    async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
         tracing::error!(
             target: "ailoop.run",
-            run_id = %run_id,
-            error = %err,
-            input_tokens = usage.input_tokens,
-            output_tokens = usage.output_tokens,
-            partial_messages = partial_messages.len(),
+            run_id = %run.run_id,
+            error = %run.error,
+            input_tokens = run.usage.input_tokens,
+            output_tokens = run.usage.output_tokens,
+            partial_messages = run.partial_messages.len(),
             "run errored",
         );
     }
@@ -230,6 +213,7 @@ impl ChatMiddleware for TracingMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ailoop_core::{FinishReason, Message, RunConfig, RunId, StepId, Usage};
     use std::io;
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::fmt::MakeWriter;
@@ -273,7 +257,8 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, || {
             futures::executor::block_on(async {
-                mw.on_run_started(&run_id, &[], &RunConfig::default()).await;
+                mw.on_run_started(&RunStartInfo::new(&run_id, &[], &RunConfig::default()))
+                    .await;
                 mw.on_before_tool_call(
                     &ToolCallInfo::new(
                         run_id.clone(),
@@ -284,8 +269,13 @@ mod tests {
                     &serde_json::Value::Null,
                 )
                 .await;
-                mw.on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
-                    .await;
+                mw.on_run_finished(&RunFinishedInfo::new(
+                    &run_id,
+                    &FinishReason::EndTurn,
+                    &Usage::default(),
+                    &[],
+                ))
+                .await;
                 mw.on_chunk(&StreamChunk::HistoryCompacted {
                     run_id: run_id.clone(),
                     before_count: 12,
