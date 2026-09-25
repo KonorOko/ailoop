@@ -858,14 +858,19 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
-    /// Restrict the active tool set to those whose declared tags overlap
-    /// with `capabilities`. Applied at `build()` time, so call order
+    /// Keep only the tools whose declared tags overlap with
+    /// `capabilities`. Applied at `build()` time, so call order
     /// relative to `tool(...)` does not matter.
     ///
-    /// **Default-deny.** Tools with no declared tags are excluded under
-    /// any non-empty `capabilities` filter — capability mode treats
-    /// unknown tools as unknown risk. If you call this with an empty
-    /// slice the result is *no* active tools.
+    /// **Default-deny.** Every other tool is removed from the
+    /// conversation, not just hidden: the model cannot call it by name,
+    /// [`initial_active_tools`](Self::initial_active_tools) cannot list
+    /// it, and a handler cannot activate it with
+    /// [`ToolContext::tools`](ailoop_tools::ToolContext::tools)
+    /// (`activate` returns `NotFound`, and `list_all` does not show it).
+    /// Tools with no declared tags are removed under any `capabilities`
+    /// filter — capability mode treats unknown tools as unknown risk.
+    /// If you call this with an empty slice the result is *no* tools.
     ///
     /// Successive calls overwrite the previous filter.
     pub fn with_capabilities(mut self, capabilities: &[ToolTag]) -> Self {
@@ -877,7 +882,10 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// wire name. Other registered tools stay in the catalog (so a
     /// handler can flip them on via
     /// [`ToolContext::tools`](ailoop_tools::ToolContext::tools)) but
-    /// are not sent to the model on the first turn.
+    /// are not sent to the model on the first turn, and the model
+    /// cannot call them until they are activated: a call to an
+    /// inactive tool gets a "not found" error result and the run goes
+    /// on.
     ///
     /// This is the entry point for the deferred-tools pattern: register
     /// every tool the agent might ever need, expose only a meta-tool
@@ -909,10 +917,11 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// Tool name resolution happens at `build()` time over the **whole
     /// registered catalog**, not just the initial active set. Tools that
     /// start deferred (via [`initial_active_tools`](Self::initial_active_tools))
-    /// or filtered out by [`with_capabilities`](Self::with_capabilities)
     /// are still gated if a handler activates them mid-run with
-    /// [`ToolContext::tools`](ailoop_tools::ToolContext::tools). Untagged
-    /// tools never trigger the callback.
+    /// [`ToolContext::tools`](ailoop_tools::ToolContext::tools). Tools
+    /// removed by [`with_capabilities`](Self::with_capabilities) can
+    /// never run, so they never reach it. Untagged tools never trigger
+    /// the callback.
     ///
     /// [`ToolDecision`]: ailoop_core::ToolDecision
     pub fn with_approval<F, Fut>(self, callback: F) -> Self
@@ -928,8 +937,8 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// overlap with `tags`. Pass an empty slice to disable the gate.
     ///
     /// As with [`with_approval`](Self::with_approval), the gated set is
-    /// resolved over every registered tool, so deferred and
-    /// capability-filtered tools activated at runtime are covered too.
+    /// resolved over every registered tool, so deferred tools activated
+    /// at runtime are covered too.
     pub fn with_approval_for_tags<F, Fut>(mut self, tags: &[ToolTag], callback: F) -> Self
     where
         F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
@@ -1117,8 +1126,8 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     ///    called, an internal `ApprovalMiddleware` is appended after
     ///    the system-prompt one. Tool-name resolution for the
     ///    capability-tag form happens here, over the whole registered
-    ///    catalog (active and inactive tools alike), so a deferred or
-    ///    capability-filtered tool activated mid-run is still gated.
+    ///    catalog (active and inactive tools alike), so a deferred tool
+    ///    activated mid-run is still gated.
     ///    Untagged tools never trigger it.
     ///
     /// Within the `RequestDefaultsMiddleware` itself, per-field
@@ -1153,15 +1162,17 @@ impl<M: CompletionModel> ConversationBuilder<M> {
 
         let mut tools = self.tools;
         if let Some(capabilities) = self.capabilities {
-            tools.deactivate_all();
-            tools.activate_by_tags(&capabilities);
+            // Unregister, not just deactivate: a filtered tool must not
+            // be reachable by name, by `initial_active_tools`, or by a
+            // handler's `ctx.tools().activate(...)`.
+            tools.retain_by_tags(&capabilities);
         }
         if let Some(initial_active) = self.initial_active {
             tools.deactivate_all();
             for name in initial_active {
                 // `activate_tool` errors only on unknown names; the
                 // documented contract is to silently skip names not in
-                // the (possibly capability-filtered) catalog so that
+                // the (capability-filtered) catalog so that
                 // `initial_active_tools` composes cleanly with
                 // `with_capabilities`.
                 let _ = tools.activate_tool(&name);
@@ -1170,9 +1181,9 @@ impl<M: CompletionModel> ConversationBuilder<M> {
 
         if let Some(spec) = self.approval {
             // Resolve over the whole catalog, not just the initial
-            // active set: deferred and capability-filtered tools can be
-            // activated mid-run via `ctx.tools().activate(...)` and must
-            // still hit the gate (and carry their tags when they do).
+            // active set: deferred tools can be activated mid-run via
+            // `ctx.tools().activate(...)` and must still hit the gate
+            // (and carry their tags when they do).
             let tool_tags: HashMap<String, Arc<[ToolTag]>> = tools
                 .all_tools()
                 .map(|tool| {
@@ -1459,48 +1470,6 @@ mod tests {
             ToolDecision::Skip { reason } => assert_eq!(reason, "user denied"),
             _ => panic!("expected Skip"),
         }
-    }
-
-    #[tokio::test]
-    async fn approval_gate_covers_capability_filtered_tools() {
-        // delete_file is filtered out by capabilities, so it starts
-        // inactive — but it stays in the catalog and a handler can
-        // activate it mid-run via `ctx.tools().activate(...)`. The
-        // approval gate is resolved over the whole catalog, so it must
-        // still fire for it.
-        let counter = Arc::new(AtomicUsize::new(0));
-        let counter_cb = counter.clone();
-        let chat = Conversation::builder(MockModel)
-            .tool(FakeTool {
-                name: "list_dir",
-                tags: vec![ToolTag::ReadOnly],
-            })
-            .tool(FakeTool {
-                name: "delete_file",
-                tags: vec![ToolTag::Destructive],
-            })
-            .with_capabilities(&[ToolTag::ReadOnly])
-            .with_approval(move |_req| {
-                let c = counter_cb.clone();
-                async move {
-                    c.fetch_add(1, Ordering::SeqCst);
-                    ToolDecision::Continue
-                }
-            })
-            .build()
-            .unwrap();
-
-        assert_eq!(chat.active_tool_names(), vec!["list_dir".to_string()]);
-
-        dispatch_through_chain(&chat, "list_dir", &json!({})).await;
-        assert_eq!(counter.load(Ordering::SeqCst), 0);
-
-        dispatch_through_chain(&chat, "delete_file", &json!({})).await;
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            1,
-            "capability-filtered tool must still be gated"
-        );
     }
 
     /// `Conversation::stream` runs registered middlewares' `on_chunk`

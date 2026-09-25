@@ -41,6 +41,10 @@ use crate::RunConfig;
 /// - **Step boundary.** Every call of a step has finished before
 ///   [`Self::on_turn_end`] or the next step's [`Self::on_chat_request`]
 ///   fires.
+/// - **Rejected calls.** A call the engine refuses without running it
+///   (arguments that are not a JSON object, or a tool that is not in
+///   the run's active set) fires none of the tool hooks, only its
+///   `ToolResult` chunk carrying the error sent back to the model.
 ///
 /// The order **between** calls of the same step is not guaranteed.
 /// Today the engine runs them one at a time, in the model's order, but

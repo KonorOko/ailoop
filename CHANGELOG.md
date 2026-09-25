@@ -10,6 +10,11 @@ and this project adheres to
 
 ### Added
 
+- `ToolRegistry::retain_by_tags(tags)`: unregister every tool whose
+  tags do not overlap with `tags`. Unlike `deactivate_by_tags`, the
+  removed tools can no longer be dispatched or activated at runtime.
+  `ConversationBuilder::with_capabilities` is now built on it.
+
 - `ApprovalRequest` (re-exported from `ailoop`): what an approval
   callback receives for one gated call. Public fields `run_id`,
   `step_id`, `tool_name`, `args`, `tags` (the tool's declared tags) and
@@ -325,6 +330,26 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- The engine only runs tools in the run's active set. A call to a
+  registered but inactive tool (deferred with `initial_active_tools`
+  and not yet activated) no longer runs it: the model gets the same
+  error result as for an unknown name (`Tool '<name>' not found.
+  Available tools: [...]`, listing only active tools) and the run goes
+  on. The active set is read when the call is dispatched, so a tool
+  activated by an earlier call of the same step can run. Calls
+  rejected this way, and calls to unknown names, no longer fire the
+  tool hooks (`on_before_tool_call[_mut]`, `on_after_tool_call[_mut]`)
+  or the approval callback; only their `ToolResult` chunk goes out,
+  the same as for malformed arguments. `MaxToolCalls` and `AntiLoop`
+  therefore do not count them; `max_iterations` still bounds a model
+  that keeps calling a hidden tool.
+- `ConversationBuilder::with_capabilities` removes the filtered tools
+  from the conversation instead of deactivating them. They no longer
+  show up in `ToolActivation::list_all` / `list_inactive`,
+  `ToolActivation::activate` returns `NotFound` for them, and
+  `initial_active_tools` ignores their names. Until now they stayed in
+  the catalog, so the "default-deny" promise did not hold (see Fixed).
+
 - Approval callbacks take an `ApprovalRequest` instead of
   `(String, Value)`: `ConversationBuilder::with_approval`,
   `with_approval_for_tags`, `with_approval_for_all`,
@@ -428,6 +453,21 @@ and this project adheres to
 
 ### Fixed
 
+- **Security:** tools hidden from the model could still run. The
+  engine looked the called name up in the whole catalog, not in the
+  active set, so:
+  - a model that named a deferred tool directly, without going through
+    the `search_tools` / activation step, ran it;
+  - a tool filtered out by `with_capabilities` ran if the model called
+    it by name or a handler activated it with `ctx.tools().activate(...)`;
+  - `initial_active_tools` could list a filtered tool and make it
+    active from the first turn, contrary to its documentation.
+
+  With no approval gate installed nothing stood in the way. The
+  engine now rejects calls to inactive tools in-band, and
+  `with_capabilities` removes the filtered tools from the catalog, so
+  none of these paths can run them.
+
 - **Security:** the approval gate from
   `ConversationBuilder::with_approval` / `with_approval_for_tags` no
   longer lets deferred tools run unapproved. The set of gated tool
@@ -499,6 +539,30 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+A model can no longer call a deferred tool it has not activated. If
+you relied on that, activate the tool before the model calls it (from
+a meta-tool with `ctx.tools().activate(name)`), or start with it
+active:
+
+```rust
+// Before: "fetch" was callable by name while hidden
+Conversation::builder(model)
+    .tool(SearchTools)
+    .tool(Fetch)
+    .initial_active_tools(["search_tools"])
+
+// After: list it if the model must be able to call it from the start
+Conversation::builder(model)
+    .tool(SearchTools)
+    .tool(Fetch)
+    .initial_active_tools(["search_tools", "fetch"])
+```
+
+Tools filtered out by `with_capabilities` cannot be activated any
+more. To expose them on demand, register them without a capability
+filter and defer them with `initial_active_tools` instead; add
+`with_approval` if they need a gate.
 
 Approval callbacks take one `ApprovalRequest`; read the name and
 arguments from its fields:

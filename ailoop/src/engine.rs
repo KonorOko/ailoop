@@ -653,7 +653,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         assistant_blocks.push(AssistantBlock::tool_call(
                             id.clone(), name.clone(), Value::Object(Default::default()),
                         ));
-                        tool_calls.push(PendingCall::Malformed {
+                        tool_calls.push(PendingCall::Rejected {
                             id: id.clone(),
                             content: malformed_args_result(name, raw, error),
                         })
@@ -712,11 +712,25 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
             // the model's order, and completed results kept on abort.
             let mut tools_result = Vec::new();
             for call in tool_calls {
+                // Only tools in the run's active set can run. A name the
+                // model was never shown (deferred, or not registered at
+                // all) gets the same "not found" reply either way. The
+                // set is read at dispatch time, not when the model was
+                // prompted.
+                let call = match call {
+                    PendingCall::Run { id, name, .. }
+                        if !active_snapshot.lock().expect("active_snapshot lock").contains(&name) =>
+                    {
+                        let content = unavailable_tool(&name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()));
+                        PendingCall::Rejected { id, content }
+                    }
+                    call => call,
+                };
                 let (id, name, mut args) = match call {
                     PendingCall::Run { id, name, args } => (id, name, args),
                     // Nothing runs, so no tool hook fires: the synthesized
                     // error only goes out as a ToolResult chunk.
-                    PendingCall::Malformed { id, content } => {
+                    PendingCall::Rejected { id, content } => {
                         let mut chunk = StreamChunk::ToolResult {
                             run_id: run_id.clone(),
                             step_id: step_id.clone(),
@@ -790,16 +804,10 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                         ).await;
                         match call_result {
                             Ok(Ok(content)) => content,
+                            // Unreachable while the active set stays a subset
+                            // of the catalog; kept in-band all the same.
                             Ok(Err(ToolRegistryError::NotFound(_))) => {
-                                let available_tools: Vec<String> = {
-                                    let active = active_snapshot.lock().expect("active_snapshot lock");
-                                    catalog
-                                        .iter()
-                                        .filter(|(n, _)| active.contains(*n))
-                                        .map(|(n, _)| n.clone())
-                                        .collect()
-                                };
-                                ToolResultContent::error(format!("Tool '{name}' not found. Available tools: [{}]", available_tools.join(", ")))
+                                unavailable_tool(&name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()))
                             },
                             Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id, run_msgs)?,
                             Err(reason) => {
@@ -977,9 +985,10 @@ enum PendingCall {
         name: String,
         args: Value,
     },
-    /// Arguments were not a JSON object; the tool is never invoked and
-    /// `content` is the error reply sent back to the model.
-    Malformed {
+    /// The tool is never invoked (arguments were not a JSON object, or
+    /// the tool is not in the active set) and `content` is the error
+    /// reply sent back to the model.
+    Rejected {
         id: String,
         content: ToolResultContent,
     },
@@ -1006,6 +1015,22 @@ fn malformed_args_result(name: &str, raw: &str, error: &str) -> ToolResultConten
     ToolResultContent::error(format!(
         "Invalid JSON arguments for tool '{name}': {error}. The tool was not run; \
          call it again with complete, valid JSON.\n{wrapper}"
+    ))
+}
+
+/// Error reply for a call to a tool outside the run's active set,
+/// listing the tools the model can call instead. Deferred and
+/// unregistered names get the same reply, so it does not reveal which
+/// hidden tools exist.
+fn unavailable_tool(name: &str, tools: &ToolActivation) -> ToolResultContent {
+    let available: Vec<String> = tools
+        .list_active()
+        .into_iter()
+        .map(|def| def.name)
+        .collect();
+    ToolResultContent::error(format!(
+        "Tool '{name}' not found. Available tools: [{}]",
+        available.join(", ")
     ))
 }
 

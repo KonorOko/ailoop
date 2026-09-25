@@ -128,3 +128,16 @@ fn last_with_capabilities_call_wins() {
 
     assert_eq!(chat.active_tool_names(), vec!["list_dir".to_string()]);
 }
+
+#[test]
+fn initial_active_tools_cannot_bring_back_filtered_tools() {
+    let chat = Conversation::builder(MockModel)
+        .tool(ListDir)
+        .tool(DeleteFile)
+        .with_capabilities(&[ToolTag::ReadOnly])
+        .initial_active_tools(["list_dir", "delete_file"])
+        .build()
+        .unwrap();
+
+    assert_eq!(chat.active_tool_names(), vec!["list_dir".to_string()]);
+}
