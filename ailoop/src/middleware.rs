@@ -179,8 +179,8 @@ impl ChatMiddleware for RequestDefaultsMiddleware {
 /// verifier fits here. Recommended shape:
 ///
 /// 1. **Tags decide what gets reviewed.** Gate only what needs it with
-///    [`with_approval_for_tags`](crate::ConversationBuilder::with_approval_for_tags)
-///    (or the default [`with_approval`](crate::ConversationBuilder::with_approval)
+///    [`approval_for_tags`](crate::ConversationBuilder::approval_for_tags)
+///    (or the default [`approval`](crate::ConversationBuilder::approval)
 ///    for `Destructive` / `WritesFiles`); everything else runs without
 ///    paying for a verifier call.
 /// 2. **The verifier judges the call against the user's intent** and
@@ -243,7 +243,7 @@ impl ChatMiddleware for RequestDefaultsMiddleware {
 /// }
 ///
 /// # fn wire(builder: ailoop::ConversationBuilder<impl ailoop::CompletionModel>) {
-/// let builder = builder.with_approval(gate);
+/// let builder = builder.approval(gate);
 /// # let _ = builder;
 /// # }
 /// ```
@@ -263,7 +263,7 @@ pub struct ApprovalRequest {
     /// middleware's `on_before_tool_call_mut`.
     pub args: Value,
     /// Tags the tool declares. Filled when the gate was installed with
-    /// a `ConversationBuilder::with_approval*` method; empty for
+    /// a `ConversationBuilder::approval*` method; empty for
     /// [`ApprovalMiddleware::approve_all`] and
     /// [`ApprovalMiddleware::for_named`], which do not see the
     /// registry.
@@ -322,7 +322,7 @@ enum GatePolicy {
 /// Construct via [`approve_all`](Self::approve_all) for an unconditional
 /// gate, or via [`for_named`](Self::for_named) for an explicit set of
 /// tool names. For tag-based gating, use the builder method
-/// `ConversationBuilder::with_approval`.
+/// `ConversationBuilder::approval`.
 ///
 /// The callback receives an [`ApprovalRequest`] with the call and the
 /// context the model saw on that step; see its docs for the

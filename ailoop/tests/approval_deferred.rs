@@ -103,7 +103,7 @@ fn activate_then_call(target: &str) -> ScriptedModel {
     ])
 }
 
-/// Runs the scripted activate-then-call flow under `with_approval`
+/// Runs the scripted activate-then-call flow under `approval`
 /// and returns (callback invocations, target executions).
 async fn run_gated(target: &'static str, tags: Vec<ToolTag>) -> (Vec<String>, usize) {
     let executed = Arc::new(Mutex::new(0));
@@ -118,7 +118,7 @@ async fn run_gated(target: &'static str, tags: Vec<ToolTag>) -> (Vec<String>, us
             executed: executed.clone(),
         }))
         .initial_active_tools(["enable_tool"])
-        .with_approval(move |req| {
+        .approval(move |req| {
             seen_cb.lock().unwrap().push(req.name);
             async move {
                 ToolDecision::Skip {

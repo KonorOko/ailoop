@@ -409,6 +409,17 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `ConversationBuilder` setters drop the `with_` prefix:
+  `with_history` → `history`, `with_capabilities` → `capabilities`,
+  `with_approval` → `approval`, `with_approval_for_tags` →
+  `approval_for_tags`, `with_approval_for_all` → `approval_for_all`.
+  Every other setter on the builder (`system_prompt`, `temperature`,
+  `middleware`, `tool_choice`, …) was already a bare noun, as is
+  `HistoryBuilder`'s. The rule for 1.x: builders (types that end in
+  `build()`) use bare nouns; value types configured by chaining
+  (`AntiLoop`, `SummarizeStrategy`, `ApprovalRequest`, message blocks)
+  keep `with_*`.
+
 - `RunId` and `StepId` keep their `Uuid` private. The public tuple
   field (`RunId(pub Uuid)`) made the representation part of the API, so
   switching to another id scheme (e.g. UUIDv7 or a string trace id)
@@ -788,6 +799,22 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Drop `with_` from the `ConversationBuilder` setters:
+
+```rust
+// Before (1.0.0-rc.3)
+Conversation::builder(model)
+    .with_history(History::builder(100_000))
+    .with_capabilities(&[ToolTag::ReadOnly])
+    .with_approval_for_tags(&[ToolTag::Destructive], gate)
+
+// After
+Conversation::builder(model)
+    .history(History::builder(100_000))
+    .capabilities(&[ToolTag::ReadOnly])
+    .approval_for_tags(&[ToolTag::Destructive], gate)
+```
 
 Replace the tuple constructor and `.0` access on `RunId` / `StepId`:
 

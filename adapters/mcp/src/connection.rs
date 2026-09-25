@@ -63,7 +63,7 @@ impl McpConnection {
     /// not collide.
     ///
     /// Every tool is tagged with `[Network, Custom("mcp")]`. Use the
-    /// `Custom("mcp")` tag with `with_approval_for_tags` if you want
+    /// `Custom("mcp")` tag with `approval_for_tags` if you want
     /// to gate every MCP call through a single approval callback.
     pub async fn list_tools(&self) -> Result<Vec<Arc<dyn ToolDyn>>, McpError> {
         let tools = self

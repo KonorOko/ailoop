@@ -70,7 +70,7 @@ fn read_only_capability_excludes_destructive_and_untagged() {
         .tool(ListDir)
         .tool(DeleteFile)
         .tool(UntaggedHelper)
-        .with_capabilities(&[ToolTag::ReadOnly])
+        .capabilities(&[ToolTag::ReadOnly])
         .build()
         .unwrap();
 
@@ -80,7 +80,7 @@ fn read_only_capability_excludes_destructive_and_untagged() {
 #[test]
 fn capabilities_apply_regardless_of_call_order() {
     let chat = Conversation::builder(MockModel)
-        .with_capabilities(&[ToolTag::ReadOnly])
+        .capabilities(&[ToolTag::ReadOnly])
         .tool(ListDir)
         .tool(DeleteFile)
         .build()
@@ -95,7 +95,7 @@ fn capabilities_can_combine_multiple_tags() {
         .tool(ListDir)
         .tool(HttpGet)
         .tool(DeleteFile)
-        .with_capabilities(&[ToolTag::ReadOnly, ToolTag::Network])
+        .capabilities(&[ToolTag::ReadOnly, ToolTag::Network])
         .build()
         .unwrap();
 
@@ -109,7 +109,7 @@ fn empty_capabilities_yields_no_active_tools() {
     let chat = Conversation::builder(MockModel)
         .tool(ListDir)
         .tool(DeleteFile)
-        .with_capabilities(&[])
+        .capabilities(&[])
         .build()
         .unwrap();
 
@@ -121,8 +121,8 @@ fn last_with_capabilities_call_wins() {
     let chat = Conversation::builder(MockModel)
         .tool(ListDir)
         .tool(DeleteFile)
-        .with_capabilities(&[ToolTag::Destructive])
-        .with_capabilities(&[ToolTag::ReadOnly])
+        .capabilities(&[ToolTag::Destructive])
+        .capabilities(&[ToolTag::ReadOnly])
         .build()
         .unwrap();
 
@@ -134,7 +134,7 @@ fn initial_active_tools_cannot_bring_back_filtered_tools() {
     let chat = Conversation::builder(MockModel)
         .tool(ListDir)
         .tool(DeleteFile)
-        .with_capabilities(&[ToolTag::ReadOnly])
+        .capabilities(&[ToolTag::ReadOnly])
         .initial_active_tools(["list_dir", "delete_file"])
         .build()
         .unwrap();

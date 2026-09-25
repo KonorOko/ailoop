@@ -226,7 +226,7 @@ async fn run_drains_history_compacted_prelude_without_clobbering_outcome() {
     ]]);
 
     let mut chat = Conversation::builder(model)
-        .with_history(History::builder(460))
+        .history(History::builder(460))
         .build()
         .expect("build");
 

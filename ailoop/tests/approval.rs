@@ -151,7 +151,7 @@ fn builder_with_approval_compiles_and_builds() {
     let _chat = Conversation::builder(MockModel)
         .tool(ListDir)
         .tool(DeleteFile)
-        .with_approval(|_req| async move { ToolDecision::Continue })
+        .approval(|_req| async move { ToolDecision::Continue })
         .build()
         .unwrap();
 }

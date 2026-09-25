@@ -65,7 +65,7 @@ async fn approval_request_carries_call_tags_and_user_message() {
 
     let mut chat = Conversation::builder(delete_then_finish("build/"))
         .tool(DeleteFile)
-        .with_approval(move |req| {
+        .approval(move |req| {
             seen_cb.lock().unwrap().push(req);
             async { ToolDecision::Continue }
         })

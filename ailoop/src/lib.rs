@@ -30,8 +30,8 @@
 //! - [`ConversationBuilder`] — builder pattern. Register tools with
 //!   [`tool`](ConversationBuilder::tool) /
 //!   [`tool_dyn`](ConversationBuilder::tool_dyn), gate them with
-//!   [`with_capabilities`](ConversationBuilder::with_capabilities) /
-//!   [`with_approval`](ConversationBuilder::with_approval), and layer
+//!   [`capabilities`](ConversationBuilder::capabilities) /
+//!   [`approval`](ConversationBuilder::approval), and layer
 //!   per-request defaults with [`temperature`](ConversationBuilder::temperature),
 //!   [`max_tokens`](ConversationBuilder::max_tokens), and friends.
 //! - [`RunOutcome`] — what [`Conversation::run`] returns. Aborts surface

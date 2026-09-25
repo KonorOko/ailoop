@@ -228,7 +228,7 @@ pub enum ReasoningEffort {
 /// Capability tag attached to a [`ToolDefinition`].
 ///
 /// Tags are the input to the façade's capability filter
-/// (`ConversationBuilder::with_capabilities`) and to the built-in
+/// (`ConversationBuilder::capabilities`) and to the built-in
 /// approval middleware. The `ailoop_derive::ailoop_tool` proc-macro
 /// emits these via the `tags(...)` argument.
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]

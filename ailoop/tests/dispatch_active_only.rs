@@ -1,6 +1,6 @@
 //! The engine only runs tools in the run's active set. A deferred tool
 //! the model names without activating it, or a tool removed by
-//! `with_capabilities`, gets an in-band "not found" error result and
+//! `capabilities`, gets an in-band "not found" error result and
 //! the run goes on.
 
 use std::sync::{Arc, Mutex};
@@ -163,7 +163,7 @@ async fn deferred_tool_called_without_activation_does_not_run() {
         }))
         .initial_active_tools(["enable_tool"])
         .middleware(hooks.clone())
-        .with_approval(move |_req| {
+        .approval(move |_req| {
             *approvals_cb.lock().unwrap() += 1;
             async { ToolDecision::Continue }
         })
@@ -239,7 +239,7 @@ async fn capability_filtered_tool_never_runs() {
             tags: vec![ToolTag::Destructive],
             executed: executed.clone(),
         }))
-        .with_capabilities(&[ToolTag::ReadOnly])
+        .capabilities(&[ToolTag::ReadOnly])
         .build()
         .expect("build");
 

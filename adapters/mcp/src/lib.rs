@@ -16,7 +16,7 @@
 //!   truncate-with-deterministic-hash so distinct long names do not
 //!   collide.
 //! - Default tagging `[ToolTag::Network, ToolTag::Custom("mcp")]` so
-//!   `with_capabilities` and `with_approval_for_tags` can scope MCP
+//!   `capabilities` and `approval_for_tags` can scope MCP
 //!   tools without per-tool boilerplate.
 //!
 //! Resources, prompts, sampling (server → client), SSE / Streamable

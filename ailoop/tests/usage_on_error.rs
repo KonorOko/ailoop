@@ -191,7 +191,7 @@ async fn pre_run_compaction_error_has_zero_usage_and_no_hook() {
         "never",
         tokens(1, 1),
     )]))
-    .with_history(History::builder(10).preserve_n_last(5))
+    .history(History::builder(10).preserve_n_last(5))
     .middleware(spy.clone())
     .build()
     .expect("build");

@@ -215,7 +215,7 @@ async fn compacts_between_iterations_when_enabled() {
     let (model, sizes) = RecordingModel::new(vec![tool_call_turn("t1"), text_turn("done")]);
     let mut chat = Conversation::builder(model)
         .tool(BigTool)
-        .with_history(History::builder(1_000).preserve_n_last(1))
+        .history(History::builder(1_000).preserve_n_last(1))
         .compact_between_iterations(true)
         .build()
         .unwrap();
@@ -272,7 +272,7 @@ async fn does_not_compact_between_iterations_by_default() {
     let (model, sizes) = RecordingModel::new(vec![tool_call_turn("t1"), text_turn("done")]);
     let mut chat = Conversation::builder(model)
         .tool(BigTool)
-        .with_history(History::builder(1_000).preserve_n_last(1))
+        .history(History::builder(1_000).preserve_n_last(1))
         .build()
         .unwrap();
     seed_prior_turns(&mut chat);
@@ -292,7 +292,7 @@ async fn overflow_compacts_and_retries_once() {
     let counters = Arc::new(Counters::default());
     let mut chat = Conversation::builder(model)
         .middleware(counters.clone())
-        .with_history(History::builder(100_000).preserve_n_last(1))
+        .history(History::builder(100_000).preserve_n_last(1))
         .build()
         .unwrap();
     seed_prior_turns(&mut chat);
@@ -327,7 +327,7 @@ async fn overflow_after_tool_call_keeps_pairs_intact() {
     ]);
     let mut chat = Conversation::builder(model)
         .tool(BigTool)
-        .with_history(History::builder(100_000).preserve_n_last(1))
+        .history(History::builder(100_000).preserve_n_last(1))
         .build()
         .unwrap();
     seed_prior_turns(&mut chat);
@@ -353,7 +353,7 @@ async fn persistent_overflow_is_a_typed_error_and_rolls_back() {
     let mut chat = Conversation::builder(model)
         .tool(BigTool)
         .middleware(counters.clone())
-        .with_history(History::builder(100_000).preserve_n_last(1))
+        .history(History::builder(100_000).preserve_n_last(1))
         .build()
         .unwrap();
     seed_prior_turns(&mut chat);
@@ -385,7 +385,7 @@ async fn persistent_overflow_is_a_typed_error_and_rolls_back() {
 async fn overflow_with_nothing_to_compact_fails_without_retry() {
     let (model, sizes) = RecordingModel::new(vec![overflow_turn(), text_turn("unused")]);
     let mut chat = Conversation::builder(model)
-        .with_history(History::builder(100_000).preserve_n_last(1))
+        .history(History::builder(100_000).preserve_n_last(1))
         .build()
         .unwrap();
 
@@ -402,7 +402,7 @@ async fn overflow_with_nothing_to_compact_fails_without_retry() {
 async fn overflow_is_a_model_error_when_recovery_is_off() {
     let (model, sizes) = RecordingModel::new(vec![overflow_turn(), text_turn("unused")]);
     let mut chat = Conversation::builder(model)
-        .with_history(History::builder(100_000).preserve_n_last(1))
+        .history(History::builder(100_000).preserve_n_last(1))
         .recover_from_context_overflow(false)
         .build()
         .unwrap();
@@ -421,7 +421,7 @@ async fn dropping_the_stream_mid_run_rolls_back_history() {
     let (model, _) = RecordingModel::new(vec![tool_call_turn("t1"), text_turn("done")]);
     let mut chat = Conversation::builder(model)
         .tool(BigTool)
-        .with_history(History::builder(1_000).preserve_n_last(1))
+        .history(History::builder(1_000).preserve_n_last(1))
         .compact_between_iterations(true)
         .build()
         .unwrap();
