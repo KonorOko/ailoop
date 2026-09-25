@@ -10,6 +10,17 @@ and this project adheres to
 
 ### Added
 
+- `StreamChunk::ToolCallMalformed { id, name, raw, error }`: closes a
+  streamed tool call whose argument text is not a JSON object, in place
+  of `ToolCallFinished`. `StreamChunk::tool_call_from_raw_args(id, name,
+  raw)` builds the right closing chunk from the accumulated text and is
+  what both built-in adapters now use; third-party adapters should call
+  it too. Empty or whitespace-only text is still a valid `{}` (tools
+  without parameters). `JsonTracer` logs the new chunk as
+  `tool_call_malformed` (with `raw` only in verbose mode) and
+  `TracingMiddleware` as a `warn` event. Consumers that match on
+  `StreamChunk` already need a wildcard arm (`#[non_exhaustive]`).
+
 - `ToolRegistry::all_tools()`: iterate over every registered tool,
   active and inactive, in registration order. It is the catalog a
   handler can reach with `ToolActivation::activate`, so policies that
@@ -331,6 +342,28 @@ and this project adheres to
   through the callback if they get activated; previously the docs
   stated they never triggered it.
 
+- Tool calls with malformed arguments no longer run with `{}`. The
+  Anthropic and Azure OpenAI adapters parsed the accumulated argument
+  JSON with a silent fallback to `{}`, so a call truncated by
+  `max_tokens` (or invalid JSON from Anthropic's fine-grained tool
+  streaming) executed the tool with no arguments. For a tool with side
+  effects that is unsafe, and the model got a confusing validation
+  error about fields it did send. Now the adapters emit
+  `StreamChunk::ToolCallMalformed` and the engine never runs the tool:
+  it records the call in history with an empty-object input (providers
+  require an object there) and answers it with an error `tool_result`:
+  `Invalid JSON arguments for tool '<name>': <parser error>. The tool
+  was not run; call it again with complete, valid JSON.` followed by
+  `{"INVALID_JSON": "<raw>"}` (the wrapper Anthropic recommends; `raw`
+  capped at 1 KiB). No tool hook fires for it (`on_before_tool_call*`,
+  `on_after_tool_call*`), so approval callbacks, `MaxToolCalls` and
+  `AntiLoop` do not see it and `Sanitize::on_tool_result` does not
+  rewrite it; the synthesized `ToolResult` still goes through
+  `on_chunk`. The continuation rule is unchanged: if the turn ended in
+  `ToolUse` the model sees the error and can retry in the same run; if
+  it ended in `MaxTokens` the run ends as before, with the call and its
+  error result paired in history (an `on_turn_end` middleware can
+  continue it).
 - The `StreamChunk::HistoryCompacted` that `Conversation` emits for
   the compaction before a run now also passes through
   `ChatMiddleware::on_chunk_mut`, like every other engine chunk. It

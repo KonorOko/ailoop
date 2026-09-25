@@ -12,8 +12,8 @@ use crate::{Message, RunId, StepId, ToolResultContent};
 /// 1. **Provider stream events**, surfaced once per turn —
 ///    `TextDelta`, `ToolCall*`, `Reasoning*`, `RedactedReasoningBlock`,
 ///    `TurnFinished`. Adapters lower wire deltas into these. Started/
-///    Finished pairs always nest cleanly: a `ToolCallFinished` arrives
-///    before any other tool call's `Started`.
+///    Finished pairs always nest cleanly: a `ToolCallFinished` (or
+///    `ToolCallMalformed`) arrives before any other tool call's `Started`.
 /// 2. **Engine lifecycle events**, synthesized by the engine itself
 ///    around the provider stream — `RunStarted`, `StepStarted`,
 ///    `StepFinished`, `ToolResult`, `RunFinished`, `HistoryCompacted`.
@@ -33,9 +33,9 @@ pub enum StreamChunk {
         delta: String,
     },
     /// A new tool call has begun. The model has emitted the tool name
-    /// but no arguments yet. Pair with the matching
-    /// [`Self::ToolCallFinished`] (same `id`) once the call is fully
-    /// assembled.
+    /// but no arguments yet. Closed by exactly one matching (same `id`)
+    /// [`Self::ToolCallFinished`] or [`Self::ToolCallMalformed`] once
+    /// the call is fully assembled.
     ToolCallStarted {
         /// Provider-assigned id; mirrors back as `call_id` on the
         /// [`Self::ToolResult`] the engine emits after execution.
@@ -66,6 +66,33 @@ pub enum StreamChunk {
         name: String,
         /// Final, parsed JSON arguments.
         args: serde_json::Value,
+    },
+    /// A tool call whose accumulated argument text is not a JSON
+    /// object — typically because the turn was cut off by
+    /// `max_tokens` in the middle of the arguments. Closes the matching
+    /// [`Self::ToolCallStarted`] in place of [`Self::ToolCallFinished`].
+    ///
+    /// The engine never runs the tool. It records the call in history
+    /// with an empty-object input (providers require an object there),
+    /// answers it with an error [`Self::ToolResult`] carrying the raw
+    /// text so the model can retry, and skips every tool hook
+    /// (`on_before_tool_call*`, `on_after_tool_call*`): nothing ran, so
+    /// approval, call counters and result rewriters are not involved.
+    /// The synthesized `ToolResult` still goes through
+    /// [`crate::ChatMiddleware::on_chunk`].
+    ///
+    /// Adapters build this with [`Self::tool_call_from_raw_args`].
+    ToolCallMalformed {
+        /// Tool call id; matches the originating
+        /// [`Self::ToolCallStarted::id`].
+        id: String,
+        /// Tool name, repeated for convenience.
+        name: String,
+        /// Argument text exactly as the provider streamed it.
+        raw: String,
+        /// Why `raw` was rejected (the JSON parser's message, or a note
+        /// that the value is not an object).
+        error: String,
     },
     /// Incremental reasoning text. Same accumulation contract as
     /// [`Self::TextDelta`], but feeds an
@@ -158,7 +185,9 @@ pub enum StreamChunk {
     },
     /// A tool finished executing and produced a reply. Emitted
     /// **after** [`Self::ToolCallFinished`] and before the next
-    /// provider turn picks up the result.
+    /// provider turn picks up the result. Also emitted, with an error
+    /// reply synthesized by the engine, for every
+    /// [`Self::ToolCallMalformed`].
     ToolResult {
         /// Run that owns the tool call.
         run_id: RunId,
@@ -209,6 +238,48 @@ pub enum StreamChunk {
         /// `"summarize"`.
         strategy: &'static str,
     },
+}
+
+impl StreamChunk {
+    /// Closes a streamed tool call from its accumulated argument text.
+    ///
+    /// Returns [`StreamChunk::ToolCallFinished`] when `raw` parses to a
+    /// JSON object, or when it is empty or whitespace-only (a tool
+    /// without parameters, which providers may stream as no argument
+    /// fragments at all) — that case yields `{}`. Anything else (invalid
+    /// or truncated JSON, or a valid non-object value) yields
+    /// [`StreamChunk::ToolCallMalformed`], so the tool never runs with
+    /// arguments the model did not send.
+    ///
+    /// Intended for provider adapters, at the point where a tool call's
+    /// argument deltas are complete.
+    pub fn tool_call_from_raw_args(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        raw: impl Into<String>,
+    ) -> Self {
+        let (id, name, raw) = (id.into(), name.into(), raw.into());
+        if raw.trim().is_empty() {
+            return Self::ToolCallFinished {
+                id,
+                name,
+                args: serde_json::Value::Object(Default::default()),
+            };
+        }
+        let error = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(args @ serde_json::Value::Object(_)) => {
+                return Self::ToolCallFinished { id, name, args };
+            }
+            Ok(_) => "tool arguments must be a JSON object".to_string(),
+            Err(e) => e.to_string(),
+        };
+        Self::ToolCallMalformed {
+            id,
+            name,
+            raw,
+            error,
+        }
+    }
 }
 
 /// Reason a provider turn (or an entire run) ended.
@@ -400,5 +471,66 @@ mod tests {
             AbortReason::MaxIterations(5).to_string(),
             "agent loop exceeded max iterations (5)"
         );
+    }
+
+    fn close(raw: &str) -> StreamChunk {
+        StreamChunk::tool_call_from_raw_args("call_1", "write_file", raw)
+    }
+
+    #[test]
+    fn empty_raw_args_are_an_empty_object() {
+        for raw in ["", "  \n"] {
+            match close(raw) {
+                StreamChunk::ToolCallFinished { id, name, args } => {
+                    assert_eq!(id, "call_1");
+                    assert_eq!(name, "write_file");
+                    assert_eq!(args, serde_json::json!({}));
+                }
+                other => panic!("expected ToolCallFinished for {raw:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn object_raw_args_finish_the_call() {
+        match close(r#"{"path":"a.txt"}"#) {
+            StreamChunk::ToolCallFinished { args, .. } => {
+                assert_eq!(args, serde_json::json!({"path": "a.txt"}));
+            }
+            other => panic!("expected ToolCallFinished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncated_raw_args_are_malformed() {
+        match close(r#"{"path":"a"#) {
+            StreamChunk::ToolCallMalformed {
+                id,
+                name,
+                raw,
+                error,
+            } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "write_file");
+                assert_eq!(raw, r#"{"path":"a"#);
+                assert!(error.contains("EOF"), "unexpected error: {error}");
+            }
+            other => panic!("expected ToolCallMalformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_object_raw_args_are_malformed() {
+        for raw in ["[1]", "null", r#""x""#] {
+            match close(raw) {
+                StreamChunk::ToolCallMalformed {
+                    raw: got, error, ..
+                } => {
+                    assert_eq!(got, raw);
+                    assert_eq!(error, "tool arguments must be a JSON object");
+                }
+                other => panic!("expected ToolCallMalformed for {raw:?}, got {other:?}"),
+            }
+        }
     }
 }

@@ -125,13 +125,13 @@ where
                     let order = std::mem::take(&mut tool_call_order);
                     for idx in order {
                         if let Some(state) = tool_calls.remove(&idx) {
-                            let args = serde_json::from_str(&state.args_buf)
-                                .unwrap_or(serde_json::json!({}));
-                            yield StreamChunk::ToolCallFinished {
-                                id: state.id,
-                                name: state.name,
-                                args,
-                            };
+                            // Invalid JSON (e.g. cut off by `length`)
+                            // closes as ToolCallMalformed, never as `{}`.
+                            yield StreamChunk::tool_call_from_raw_args(
+                                state.id,
+                                state.name,
+                                state.args_buf,
+                            );
                         }
                     }
                 }
@@ -529,5 +529,72 @@ mod tests {
             FinishReason::Other(s) => assert_eq!(s, "content_filter"),
             other => panic!("expected Other, got {other:?}"),
         }
+    }
+
+    /// `finish_reason: "length"` can cut `function.arguments` off
+    /// mid-JSON. The call must close as `ToolCallMalformed` with the raw
+    /// text, never as a `ToolCallFinished` with `{}` that would execute.
+    #[tokio::test]
+    async fn truncated_arguments_are_malformed_not_empty_args() {
+        let events = vec![
+            parse(
+                r#"{"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":""}}]}}]}"#,
+            ),
+            parse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\": \"a.txt\", \"content\": \"hel"}}]}}]}"#,
+            ),
+            parse(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}"#),
+        ];
+        let chunks = run(events).await;
+
+        assert!(
+            !chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::ToolCallFinished { .. })),
+            "truncated args must not produce ToolCallFinished: {chunks:?}"
+        );
+        let (id, name, raw) = chunks
+            .iter()
+            .find_map(|c| match c {
+                StreamChunk::ToolCallMalformed { id, name, raw, .. } => Some((id, name, raw)),
+                _ => None,
+            })
+            .expect("ToolCallMalformed");
+        assert_eq!(id, "call_1");
+        assert_eq!(name, "write_file");
+        assert_eq!(raw, r#"{"path": "a.txt", "content": "hel"#);
+        assert!(matches!(
+            chunks.last(),
+            Some(StreamChunk::TurnFinished {
+                reason: FinishReason::MaxTokens,
+                ..
+            })
+        ));
+    }
+
+    /// A tool without parameters can arrive with no argument fragments
+    /// (or only empty ones); that is a valid `{}`, not a malformed call.
+    #[tokio::test]
+    async fn tool_call_without_arguments_finishes_with_empty_object() {
+        let events = vec![
+            parse(
+                r#"{"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"list_files","arguments":""}}]}}]}"#,
+            ),
+            parse(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#),
+        ];
+        let chunks = run(events).await;
+        let args = chunks
+            .iter()
+            .find_map(|c| match c {
+                StreamChunk::ToolCallFinished { args, .. } => Some(args.clone()),
+                _ => None,
+            })
+            .expect("ToolCallFinished");
+        assert_eq!(args, json!({}));
+        assert!(
+            !chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::ToolCallMalformed { .. }))
+        );
     }
 }

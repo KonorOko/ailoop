@@ -273,6 +273,22 @@ impl ChatMiddleware for JsonTracer {
                 }
                 self.emit("tool_call_finished", p).await;
             }
+            StreamChunk::ToolCallMalformed {
+                id,
+                name,
+                raw,
+                error,
+            } => {
+                let mut p = serde_json::Map::new();
+                p.insert("call_id".into(), json!(id));
+                p.insert("name".into(), json!(name));
+                p.insert("error".into(), json!(error));
+                p.insert("raw_bytes".into(), json!(raw.len()));
+                if self.verbose {
+                    p.insert("raw".into(), json!(raw));
+                }
+                self.emit("tool_call_malformed", p).await;
+            }
             StreamChunk::ToolResult {
                 run_id,
                 step_id,
@@ -564,6 +580,33 @@ mod tests {
         assert_eq!(lines[0]["args"], args);
         assert_eq!(lines[1]["args"], args);
         assert_eq!(lines[1]["result"], json!("sunny"));
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_call_logs_error_and_raw_only_when_verbose() {
+        let dir = tempdir().unwrap();
+        let default_path = dir.path().join("default.ndjson");
+        let verbose_path = dir.path().join("verbose.ndjson");
+        let default_tracer = JsonTracer::new(&default_path).unwrap();
+        let verbose_tracer = JsonTracer::verbose(&verbose_path).unwrap();
+        let chunk = StreamChunk::tool_call_from_raw_args("call_1", "write_file", r#"{"path":"a"#);
+        default_tracer.on_chunk(&chunk).await;
+        verbose_tracer.on_chunk(&chunk).await;
+
+        let default_lines = close_and_read(default_tracer, default_path);
+        let verbose_lines = close_and_read(verbose_tracer, verbose_path);
+
+        let line = &default_lines[0];
+        assert_eq!(line["kind"], json!("tool_call_malformed"));
+        assert_eq!(line["call_id"], json!("call_1"));
+        assert_eq!(line["name"], json!("write_file"));
+        assert_eq!(line["raw_bytes"], json!(r#"{"path":"a"#.len()));
+        assert!(line["error"].as_str().is_some_and(|e| !e.is_empty()));
+        assert!(
+            line.get("raw").is_none(),
+            "default mode must not include raw args"
+        );
+        assert_eq!(verbose_lines[0]["raw"], json!(r#"{"path":"a"#));
     }
 
     #[tokio::test]
