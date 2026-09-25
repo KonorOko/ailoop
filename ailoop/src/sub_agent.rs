@@ -6,15 +6,18 @@
 //! prior turns. For stateless behavior reconstruct the `SubAgentTool`
 //! (or its inner `Conversation`) per call.
 
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use ailoop_core::{
-    CompletionModel, FinishReason, Message, ProviderError, Source, ToolDefinition,
+    AbortReason, ChatMiddleware, ChatRequest, CompletionModel, FinishReason, Message,
+    ProviderError, RunConfig, RunId, Source, StepId, StreamChunk, ToolChoice, ToolDefinition,
     ToolResultContent, UserBlock,
 };
 use ailoop_tools::{ToolContext, ToolDyn};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use crate::{Conversation, RunOptions};
 
@@ -94,7 +97,8 @@ pub struct SubAgentConfig {
     /// [`RunOptions::timeout`] — the engine checks the deadline at
     /// every await boundary and aborts with
     /// [`FinishReason::Aborted`] on expiry, which the wrapper surfaces
-    /// as a text-only [`ToolResultContent`] with `is_error: true`.
+    /// as a text-only [`ToolResultContent`] with `is_error: true`
+    /// (unless [`Self::wrap_up`] got a summary out first).
     pub timeout: Option<Duration>,
     /// Cap on the number of provider turns inside the child run.
     /// Mapped to [`RunOptions::max_iterations`]. Hitting the cap
@@ -102,6 +106,8 @@ pub struct SubAgentConfig {
     /// wrapper renders as `"sub-agent aborted (agent loop exceeded max
     /// iterations (n)): <partial text>"` with `is_error: true`, so
     /// whatever the child wrote before the cap reaches the parent.
+    /// With [`Self::wrap_up`] set, the last allowed iteration becomes
+    /// a no-tools summary turn instead.
     pub max_iterations: Option<usize>,
     /// Per-turn `max_tokens` override for every [`ChatRequest`] the
     /// child run builds. Mapped to [`RunOptions::max_tokens`], so it
@@ -113,6 +119,12 @@ pub struct SubAgentConfig {
     ///
     /// [`ChatRequest`]: ailoop_core::ChatRequest
     pub max_tokens: Option<u32>,
+    /// Opt-in graceful cutoff. When set, the child is forced to spend
+    /// its last turn summarizing — no tool calls — before the hard
+    /// `timeout` / `max_iterations` cutoff, and the summary reaches the
+    /// parent marked as partial with `is_error: false`. `None` (the
+    /// default) keeps the plain abort behavior. See [`WrapUp`].
+    pub wrap_up: Option<WrapUp>,
 }
 
 impl SubAgentConfig {
@@ -144,6 +156,199 @@ impl SubAgentConfig {
         self.max_tokens = Some(n);
         self
     }
+
+    /// Enable the graceful cutoff. See [`Self::wrap_up`] and
+    /// [`WrapUp`] for semantics.
+    pub fn wrap_up(mut self, wrap_up: WrapUp) -> Self {
+        self.wrap_up = Some(wrap_up);
+        self
+    }
+}
+
+/// Default instruction injected into the child's wrap-up turn. See
+/// [`WrapUp::instruction`].
+pub const DEFAULT_WRAP_UP_INSTRUCTION: &str = "You are about to run out of budget for this task. \
+Do not call any more tools. Reply now with your final answer: summarize what you have found so \
+far and state clearly what remains unverified or unfinished.";
+
+/// Graceful-cutoff settings for a [`SubAgentTool`], enabled through
+/// [`SubAgentConfig::wrap_up`].
+///
+/// Without it, a child that hits its `timeout` or `max_iterations` is
+/// cut off and the parent receives `"sub-agent aborted (…)"` with
+/// `is_error: true` — whatever the child learned after its last text
+/// block is lost. With it, the wrapper forces one **wrap-up turn**
+/// before the hard cutoff:
+///
+/// - **Iteration budget:** the last allowed iteration
+///   (`max_iterations - 1`, zero-based) is always the wrap-up turn.
+/// - **Time budget:** once `timeout * time_fraction` has elapsed since
+///   the run started, the next request is the wrap-up turn. The check
+///   runs when a request is about to be sent, so a model turn or tool
+///   call already in flight is not interrupted; pick a fraction that
+///   leaves room for one tool call plus one model turn before the hard
+///   deadline. Without a timeout only the iteration trigger applies.
+///
+/// Both budgets are read from the child run's effective
+/// [`RunConfig`], so they apply whether they come from
+/// [`SubAgentConfig`] or from the child's builder defaults.
+///
+/// The wrap-up request keeps its tool definitions (so the prompt cache
+/// is not invalidated) but sets `tool_choice` to
+/// [`ToolChoice::None_`], and [`Self::instruction`] is appended as a
+/// text block to the request's last user message. The instruction is
+/// request-only: it is never written to the child's history. Once
+/// triggered, every later request of the same run is forced too. The
+/// wrap-up middleware runs after every builder middleware, so a user
+/// middleware cannot re-enable tool calls.
+///
+/// If the wrap-up turn finishes with text, the parent receives
+///
+/// ```text
+/// [partial: sub-agent reached its time budget]
+/// <summary>
+/// ```
+///
+/// (`iteration budget` for the iteration trigger) with
+/// `is_error: false`. The hard `timeout` stays absolute: if it fires
+/// before the wrap-up turn completes — or the child aborts for any
+/// other reason — the result is the usual `"sub-agent aborted (…)"`
+/// with `is_error: true`. A wrap-up turn that yields no text is also
+/// reported with `is_error: true`.
+///
+/// ```
+/// use std::time::Duration;
+/// let config = ailoop::SubAgentConfig::new()
+///     .timeout(Duration::from_secs(60))
+///     .max_iterations(8)
+///     .wrap_up(ailoop::WrapUp::new().time_fraction(0.75));
+/// ```
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct WrapUp {
+    /// Fraction of the child's `timeout` after which the next request
+    /// becomes the wrap-up turn. Clamped to `[0.0, 1.0]`. Default
+    /// `0.8`.
+    pub time_fraction: f64,
+    /// Text appended to the wrap-up request. Default
+    /// [`DEFAULT_WRAP_UP_INSTRUCTION`].
+    pub instruction: String,
+}
+
+impl Default for WrapUp {
+    fn default() -> Self {
+        Self {
+            time_fraction: 0.8,
+            instruction: DEFAULT_WRAP_UP_INSTRUCTION.to_owned(),
+        }
+    }
+}
+
+impl WrapUp {
+    /// Default settings: wrap up at 80% of the timeout or on the last
+    /// allowed iteration, with [`DEFAULT_WRAP_UP_INSTRUCTION`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the fraction of the timeout after which the wrap-up turn is
+    /// forced. See [`Self::time_fraction`].
+    pub fn time_fraction(mut self, fraction: f64) -> Self {
+        self.time_fraction = fraction;
+        self
+    }
+
+    /// Replace the instruction appended to the wrap-up request. See
+    /// [`Self::instruction`].
+    pub fn instruction(mut self, instruction: impl Into<String>) -> Self {
+        self.instruction = instruction.into();
+        self
+    }
+}
+
+/// Budgets of the child run, captured in `on_run_started`.
+struct WrapUpBudget {
+    started: Instant,
+    soft_deadline: Option<Duration>,
+    max_iterations: usize,
+}
+
+#[derive(Default)]
+struct WrapUpState {
+    budget: Option<WrapUpBudget>,
+    iteration: usize,
+    /// Which budget forced the wrap-up turn, as the abort it pre-empts.
+    triggered: Option<AbortReason>,
+}
+
+/// Run-scoped middleware installed by [`SubAgentTool::call`] when
+/// [`SubAgentConfig::wrap_up`] is set. See [`WrapUp`].
+struct WrapUpMiddleware {
+    time_fraction: f64,
+    instruction: String,
+    state: Arc<StdMutex<WrapUpState>>,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for WrapUpMiddleware {
+    async fn on_run_started(
+        &self,
+        _: &RunId,
+        _: &[Message],
+        config: &RunConfig,
+    ) -> ailoop_core::HookAction {
+        let fraction = self.time_fraction.clamp(0.0, 1.0);
+        self.state.lock().expect("wrap-up state").budget = Some(WrapUpBudget {
+            started: Instant::now(),
+            soft_deadline: config.timeout.map(|t| t.mul_f64(fraction)),
+            max_iterations: config.max_iterations,
+        });
+        ailoop_core::HookAction::Continue
+    }
+
+    async fn on_chunk(&self, chunk: &StreamChunk) {
+        if let StreamChunk::StepStarted { iteration, .. } = chunk {
+            self.state.lock().expect("wrap-up state").iteration = *iteration;
+        }
+    }
+
+    async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+        {
+            let mut state = self.state.lock().expect("wrap-up state");
+            if state.triggered.is_none() {
+                let Some(budget) = &state.budget else { return };
+                let trigger = if state.iteration + 1 >= budget.max_iterations {
+                    Some(AbortReason::MaxIterations(budget.max_iterations))
+                } else {
+                    budget
+                        .soft_deadline
+                        .filter(|soft| budget.started.elapsed() >= *soft)
+                        .map(AbortReason::Timeout)
+                };
+                match trigger {
+                    Some(reason) => state.triggered = Some(reason),
+                    None => return,
+                }
+            }
+        }
+
+        req.tool_choice = Some(ToolChoice::None_);
+        let instruction = UserBlock::text(self.instruction.clone());
+        match req.messages.last_mut() {
+            Some(Message::User { blocks }) => blocks.push(instruction),
+            _ => req
+                .messages
+                .push(Message::user_with_blocks(vec![instruction])),
+        }
+    }
+}
+
+/// Human label for the budget a wrap-up pre-empted.
+fn budget_label(reason: &AbortReason) -> &'static str {
+    match reason {
+        AbortReason::MaxIterations(_) => "iteration",
+        _ => "time",
+    }
 }
 
 /// Wraps a [`Conversation`] so a parent agent can delegate to it as a
@@ -163,6 +368,12 @@ impl SubAgentConfig {
 /// [`ToolContext::cancellation`], so cancelling or timing out the
 /// parent run cancels the in-flight sub-agent at the next await
 /// boundary.
+///
+/// To keep what the child found when it runs out of budget, opt in to
+/// [`SubAgentConfig::wrap_up`]: the child is forced to summarize (no
+/// tool calls) before the hard cutoff, and the parent receives the
+/// summary prefixed with `[partial: …]` and `is_error: false`. See
+/// [`WrapUp`].
 ///
 /// Per-invocation budget overrides (`timeout`, `max_iterations`,
 /// `max_tokens`) live on [`SubAgentConfig`] and are applied through
@@ -284,7 +495,8 @@ where
     /// onto the [`RunOptions`] of every child run dispatched through
     /// [`ToolDyn::call`]. The parent's `ToolContext::cancellation`
     /// always wins over the config — only `timeout`, `max_iterations`,
-    /// and `max_tokens` are configurable per-invocation.
+    /// `max_tokens` and the [`WrapUp`] cutoff are configurable
+    /// per-invocation.
     pub fn with_config(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -396,6 +608,15 @@ where
         if let Some(max_tokens) = self.config.max_tokens {
             options = options.max_tokens(max_tokens);
         }
+        let wrap_up_state = self.config.wrap_up.as_ref().map(|wrap_up| {
+            let state = Arc::new(StdMutex::new(WrapUpState::default()));
+            options.extra_middlewares.push(Arc::new(WrapUpMiddleware {
+                time_fraction: wrap_up.time_fraction,
+                instruction: wrap_up.instruction.clone(),
+                state: state.clone(),
+            }));
+            state
+        });
 
         let mut conv = self.conversation.lock().await;
         let run_result = if attachment_blocks.is_empty() {
@@ -413,19 +634,31 @@ where
                 .await
         };
 
+        let wrapped_up =
+            wrap_up_state.and_then(|state| state.lock().expect("wrap-up state").triggered.take());
+
         match run_result {
             Ok(outcome) => {
                 let text = outcome.final_text.unwrap_or_default();
-                match outcome.finish_reason {
-                    FinishReason::Aborted(reason) if text.is_empty() => {
+                match (outcome.finish_reason, wrapped_up) {
+                    (FinishReason::Aborted(reason), _) if text.is_empty() => {
                         ToolResultContent::text(format!("sub-agent aborted: {reason}"))
                             .with_is_error(true)
                     }
-                    FinishReason::Aborted(reason) => {
+                    (FinishReason::Aborted(reason), _) => {
                         ToolResultContent::text(format!("sub-agent aborted ({reason}): {text}"))
                             .with_is_error(true)
                     }
-                    _ => ToolResultContent::text(text),
+                    (_, Some(budget)) if text.is_empty() => ToolResultContent::text(format!(
+                        "sub-agent aborted: reached its {} budget without producing a summary",
+                        budget_label(&budget)
+                    ))
+                    .with_is_error(true),
+                    (_, Some(budget)) => ToolResultContent::text(format!(
+                        "[partial: sub-agent reached its {} budget]\n{text}",
+                        budget_label(&budget)
+                    )),
+                    (_, None) => ToolResultContent::text(text),
                 }
             }
             Err(e) => ToolResultContent::text(format!("sub-agent error: {e}")).with_is_error(true),
@@ -1113,5 +1346,272 @@ mod tests {
             "expected only the image block, got {blocks:?}"
         );
         assert!(matches!(blocks[0], UserBlock::Image { .. }));
+    }
+
+    // ---- WrapUp (graceful cutoff) ----
+
+    /// `ScriptedModel` wrapper that records every request and can hold
+    /// a given turn back for a while before answering.
+    struct Recording {
+        inner: ScriptedModel,
+        requests: Arc<StdMutex<Vec<ChatRequest>>>,
+        delays: Vec<Duration>,
+    }
+
+    impl Recording {
+        fn new(turns: Vec<Vec<StreamChunk>>) -> (Self, Arc<StdMutex<Vec<ChatRequest>>>) {
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let model = Self {
+                inner: ScriptedModel::new(turns),
+                requests: requests.clone(),
+                delays: Vec::new(),
+            };
+            (model, requests)
+        }
+
+        /// Delay the answer to the `i`-th request (zero-based).
+        fn delay_turn(mut self, i: usize, d: Duration) -> Self {
+            if self.delays.len() <= i {
+                self.delays.resize(i + 1, Duration::ZERO);
+            }
+            self.delays[i] = d;
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CompletionModel for Recording {
+        type Error = ScriptedError;
+
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+
+        fn model(&self) -> &str {
+            self.inner.model()
+        }
+
+        async fn chat_stream(
+            &self,
+            req: ChatRequest,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<StreamChunk, Self::Error>>,
+            Self::Error,
+        > {
+            let i = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(req.clone());
+                requests.len() - 1
+            };
+            if let Some(d) = self.delays.get(i).filter(|d| !d.is_zero()) {
+                tokio::time::sleep(*d).await;
+            }
+            self.inner.chat_stream(req).await
+        }
+    }
+
+    /// Child tool that takes `delay` to answer.
+    struct SlowLookup {
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolDyn for SlowLookup {
+        fn name(&self) -> String {
+            "lookup".into()
+        }
+        fn tool_definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "lookup",
+                "stub",
+                json!({"type": "object", "properties": {}, "required": []}),
+                vec![],
+            )
+        }
+        async fn call(&self, _: Value, _: &ToolContext) -> ToolResultContent {
+            tokio::time::sleep(self.delay).await;
+            ToolResultContent::text("lookup result")
+        }
+    }
+
+    fn lookup_turn() -> Vec<StreamChunk> {
+        vec![
+            StreamChunk::ToolCallStarted {
+                id: "toolu_1".into(),
+                name: "lookup".into(),
+            },
+            StreamChunk::ToolCallFinished {
+                id: "toolu_1".into(),
+                name: "lookup".into(),
+                args: json!({}),
+            },
+            StreamChunk::TurnFinished {
+                reason: FinishReason::ToolUse,
+                usage: Usage::default(),
+                service_tier: None,
+            },
+        ]
+    }
+
+    fn child(model: Recording, tool_delay: Duration) -> Conversation<Recording> {
+        Conversation::builder(model)
+            .tool_dyn(Arc::new(SlowLookup { delay: tool_delay }))
+            .build()
+            .expect("build")
+    }
+
+    fn last_user_text(req: &ChatRequest) -> Option<String> {
+        match req.messages.last()? {
+            Message::User { blocks } => blocks.iter().rev().find_map(|b| match b {
+                UserBlock::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    fn history_mentions(messages: &[Message], needle: &str) -> bool {
+        messages.iter().any(|m| match m {
+            Message::User { blocks } => blocks
+                .iter()
+                .any(|b| matches!(b, UserBlock::Text { text, .. } if text.contains(needle))),
+            _ => false,
+        })
+    }
+
+    /// On the last allowed iteration the child is asked to summarize
+    /// with tool calls forbidden; the summary reaches the parent marked
+    /// as partial and not as an error.
+    #[tokio::test]
+    async fn wrap_up_iteration_budget_forces_synthesis_without_tools() {
+        let (model, requests) = Recording::new(vec![lookup_turn(), one_text_turn("summary")]);
+        let tool = SubAgentTool::with_config(
+            "delegate",
+            "delegate",
+            child(model, Duration::ZERO),
+            SubAgentConfig::new()
+                .max_iterations(2)
+                .wrap_up(WrapUp::new().instruction("WRAP UP NOW")),
+        );
+
+        let result = tool
+            .call(json!({"prompt": "research"}), &ToolContext::detached())
+            .await;
+
+        assert_eq!(
+            result.as_text(),
+            Some("[partial: sub-agent reached its iteration budget]\nsummary")
+        );
+        assert!(!result.is_error);
+
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].tool_choice, None);
+            assert_eq!(requests[1].tool_choice, Some(ToolChoice::None_));
+            assert!(
+                requests[1].tools.as_ref().is_some_and(|t| !t.is_empty()),
+                "tool definitions stay on the wrap-up request"
+            );
+            assert_eq!(last_user_text(&requests[1]).as_deref(), Some("WRAP UP NOW"));
+        }
+
+        let conv = tool.conversation.lock().await;
+        assert!(
+            !history_mentions(conv.history_messages(), "WRAP UP NOW"),
+            "the wrap-up instruction is request-only"
+        );
+    }
+
+    /// Crossing `timeout * time_fraction` forces the next request to be
+    /// the wrap-up turn.
+    #[tokio::test(start_paused = true)]
+    async fn wrap_up_soft_deadline_forces_synthesis_without_tools() {
+        let (model, requests) = Recording::new(vec![lookup_turn(), one_text_turn("summary")]);
+        let tool = SubAgentTool::with_config(
+            "delegate",
+            "delegate",
+            child(model, Duration::from_millis(60)),
+            SubAgentConfig::new()
+                .timeout(Duration::from_millis(100))
+                .wrap_up(WrapUp::new().time_fraction(0.5)),
+        );
+
+        let result = tool
+            .call(json!({"prompt": "research"}), &ToolContext::detached())
+            .await;
+
+        assert_eq!(
+            result.as_text(),
+            Some("[partial: sub-agent reached its time budget]\nsummary")
+        );
+        assert!(!result.is_error);
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].tool_choice, None);
+        assert_eq!(requests[1].tool_choice, Some(ToolChoice::None_));
+        assert_eq!(
+            last_user_text(&requests[1]).as_deref(),
+            Some(DEFAULT_WRAP_UP_INSTRUCTION)
+        );
+    }
+
+    /// Without `wrap_up` neither the requests nor the result change —
+    /// even on the run's last allowed iteration.
+    #[tokio::test]
+    async fn without_wrap_up_requests_and_result_are_unchanged() {
+        let (model, requests) = Recording::new(vec![lookup_turn(), one_text_turn("answer")]);
+        let tool = SubAgentTool::with_config(
+            "delegate",
+            "delegate",
+            child(model, Duration::ZERO),
+            SubAgentConfig::new().max_iterations(2),
+        );
+
+        let result = tool
+            .call(json!({"prompt": "research"}), &ToolContext::detached())
+            .await;
+
+        assert_eq!(result.as_text(), Some("answer"));
+        assert!(!result.is_error);
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|r| r.tool_choice.is_none()));
+        assert!(
+            !history_mentions(&requests[1].messages, DEFAULT_WRAP_UP_INSTRUCTION),
+            "no instruction is injected without wrap_up"
+        );
+    }
+
+    /// The hard timeout stays absolute: a wrap-up turn that does not
+    /// finish in time still ends as an abort with `is_error: true`.
+    #[tokio::test(start_paused = true)]
+    async fn wrap_up_hard_timeout_wins_when_synthesis_is_slow() {
+        let (model, requests) = Recording::new(vec![lookup_turn(), one_text_turn("too late")]);
+        let model = model.delay_turn(1, Duration::from_secs(1));
+        let tool = SubAgentTool::with_config(
+            "delegate",
+            "delegate",
+            child(model, Duration::from_millis(60)),
+            SubAgentConfig::new()
+                .timeout(Duration::from_millis(100))
+                .wrap_up(WrapUp::new().time_fraction(0.5)),
+        );
+
+        let result = tool
+            .call(json!({"prompt": "research"}), &ToolContext::detached())
+            .await;
+
+        assert_eq!(
+            result.as_text(),
+            Some("sub-agent aborted: timeout exceeded after 100ms")
+        );
+        assert!(result.is_error);
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "the wrap-up request was sent");
+        assert_eq!(requests[1].tool_choice, Some(ToolChoice::None_));
     }
 }
