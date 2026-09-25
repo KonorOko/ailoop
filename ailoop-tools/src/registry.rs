@@ -126,7 +126,7 @@ impl<T: Tool> ToolDyn for T {
     }
 
     fn tool_definition(&self) -> ToolDefinition {
-        T::definition(&self)
+        T::definition(self)
     }
 
     async fn call(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolResultContent {
@@ -135,7 +135,7 @@ impl<T: Tool> ToolDyn for T {
             Err(e) => return ToolResultContent::error(format!("Invalid args: {e}")),
         };
 
-        match T::call(&self, typed, ctx).await {
+        match T::call(self, typed, ctx).await {
             Ok(out) => match serde_json::to_value(&out) {
                 Ok(serde_json::Value::String(s)) => ToolResultContent::text(s),
                 Ok(v) => ToolResultContent::text(v.to_string()),
@@ -380,12 +380,12 @@ mod tests {
         type Error = std::io::Error;
         type Output = String;
 
-        fn call(
+        async fn call(
             &self,
             args: Self::Args,
             _ctx: &ToolContext,
-        ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
-            async move { std::fs::read_to_string(&args.path) }
+        ) -> Result<Self::Output, Self::Error> {
+            std::fs::read_to_string(&args.path)
         }
 
         fn definition(&self) -> ToolDefinition {
@@ -408,8 +408,6 @@ mod tests {
         registry
             .register(Arc::new(ReadFile))
             .expect("Failed in registry tool");
-
-        assert!(true);
     }
 
     #[tokio::test]

@@ -246,7 +246,7 @@ mod tests {
         // Same 200-char input now sizes much closer to 80 tokens.
         let new_estimate = t.count_text(&"x".repeat(200));
         assert!(
-            new_estimate >= 75 && new_estimate <= 81,
+            (75..=81).contains(&new_estimate),
             "expected ~80-token estimate after calibration, got {new_estimate}"
         );
     }

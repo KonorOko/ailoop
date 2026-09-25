@@ -20,10 +20,10 @@ pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
         body.insert("system".into(), to_anthropic_system(system));
     }
 
-    if let Some(tools) = &req.tools {
-        if !tools.is_empty() {
-            body.insert("tools".into(), json!(to_anthropic_tools(tools)));
-        }
+    if let Some(tools) = &req.tools
+        && !tools.is_empty()
+    {
+        body.insert("tools".into(), json!(to_anthropic_tools(tools)));
     }
 
     if let Some(t) = req.temperature {
@@ -55,11 +55,11 @@ pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
         body.insert("thinking".into(), thinking);
     }
 
-    if let Some(extra) = &req.additional_params {
-        if let Some(map) = extra.as_object() {
-            for (k, v) in map {
-                body.insert(k.clone(), v.clone());
-            }
+    if let Some(extra) = &req.additional_params
+        && let Some(map) = extra.as_object()
+    {
+        for (k, v) in map {
+            body.insert(k.clone(), v.clone());
         }
     }
 

@@ -109,7 +109,7 @@ fn flush_user_parts(out: &mut Vec<Value>, parts: &mut Vec<Value>) {
         parts.clear();
         return;
     }
-    let drained: Vec<Value> = parts.drain(..).collect();
+    let drained = std::mem::take(parts);
     out.push(json!({
         "role": "user",
         "content": drained,
