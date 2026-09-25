@@ -64,11 +64,11 @@ mod tracing_middleware;
 
 pub use ailoop_core::{
     AbortReason, AssistantBlock, CacheControl, CancellationToken, CharTokenizer, ChatMiddleware,
-    ChatRequest, CompletionClient, CompletionModel, FinishReason, HookAction, Message,
-    ProviderError, ReasoningEffort, RetryClassification, RetryConfig, Retryable, RetryingModel,
-    RunConfig, RunId, Source, StepId, StreamChunk, SystemBlock, SystemPrompt, Tokenizer,
-    ToolChoice, ToolDecision, ToolDefinition, ToolResultBlock, ToolResultContent, ToolTag, Usage,
-    UserBlock,
+    ChatRequest, CompletionClient, CompletionModel, ContinueDecision, FinishReason, HookAction,
+    Message, ProviderError, ReasoningEffort, RetryClassification, RetryConfig, Retryable,
+    RetryingModel, RunConfig, RunId, Source, StepId, StreamChunk, SystemBlock, SystemPrompt,
+    Tokenizer, ToolChoice, ToolDecision, ToolDefinition, ToolResultBlock, ToolResultContent,
+    ToolTag, Usage, UserBlock,
 };
 pub use ailoop_derive::{ToolJsonType, ailoop_tool};
 pub use ailoop_history::{
