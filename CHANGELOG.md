@@ -10,6 +10,17 @@ and this project adheres to
 
 ### Added
 
+- `ToolContext::report_usage(Usage)` and `UsageSink` (re-exported from
+  `ailoop`): a tool that spends tokens outside the engine's own
+  provider turns (a sub-agent, a tool that calls an LLM directly)
+  reports them here and the engine adds them to the run's usage
+  total. Reports count as soon as they are made, so a tool dropped by
+  a timeout or cancellation still contributes what it already spent.
+  `ToolContext::usage_sink()` exposes the sink so a tool can hand it to
+  a nested run or spawned task. `ToolContext::with_usage_sink(sink)`
+  replaces it, which is useful in tests to read back what a tool
+  reported. `ToolContext::new` is unchanged.
+
 - `RunError<E>` (re-exported from `ailoop`): the error of a failed run.
   It wraps the `EngineError` cause (`kind()`, `into_kind()`) and the
   messages of the steps the run completed before failing
@@ -258,6 +269,20 @@ and this project adheres to
   wants to distribute `child_token()` to siblings.
 
 ### Changed
+
+- `RunFinished.usage`, `RunOutcome.usage` and the `usage` passed to
+  `ChatMiddleware::on_run_finished` now mean **everything the run
+  spent**: its own provider turns plus usage reported by tools.
+  `SubAgentTool` reports its child run's usage, and nested sub-agents
+  roll up recursively. Before, the child's tokens were dropped and the
+  parent's total undercounted the real cost, so a token or cost budget
+  could not see sub-agents. The spend is forwarded while it happens, so it
+  also counts when the child aborts (`SubAgentConfig::timeout`,
+  `max_iterations`, wrap-up) and when the parent aborts while the child
+  is still running. `TurnFinished.usage` is unchanged: it covers only
+  the run's own model. Sum it in a middleware to split own vs.
+  delegated spend. If you were adding a sub-agent's usage to the
+  parent's total yourself, stop, or it will be counted twice.
 
 - Docstrings for `StreamChunk::TurnFinished` and `Usage` now make
   explicit that the per-turn variant is visible to `ChatMiddleware`

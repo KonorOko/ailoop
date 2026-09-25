@@ -143,6 +143,9 @@ pub enum StreamChunk {
         /// Why the model stopped this turn.
         reason: FinishReason,
         /// Token counters reported by the provider for this turn.
+        /// Only this run's model: usage reported by tools (e.g. a
+        /// sub-agent) is not here, it is added to
+        /// [`Self::RunFinished::usage`].
         usage: Usage,
         /// Provider-reported service tier for the turn (Anthropic:
         /// `"standard"` / `"priority"` / `"batch"`). `None` when the
@@ -206,7 +209,11 @@ pub enum StreamChunk {
         run_id: RunId,
         /// Why the run ended.
         reason: FinishReason,
-        /// Token totals across every turn in the run.
+        /// Everything the run spent: the sum of its own turns plus
+        /// the usage tools reported through
+        /// `ToolContext::report_usage` (a `SubAgentTool`'s child run,
+        /// recursively). On aborts, what was spent up to the cutoff.
+        /// See [`Usage`] for how to split own vs. delegated spend.
         usage: Usage,
         /// All messages this run added to history. On abort, partial
         /// tool results are preserved so the next run sees a
@@ -365,7 +372,17 @@ impl fmt::Display for AbortReason {
 
 /// Token counters reported by the provider for a turn.
 ///
-/// Aggregated to the run level by the engine. A stream consumer
+/// Aggregated to the run level by the engine. The run-level total on
+/// [`StreamChunk::RunFinished::usage`] is **everything the run spent**:
+/// the sum of its own turns plus the usage tools reported through
+/// `ToolContext::report_usage` — which `SubAgentTool` does for its
+/// child run, recursively. Aborted runs report what was spent up to
+/// the cutoff, including tokens a tool reported before it was dropped.
+///
+/// To split own vs. delegated spend, sum the per-turn values from
+/// [`StreamChunk::TurnFinished::usage`] in a middleware: that is the
+/// run's own model; the difference to `RunFinished.usage` is what
+/// tools reported. A stream consumer
 /// iterating `Conversation::stream_with_options` only sees the run
 /// total on [`StreamChunk::RunFinished::usage`]; per-turn `Usage`
 /// rides on [`StreamChunk::TurnFinished::usage`], which is exposed to

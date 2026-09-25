@@ -5,7 +5,7 @@ use ailoop_core::{
 };
 use ailoop_history::{ConversationSnapshot, History, HistoryBuilder};
 use ailoop_prompts::{Prompt, PromptSection};
-use ailoop_tools::{ToolDyn, ToolRegistry};
+use ailoop_tools::{ToolDyn, ToolRegistry, UsageSink};
 use futures::{Stream, StreamExt, stream::BoxStream};
 use serde_json::Value;
 use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
@@ -89,7 +89,11 @@ pub struct RunOutcome {
     /// they do **not** become `Err`.
     pub finish_reason: FinishReason,
     /// Token-level accounting summed across every step in the run,
-    /// including provider cache fields when reported.
+    /// including provider cache fields when reported, plus the usage
+    /// tools reported through
+    /// [`ToolContext::report_usage`](crate::ToolContext::report_usage)
+    /// (a [`SubAgentTool`](crate::SubAgentTool)'s child run,
+    /// recursively). Same value as `RunFinished.usage`.
     pub usage: Usage,
     /// Every [`Message`] the run added to history (assistant turns,
     /// `User { ToolResult }` user-role turns synthesised from tool
@@ -162,6 +166,10 @@ pub struct RunOptions {
     /// [`crate::SubAgentTool`] to install its wrap-up middleware for a
     /// single child run without touching the public ordering contract.
     pub(crate) extra_middlewares: Vec<Arc<dyn ChatMiddleware>>,
+    /// Sink of an enclosing run that this run's spend rolls up into.
+    /// Internal: set by [`crate::SubAgentTool`] so the child's usage
+    /// lands in the parent's `RunFinished.usage`.
+    pub(crate) usage_parent: Option<UsageSink>,
 }
 
 impl RunOptions {
@@ -490,6 +498,7 @@ where
             config,
             self.context_options,
             M::Error::is_context_overflow,
+            options.usage_parent,
         );
 
         let prelude: BoxStream<'_, Result<StreamChunk, RunError<M::Error>>> = match report {

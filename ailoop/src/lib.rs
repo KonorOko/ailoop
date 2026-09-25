@@ -83,7 +83,7 @@ pub use ailoop_prompts::{Prompt, PromptBuilder, PromptSection};
 // into scope by `use ailoop::*;` without conflict.
 pub use ailoop_tools::{
     TimeoutTool, Tool, ToolActivation, ToolActivationError, ToolContext, ToolDyn, ToolJsonType,
-    ToolRegistry, errors::ToolRegistryError,
+    ToolRegistry, UsageSink, errors::ToolRegistryError,
 };
 pub use anti_loop::{AntiLoop, TextPredicate};
 pub use conversation::{
