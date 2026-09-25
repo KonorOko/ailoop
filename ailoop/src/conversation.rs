@@ -58,6 +58,13 @@ pub const DEFAULT_HISTORY_MAX_TOKENS: usize = 100_000;
 /// model / tool-registry / context errors produce an `Err`: a
 /// [`RunError`] carrying the [`EngineError`] cause and the steps the
 /// run completed before failing.
+///
+/// **Tool calls of one step have no guaranteed order.** Tool results
+/// land in history in the order the model issued the calls, but the
+/// calls themselves may run in any order, and a later release may run
+/// them concurrently. Tools and middlewares must not depend on one call
+/// of a step finishing before another starts; see
+/// [Tool calls within a step](ChatMiddleware#tool-calls-within-a-step).
 pub struct Conversation<M: CompletionModel> {
     model: M,
     history: History,

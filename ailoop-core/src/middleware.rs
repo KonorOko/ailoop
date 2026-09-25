@@ -22,6 +22,40 @@ use crate::RunConfig;
 /// All hooks have default no-op implementations; only override the ones
 /// you need. Implementors must be `Send + Sync` because the engine
 /// holds them behind `Arc<dyn ChatMiddleware>`.
+///
+/// # Tool calls within a step
+///
+/// When the model requests several tools in one turn, the tool hooks
+/// ([`Self::on_before_tool_call_mut`], [`Self::on_before_tool_call`],
+/// [`Self::on_after_tool_call_mut`], [`Self::on_after_tool_call`]) and
+/// the [`StreamChunk::ToolResult`] chunk fire once per call. The
+/// engine guarantees:
+///
+/// - **Order within one call.** Every middleware's
+///   `on_before_tool_call_mut`, then the `on_before_tool_call` gates,
+///   then the tool, then every `on_after_tool_call_mut`, then every
+///   `on_after_tool_call`, then the `ToolResult` chunk.
+/// - **Order in history.** The tool results recorded in history (and in
+///   `new_messages`) follow the order of the model's tool calls, no
+///   matter in which order the calls ran.
+/// - **Step boundary.** Every call of a step has finished before
+///   [`Self::on_turn_end`] or the next step's [`Self::on_chat_request`]
+///   fires.
+///
+/// The order **between** calls of the same step is not guaranteed.
+/// Today the engine runs them one at a time, in the model's order, but
+/// a later release may run them concurrently, so the hooks of different
+/// calls can interleave or overlap. A middleware that must keep working
+/// then:
+///
+/// - does not assume an `on_after_tool_call` belongs to the most recent
+///   `on_before_tool_call`, or that the calls before it in the model's
+///   order have already run;
+/// - keeps per-run state keyed by [`RunId`] (and per-step state by
+///   [`StepId`]) instead of in a single "current call" slot, and
+///   guards it with a lock, since hooks take `&self`. Per-call state
+///   should be keyed by the call id where one is available, as on
+///   [`StreamChunk::ToolCallFinished`] and [`StreamChunk::ToolResult`].
 #[async_trait::async_trait]
 #[allow(unused_variables)]
 pub trait ChatMiddleware: Send + Sync {
@@ -173,6 +207,9 @@ pub trait ChatMiddleware: Send + Sync {
     /// [`ToolDecision::Terminate`] to abort the run. This is the
     /// gating hook; for input rewriting, use
     /// [`Self::on_before_tool_call_mut`].
+    ///
+    /// Calls of the same step may reach this hook in any order, or
+    /// concurrently; see [Tool calls within a step](Self#tool-calls-within-a-step).
     async fn on_before_tool_call(
         &self,
         run_id: &RunId,
@@ -264,9 +301,11 @@ pub enum ToolDecision {
     /// Abort the run before executing this tool. The engine surfaces
     /// it as [`crate::FinishReason::Aborted`] carrying
     /// [`crate::AbortReason::ToolTerminated`] (with the tool's name)
-    /// and fires [`ChatMiddleware::on_run_finished`]; partial tool
-    /// results from earlier tool calls in the same step are preserved
-    /// in `new_messages`.
+    /// and fires [`ChatMiddleware::on_run_finished`]; results of tool
+    /// calls in the same step that already completed are preserved in
+    /// `new_messages`. Which calls those are follows the execution
+    /// order, which is not guaranteed between calls of a step; see
+    /// [Tool calls within a step](ChatMiddleware#tool-calls-within-a-step).
     Terminate {
         /// Human-readable reason; threaded through
         /// [`crate::AbortReason::ToolTerminated`].
