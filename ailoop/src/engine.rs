@@ -830,8 +830,10 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
             }
             let continue_run = continue_blocks.is_some();
 
-            // Tool results and injected blocks share one user message so
-            // the history never has two user turns in a row.
+            // Tool results and injected blocks share one user message
+            // rather than two consecutive ones. After an empty turn (no
+            // assistant blocks) the injected message follows the previous
+            // user message directly; providers merge the two.
             let mut user_blocks = tools_result;
             user_blocks.extend(continue_blocks.unwrap_or_default());
             if !user_blocks.is_empty() {

@@ -117,6 +117,19 @@ pub trait ChatMiddleware: Send + Sync {
     /// gate that never passes ends the run with
     /// [`crate::AbortReason::MaxIterations`].
     ///
+    /// If the step also completed tool calls, the injected blocks join
+    /// the tool results in one user message. If the turn produced no
+    /// assistant content at all, nothing separates the previous user
+    /// message from the injected one; providers merge consecutive user
+    /// turns.
+    ///
+    /// A gate on the child `Conversation` of a `SubAgentTool` with a
+    /// wrap-up configured can defeat it: continuing after the wrap-up
+    /// turn spends the last iteration (or runs into the hard timeout),
+    /// and the parent gets an abort instead of the partial summary.
+    /// Such a gate should budget for it, e.g. by tracking
+    /// `StepStarted { iteration }` against `max_iterations`.
+    ///
     /// Middlewares are asked in registration order and the first
     /// `Continue` wins; the rest are not asked for that turn. A
     /// `Continue` with no blocks counts as [`ContinueDecision::Stop`]:

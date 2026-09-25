@@ -33,8 +33,13 @@ and this project adheres to
   `max_iterations`, so a gate that never passes ends the run with
   `AbortReason::MaxIterations`. If the turn also completed tool calls
   (possible with `MaxTokens`), the injected blocks join the tool
-  results in one user message, so the history never has two user
-  messages in a row. The default returns `ContinueDecision::Stop`, so
+  results in one user message instead of following them as a second
+  one. A turn that produced no assistant content at all (an empty
+  `EndTurn`) leaves nothing between the previous user message and the
+  injected one; providers merge consecutive user turns. A gate in a
+  `SubAgentTool` child can override the wrap-up turn of
+  `SubAgentConfig::wrap_up`, so it should let `EndTurn` through once
+  the budget is nearly spent. The default returns `ContinueDecision::Stop`, so
   existing middlewares are unaffected. The rustdoc of
   `on_chat_request` now also explains how to track the current
   iteration: record `StepStarted { iteration }` from `on_chunk` and
