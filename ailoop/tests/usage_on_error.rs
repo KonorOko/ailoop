@@ -28,8 +28,8 @@ struct Reporter {
 
 #[async_trait]
 impl ToolDyn for Reporter {
-    fn name(&self) -> String {
-        "summarize".into()
+    fn name(&self) -> &str {
+        "summarize"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new("summarize", "stub", json!({"type":"object"}), vec![])

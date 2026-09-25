@@ -32,8 +32,8 @@ struct GetWeather;
 
 #[async_trait]
 impl ToolDyn for GetWeather {
-    fn name(&self) -> String {
-        "get_weather".into()
+    fn name(&self) -> &str {
+        "get_weather"
     }
     fn tool_definition(&self) -> ToolDefinition {
         definition("get_weather")
@@ -51,8 +51,8 @@ struct Hang {
 
 #[async_trait]
 impl ToolDyn for Hang {
-    fn name(&self) -> String {
-        "hang".into()
+    fn name(&self) -> &str {
+        "hang"
     }
     fn tool_definition(&self) -> ToolDefinition {
         definition("hang")

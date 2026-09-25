@@ -20,8 +20,8 @@ struct EnableTool {
 
 #[async_trait]
 impl ToolDyn for EnableTool {
-    fn name(&self) -> String {
-        "enable_tool".into()
+    fn name(&self) -> &str {
+        "enable_tool"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -49,8 +49,8 @@ struct Recording {
 
 #[async_trait]
 impl ToolDyn for Recording {
-    fn name(&self) -> String {
-        self.name.into()
+    fn name(&self) -> &str {
+        self.name
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(

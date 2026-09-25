@@ -156,8 +156,8 @@ struct EchoArgs;
 
 #[async_trait::async_trait]
 impl ToolDyn for EchoArgs {
-    fn name(&self) -> String {
-        "echo".into()
+    fn name(&self) -> &str {
+        "echo"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(

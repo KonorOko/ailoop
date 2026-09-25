@@ -672,8 +672,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ailoop_tools::ToolDyn for Echo {
-        fn name(&self) -> String {
-            "echo".into()
+        fn name(&self) -> &str {
+            "echo"
         }
         fn tool_definition(&self) -> ailoop_core::ToolDefinition {
             ailoop_core::ToolDefinition::new(

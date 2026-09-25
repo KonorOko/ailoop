@@ -67,8 +67,8 @@ struct BigTool;
 
 #[async_trait]
 impl ToolDyn for BigTool {
-    fn name(&self) -> String {
-        "big".into()
+    fn name(&self) -> &str {
+        "big"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(

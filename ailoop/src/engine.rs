@@ -1238,8 +1238,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolDyn for GetWeather {
-        fn name(&self) -> String {
-            "get_weather".into()
+        fn name(&self) -> &str {
+            "get_weather"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(
@@ -1881,8 +1881,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolDyn for ReportingWeather {
-        fn name(&self) -> String {
-            "get_weather".into()
+        fn name(&self) -> &str {
+            "get_weather"
         }
         fn tool_definition(&self) -> ToolDefinition {
             GetWeather.tool_definition()

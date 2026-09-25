@@ -24,8 +24,8 @@ struct Counter {
 
 #[async_trait]
 impl ToolDyn for Counter {
-    fn name(&self) -> String {
-        "bump".into()
+    fn name(&self) -> &str {
+        "bump"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new("bump", "stub", json!({"type":"object"}), vec![])

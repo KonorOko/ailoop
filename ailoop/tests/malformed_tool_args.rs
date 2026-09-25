@@ -21,8 +21,8 @@ struct Recording {
 
 #[async_trait]
 impl ToolDyn for Recording {
-    fn name(&self) -> String {
-        "write_file".into()
+    fn name(&self) -> &str {
+        "write_file"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(

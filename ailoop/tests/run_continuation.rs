@@ -59,8 +59,8 @@ struct Noop;
 
 #[async_trait::async_trait]
 impl ToolDyn for Noop {
-    fn name(&self) -> String {
-        "noop".into()
+    fn name(&self) -> &str {
+        "noop"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new("noop", "does nothing", json!({"type": "object"}), vec![])

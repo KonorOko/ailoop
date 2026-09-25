@@ -695,7 +695,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         T: ToolDyn + 'static,
     {
         let arc_tool = Arc::new(tool);
-        let name = arc_tool.name();
+        let name = arc_tool.name().to_string();
 
         match PromptSection::from_file(prompt_path) {
             Ok(section) => {
@@ -1306,8 +1306,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolDyn for FakeTool {
-        fn name(&self) -> String {
-            self.name.into()
+        fn name(&self) -> &str {
+            self.name
         }
         fn tool_definition(&self) -> ailoop_core::ToolDefinition {
             ailoop_core::ToolDefinition::new(

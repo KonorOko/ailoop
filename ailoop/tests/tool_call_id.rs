@@ -78,8 +78,8 @@ struct Echo {
 
 #[async_trait]
 impl ToolDyn for Echo {
-    fn name(&self) -> String {
-        "echo".into()
+    fn name(&self) -> &str {
+        "echo"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(

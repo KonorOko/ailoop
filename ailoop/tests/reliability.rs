@@ -59,8 +59,8 @@ struct CancelOnSecondCall {
 
 #[async_trait]
 impl ToolDyn for CancelOnSecondCall {
-    fn name(&self) -> String {
-        "cancel_on_second".into()
+    fn name(&self) -> &str {
+        "cancel_on_second"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -350,8 +350,8 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
     struct UnusedTool;
     #[async_trait]
     impl ToolDyn for UnusedTool {
-        fn name(&self) -> String {
-            "noop".into()
+        fn name(&self) -> &str {
+            "noop"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(
@@ -420,8 +420,8 @@ async fn tool_context_cancellation_mirrors_run_config() {
 
     #[async_trait]
     impl ToolDyn for ObserverTool {
-        fn name(&self) -> String {
-            "observer".into()
+        fn name(&self) -> &str {
+            "observer"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(

@@ -100,8 +100,8 @@ async fn run_final_text_reflects_last_assistant_turn_only() {
     struct GetWeather;
     #[async_trait]
     impl ToolDyn for GetWeather {
-        fn name(&self) -> String {
-            "get_weather".into()
+        fn name(&self) -> &str {
+            "get_weather"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(

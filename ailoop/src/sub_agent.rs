@@ -535,8 +535,8 @@ where
     M: CompletionModel + 'static,
     M::Error: ProviderError,
 {
-    fn name(&self) -> String {
-        self.name.clone()
+    fn name(&self) -> &str {
+        &self.name
     }
 
     fn tool_definition(&self) -> ToolDefinition {
@@ -1435,8 +1435,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolDyn for SlowLookup {
-        fn name(&self) -> String {
-            "lookup".into()
+        fn name(&self) -> &str {
+            "lookup"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(

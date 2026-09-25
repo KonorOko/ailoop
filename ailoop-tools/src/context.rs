@@ -400,8 +400,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolDyn for StubTool {
-        fn name(&self) -> String {
-            self.name.into()
+        fn name(&self) -> &str {
+            self.name
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(

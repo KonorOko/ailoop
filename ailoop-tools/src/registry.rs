@@ -97,10 +97,10 @@ pub trait Tool: Send + Sync + Sized {
 /// [`Tool`] + the blanket impl: typed args, no manual JSON parsing.
 #[async_trait::async_trait]
 pub trait ToolDyn: Send + Sync {
-    /// Wire-visible name. The blanket impl returns
-    /// `T::NAME.to_string()`; manual impls (MCP) return the engine-
-    /// facing composed name (e.g. `mcp__time__get_current_time`).
-    fn name(&self) -> String;
+    /// Wire-visible name. The blanket impl returns `T::NAME`; manual
+    /// impls (MCP) return the engine-facing composed name (e.g.
+    /// `mcp__time__get_current_time`), usually a field of the tool.
+    fn name(&self) -> &str;
     /// Tool definition the engine forwards to the provider.
     fn tool_definition(&self) -> ToolDefinition;
     /// Dispatch a tool call. Errors that originate inside the tool
@@ -120,8 +120,8 @@ pub trait ToolDyn: Send + Sync {
 
 #[async_trait::async_trait]
 impl<T: Tool> ToolDyn for T {
-    fn name(&self) -> String {
-        T::NAME.to_string()
+    fn name(&self) -> &str {
+        T::NAME
     }
 
     fn tool_definition(&self) -> ToolDefinition {
@@ -444,8 +444,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolDyn for TaggedTool {
-        fn name(&self) -> String {
-            self.name.into()
+        fn name(&self) -> &str {
+            self.name
         }
 
         fn tool_definition(&self) -> ToolDefinition {

@@ -39,8 +39,8 @@ struct EchoArgs;
 
 #[async_trait::async_trait]
 impl ToolDyn for EchoArgs {
-    fn name(&self) -> String {
-        "echo".into()
+    fn name(&self) -> &str {
+        "echo"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -61,8 +61,8 @@ struct LeakySecret;
 
 #[async_trait::async_trait]
 impl ToolDyn for LeakySecret {
-    fn name(&self) -> String {
-        "leaky".into()
+    fn name(&self) -> &str {
+        "leaky"
     }
     fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition::new(
@@ -460,8 +460,8 @@ async fn tool_args_callback_can_filter_by_name() {
 
     #[async_trait::async_trait]
     impl ToolDyn for OtherTool {
-        fn name(&self) -> String {
-            "other_tool".into()
+        fn name(&self) -> &str {
+            "other_tool"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(
@@ -481,8 +481,8 @@ async fn tool_args_callback_can_filter_by_name() {
 
     #[async_trait::async_trait]
     impl ToolDyn for Fetch {
-        fn name(&self) -> String {
-            "fetch".into()
+        fn name(&self) -> &str {
+            "fetch"
         }
         fn tool_definition(&self) -> ToolDefinition {
             ToolDefinition::new(

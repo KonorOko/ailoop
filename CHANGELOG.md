@@ -409,6 +409,12 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `ToolDyn::name` returns `&str` instead of `String`, like
+  `CompletionModel::name`. The registry and the engine read tool names
+  on every request and dispatch, and each call allocated a copy of a
+  name the tool already owns (`T::NAME` for derived tools, a field for
+  MCP and sub-agent tools).
+
 - `ToolRegistry::activate_tool` / `deactivate_tool` are `activate` /
   `deactivate`, matching `ToolActivation::activate` / `deactivate` (the
   handle tools use for the same operation at runtime) and the
@@ -815,6 +821,20 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Manual `ToolDyn` impls return a borrowed name:
+
+```rust
+// Before (1.0.0-rc.3)
+fn name(&self) -> String {
+    self.name.clone()
+}
+
+// After
+fn name(&self) -> &str {
+    &self.name
+}
+```
 
 Rename the `ToolRegistry` activation methods:
 
