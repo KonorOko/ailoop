@@ -120,6 +120,13 @@ pub trait ChatMiddleware: Send + Sync {
     /// every observer sees the same fully-mutated chunk. The mutated
     /// chunk is also what the engine itself uses to build assistant
     /// history and what the stream consumer ultimately receives.
+    ///
+    /// The fields of a [`StreamChunk::RunFinished`] may be rewritten,
+    /// but not its variant: if a middleware replaces it with another
+    /// chunk, the engine restores the original, so every run's stream
+    /// still ends in `RunFinished`.
+    ///
+    /// [`StreamChunk::RunFinished`]: crate::StreamChunk::RunFinished
     async fn on_chunk_mut(&self, chunk: &mut StreamChunk) {}
     /// Fired once per run after the engine emits its
     /// [`StreamChunk::RunFinished`]. Always fires — including aborted

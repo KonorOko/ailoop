@@ -155,14 +155,39 @@ async fn fire_abort_hooks(
     let run_id = &guard.run_id;
     let finish_reason = FinishReason::Aborted(reason);
     guard.finished(&finish_reason, &usage, &new_messages).await;
+    run_finished_chunk(middlewares, run_id, finish_reason, usage, new_messages).await
+}
+
+/// Builds the terminal [`StreamChunk::RunFinished`] and runs it through
+/// the middleware chain. A middleware may rewrite its fields in
+/// `on_chunk_mut`, but not its variant: if the chunk comes back as
+/// anything else, the original is restored, so every stream still ends
+/// in `RunFinished`.
+async fn run_finished_chunk(
+    middlewares: &[Arc<dyn ChatMiddleware>],
+    run_id: &RunId,
+    reason: FinishReason,
+    usage: Usage,
+    new_messages: Vec<Message>,
+) -> StreamChunk {
+    let original = (reason.clone(), usage, new_messages.clone());
     let mut chunk = StreamChunk::RunFinished {
         run_id: run_id.clone(),
-        reason: finish_reason,
+        reason,
         usage,
         new_messages,
     };
     for mw in middlewares {
         mw.on_chunk_mut(&mut chunk).await;
+    }
+    if !matches!(chunk, StreamChunk::RunFinished { .. }) {
+        let (reason, usage, new_messages) = original;
+        chunk = StreamChunk::RunFinished {
+            run_id: run_id.clone(),
+            reason,
+            usage,
+            new_messages,
+        };
     }
     for mw in middlewares {
         mw.on_chunk(&chunk).await;
@@ -1077,14 +1102,14 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
 
         guard.finished(&finish_reason, &usage_total, &new_messages).await;
 
-        let mut chunk = StreamChunk::RunFinished {
-            run_id: run_id.clone(),
-            reason: finish_reason,
-            usage: usage_total,
+        let chunk = run_finished_chunk(
+            &config.middlewares,
+            &run_id,
+            finish_reason,
+            usage_total,
             new_messages,
-        };
-        for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
-        for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+        )
+        .await;
         yield chunk;
     };
 

@@ -404,3 +404,80 @@ async fn run_outcome_final_text_reflects_chunk_mutation() {
     let outcome = conv.run("hi").await.expect("run should succeed");
     assert_eq!(outcome.final_text.as_deref(), Some("HELLO"));
 }
+
+/// Replaces the terminal `RunFinished` with an unrelated chunk. The
+/// engine must keep the variant: consumers (and `Conversation::run`)
+/// rely on every stream ending in `RunFinished`.
+struct ReplaceRunFinished;
+
+#[async_trait::async_trait]
+impl ChatMiddleware for ReplaceRunFinished {
+    async fn on_chunk_mut(&self, chunk: &mut StreamChunk) {
+        if matches!(chunk, StreamChunk::RunFinished { .. }) {
+            *chunk = StreamChunk::TextDelta {
+                delta: "replaced".into(),
+            };
+        }
+    }
+}
+
+#[tokio::test]
+async fn replacing_run_finished_variant_is_ignored() {
+    let model = ScriptedModel::new([vec![
+        StreamChunk::TextDelta {
+            delta: "hello".into(),
+        },
+        StreamChunk::TurnFinished {
+            reason: FinishReason::EndTurn,
+            usage: Usage::default(),
+            service_tier: None,
+        },
+    ]]);
+
+    let mut conv = Conversation::builder(model)
+        .middleware(Arc::new(ReplaceRunFinished))
+        .build()
+        .expect("builder should succeed");
+
+    let outcome = conv.run("hi").await.expect("run should succeed");
+    assert!(
+        matches!(outcome.finish_reason, FinishReason::EndTurn),
+        "got {:?}",
+        outcome.finish_reason
+    );
+    assert_eq!(outcome.final_text.as_deref(), Some("hello"));
+    assert_eq!(conv.history_messages().len(), 2);
+}
+
+#[tokio::test]
+async fn replacing_run_finished_variant_is_ignored_on_abort() {
+    struct Deny;
+
+    #[async_trait::async_trait]
+    impl ChatMiddleware for Deny {
+        async fn on_run_started(
+            &self,
+            _run_id: &ailoop::RunId,
+            _messages: &[Message],
+            _config: &RunConfig,
+        ) -> ailoop::HookAction {
+            ailoop::HookAction::Terminate {
+                reason: "stop".into(),
+            }
+        }
+    }
+
+    let model = ScriptedModel::new(Vec::<Vec<StreamChunk>>::new());
+    let mut conv = Conversation::builder(model)
+        .middleware(Arc::new(Deny))
+        .middleware(Arc::new(ReplaceRunFinished))
+        .build()
+        .expect("builder should succeed");
+
+    let outcome = conv.run("hi").await.expect("aborts are Ok");
+    assert!(
+        matches!(outcome.finish_reason, FinishReason::Aborted(_)),
+        "got {:?}",
+        outcome.finish_reason
+    );
+}
