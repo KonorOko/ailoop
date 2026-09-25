@@ -146,10 +146,13 @@ async fn run_to_finish(
 async fn concurrent_runs_sharing_a_gate_do_not_mix_context() {
     let seen: Arc<Mutex<Vec<ApprovalRequest>>> = Arc::default();
     let seen_cb = seen.clone();
-    let gate = Arc::new(ApprovalMiddleware::for_named(["delete_file"], move |req| {
-        seen_cb.lock().unwrap().push(req);
-        async { ToolDecision::Continue }
-    }));
+    let gate = Arc::new(ApprovalMiddleware::approve_named(
+        ["delete_file"],
+        move |req| {
+            seen_cb.lock().unwrap().push(req);
+            async { ToolDecision::Continue }
+        },
+    ));
 
     let barrier = Arc::new(Barrier::new(2));
     let model_a = BarrierModel {
@@ -188,6 +191,6 @@ async fn concurrent_runs_sharing_a_gate_do_not_mix_context() {
             req.run_id,
             req.messages
         );
-        assert!(req.tags.is_empty(), "for_named does not know tool tags");
+        assert!(req.tags.is_empty(), "approve_named does not know tool tags");
     }
 }

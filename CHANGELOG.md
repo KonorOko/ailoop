@@ -409,6 +409,10 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `ApprovalMiddleware::for_named` is `ApprovalMiddleware::approve_named`,
+  so both constructors say what they gate: `approve_all(callback)` and
+  `approve_named(names, callback)`.
+
 - `Conversation::history_messages()` is `messages()` and
   `Conversation::history_push(message)` is `push_message(message)`
   (the new `history_extend` is `extend_messages`). The `history_`
@@ -570,7 +574,7 @@ and this project adheres to
 - Approval callbacks take an `ApprovalRequest` instead of
   `(String, Value)`: `ConversationBuilder::with_approval`,
   `with_approval_for_tags`, `with_approval_for_all`,
-  `ApprovalMiddleware::approve_all` and `ApprovalMiddleware::for_named`.
+  `ApprovalMiddleware::approve_all` and `ApprovalMiddleware::approve_named`.
   A callback that only saw the tool name and arguments could not tell
   a reasonable call from a dangerous one: `rm -rf build/` is fine after
   "clean the build" and alarming after "summarize this file". The
@@ -583,7 +587,7 @@ and this project adheres to
   The messages are copied once per step into an `Arc<[Message]>` shared
   by every gated call of that step, and only when a gate is installed.
   `tags` is filled for gates installed through the builder, which sees
-  the whole tool catalog; `approve_all` and `for_named` leave it
+  the whole tool catalog; `approve_all` and `approve_named` leave it
   empty. The call id is not included yet.
 
 - `Conversation::run`, `run_with_options`, `stream`,
@@ -747,7 +751,7 @@ and this project adheres to
   actions was silently bypassed. The gated set is now resolved over
   the whole registered catalog, so the callback fires for those tools
   exactly as for tools active from the start. `with_approval_for_all`
-  and `ApprovalMiddleware::for_named` were not affected. **Behavior
+  and `ApprovalMiddleware::approve_named` were not affected. **Behavior
   change:** tools filtered out by `with_capabilities` now also go
   through the callback if they get activated; previously the docs
   stated they never triggered it.
@@ -806,6 +810,16 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Rename `ApprovalMiddleware::for_named`:
+
+```rust
+// Before (1.0.0-rc.3)
+ApprovalMiddleware::for_named(["delete_file"], gate)
+
+// After
+ApprovalMiddleware::approve_named(["delete_file"], gate)
+```
 
 Rename the `Conversation` history accessors:
 
@@ -1059,7 +1073,7 @@ arguments from its fields:
 ```
 
 The same applies to `with_approval_for_tags`, `with_approval_for_all`,
-`ApprovalMiddleware::approve_all` and `ApprovalMiddleware::for_named`.
+`ApprovalMiddleware::approve_all` and `ApprovalMiddleware::approve_named`.
 
 A failed run returns `RunError`. `?` into `EngineError` still compiles;
 direct matches go through `.kind()`:

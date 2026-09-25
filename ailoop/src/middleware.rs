@@ -265,7 +265,7 @@ pub struct ApprovalRequest {
     /// Tags the tool declares. Filled when the gate was installed with
     /// a `ConversationBuilder::approval*` method; empty for
     /// [`ApprovalMiddleware::approve_all`] and
-    /// [`ApprovalMiddleware::for_named`], which do not see the
+    /// [`ApprovalMiddleware::approve_named`], which do not see the
     /// registry.
     pub tags: Arc<[ToolTag]>,
     /// Context sent to the model on the step that produced this call,
@@ -320,7 +320,7 @@ enum GatePolicy {
 /// engine.
 ///
 /// Construct via [`approve_all`](Self::approve_all) for an unconditional
-/// gate, or via [`for_named`](Self::for_named) for an explicit set of
+/// gate, or via [`approve_named`](Self::approve_named) for an explicit set of
 /// tool names. For tag-based gating, use the builder method
 /// `ConversationBuilder::approval`.
 ///
@@ -355,7 +355,7 @@ impl ApprovalMiddleware {
     /// Matching is by exact wire name at call time, independent of
     /// whether the tool is currently active — so listing a deferred
     /// tool here gates it once a handler activates it mid-run.
-    pub fn for_named<I, S, F, Fut>(names: I, callback: F) -> Self
+    pub fn approve_named<I, S, F, Fut>(names: I, callback: F) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,

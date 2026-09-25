@@ -70,7 +70,7 @@ async fn approve_all_fires_for_every_tool() {
 async fn for_named_only_fires_for_listed_tools() {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_cb = counter.clone();
-    let mw = ApprovalMiddleware::for_named(["delete_file"], move |_req| {
+    let mw = ApprovalMiddleware::approve_named(["delete_file"], move |_req| {
         let c = counter_cb.clone();
         async move {
             c.fetch_add(1, Ordering::SeqCst);
@@ -104,7 +104,7 @@ async fn for_named_only_fires_for_listed_tools() {
 
 #[tokio::test]
 async fn for_named_returns_continue_for_non_gated() {
-    let mw = ApprovalMiddleware::for_named(["delete_file"], |_req| async move {
+    let mw = ApprovalMiddleware::approve_named(["delete_file"], |_req| async move {
         ToolDecision::Skip {
             reason: "should-not-fire".into(),
         }
