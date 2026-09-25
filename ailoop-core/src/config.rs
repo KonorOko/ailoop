@@ -11,10 +11,12 @@ use crate::middleware::ChatMiddleware;
 
 /// Per-run configuration consumed by the engine entry point.
 ///
-/// The defaults shipped via [`RunConfig::default`] are tuned for
-/// short interactive turns (10 iterations, 4096 max output tokens, no
-/// timeout). Use struct-update syntax to override what you need:
-/// `RunConfig { max_iterations: 20, ..Default::default() }`. The
+/// The defaults shipped via [`RunConfig::default`] are 25 iterations,
+/// 4096 max output tokens and no timeout. They are safety brakes, not a
+/// budget: in production, set `max_iterations` and `timeout`
+/// explicitly and add a tool-call cap (`MaxToolCalls` in the `ailoop`
+/// crate). Use struct-update syntax to override what you need:
+/// `RunConfig { max_iterations: 10, ..Default::default() }`. The
 /// struct is `#[non_exhaustive]`, so external callers must always go
 /// through `Default` (or [`RunConfig::new`]) to construct it.
 #[non_exhaustive]
@@ -31,6 +33,18 @@ pub struct RunConfig {
     /// `chat_stream` call plus the tool calls it triggers. The cap
     /// prevents runaway tool-use loops; pair with an [`crate::ChatMiddleware`]
     /// such as `AntiLoop` for content-aware loop detection.
+    ///
+    /// Defaults to 25. This is a safety brake, not a budget: it bounds
+    /// how long a runaway loop can go on, not what a run costs (a turn
+    /// can spend any number of tokens). Every
+    /// [`crate::ContinueDecision::Continue`] from `on_turn_end` counts as
+    /// an iteration. In production, set it explicitly for your workload,
+    /// together with [`Self::timeout`] and a tool-call cap
+    /// (`MaxToolCalls` in the `ailoop` crate).
+    ///
+    /// The default also applies to sub-agents: a `SubAgentTool` child
+    /// with no explicit cap (via `SubAgentConfig::max_iterations` or
+    /// its own conversation) runs with 25 iterations too.
     pub max_iterations: usize,
     /// Default `max_tokens` for every per-turn [`crate::ChatRequest`]
     /// the engine builds. User-supplied middlewares can override this
@@ -67,7 +81,7 @@ impl Default for RunConfig {
     fn default() -> Self {
         Self {
             system_prompt: None,
-            max_iterations: 10,
+            max_iterations: 25,
             max_tokens: 4096,
             middlewares: vec![],
             run_id: None,
@@ -88,5 +102,18 @@ impl RunConfig {
             max_iterations,
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Anchors the pre-1.0 default: raising or lowering it changes the
+    /// per-run cost ceiling for everyone who does not set it, so it
+    /// must be a deliberate, changelogged change.
+    #[test]
+    fn run_config_default_max_iterations_is_25() {
+        assert_eq!(RunConfig::default().max_iterations, 25);
     }
 }

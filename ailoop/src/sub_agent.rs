@@ -107,7 +107,9 @@ pub struct SubAgentConfig {
     /// iterations (n)): <partial text>"` with `is_error: true`, so
     /// whatever the child wrote before the cap reaches the parent.
     /// With [`Self::wrap_up`] set, the last allowed iteration becomes
-    /// a no-tools summary turn instead.
+    /// a no-tools summary turn instead. `None` leaves the child at the
+    /// engine default (25 iterations, see
+    /// [`RunConfig::max_iterations`](ailoop_core::RunConfig::max_iterations)).
     pub max_iterations: Option<usize>,
     /// Per-turn `max_tokens` override for every [`ChatRequest`] the
     /// child run builds. Mapped to [`RunOptions::max_tokens`], so it
@@ -1126,7 +1128,7 @@ mod tests {
             .await;
 
         // RunConfig defaults — see `ailoop-core/src/config.rs`.
-        assert_eq!(*max_iterations.lock().unwrap(), Some(10));
+        assert_eq!(*max_iterations.lock().unwrap(), Some(25));
         assert_eq!(*max_tokens.lock().unwrap(), Some(4096));
         assert_eq!(
             *timeout.lock().unwrap(),

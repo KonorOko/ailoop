@@ -155,9 +155,10 @@ pub struct RunOptions {
     /// [`ailoop_core::FinishReason::Aborted`] carrying
     /// [`ailoop_core::AbortReason::MaxIterations`] — **never** an `Err`;
     /// the partial turns are kept in history. `None` keeps the engine
-    /// default. Override per-run when a
+    /// default (25). Override per-run when a
     /// particular agentic task is known to be longer-running than the
-    /// default would allow.
+    /// default would allow. This is a safety brake, not a budget; see
+    /// [`RunConfig::max_iterations`].
     pub max_iterations: Option<usize>,
     /// Per-run `max_tokens` cap for every `ChatRequest` of this run.
     ///
