@@ -409,6 +409,13 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `PromptSection::with_name(name, content)` is
+  `PromptSection::named(name, content)`: it is a constructor, next to
+  `PromptSection::new(content)`, and `with_*` is kept for methods that
+  modify a value. `Prompt::sections()` returns `&[PromptSection]`
+  instead of `&Vec<PromptSection>`, so the storage behind it can change
+  without breaking callers.
+
 - `ToolDyn::name` returns `&str` instead of `String`, like
   `CompletionModel::name`. The registry and the engine read tool names
   on every request and dispatch, and each call allocated a copy of a
@@ -821,6 +828,16 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Build named prompt sections with `named`:
+
+```rust
+// Before (1.0.0-rc.3)
+PromptSection::with_name("Tone", "Be concise.")
+
+// After
+PromptSection::named("Tone", "Be concise.")
+```
 
 Manual `ToolDyn` impls return a borrowed name:
 
