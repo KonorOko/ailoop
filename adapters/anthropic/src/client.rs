@@ -3,7 +3,7 @@ use std::env::VarError;
 use ailoop_core::CompletionClient;
 use reqwest::Client as HttpClient;
 
-use crate::model::AnthropicModel;
+use crate::model::AnthropicChatModel;
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1/messages";
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -14,7 +14,7 @@ const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 /// endpoints), the `anthropic-version` to send on every request, and
 /// the comma-joined `anthropic-beta` feature list. Cheap to clone —
 /// the inner `reqwest::Client` is reference-counted, so a single
-/// configured instance can fan out across many [`AnthropicModel`]s.
+/// configured instance can fan out across many [`AnthropicChatModel`]s.
 #[derive(Clone)]
 pub struct AnthropicClient {
     pub(crate) http_client: HttpClient,
@@ -80,19 +80,19 @@ impl AnthropicClient {
         self
     }
 
-    /// Take ownership of the client and produce an [`AnthropicModel`]
+    /// Take ownership of the client and produce an [`AnthropicChatModel`]
     /// bound to `model` (e.g. `"claude-sonnet-4-6"`). Use when one
     /// client maps to one model; for one-to-many use
     /// [`CompletionClient::completion_model`] which clones internally.
-    pub fn model(self, model: impl Into<String>) -> AnthropicModel {
-        AnthropicModel::new(self, model)
+    pub fn model(self, model: impl Into<String>) -> AnthropicChatModel {
+        AnthropicChatModel::new(self, model)
     }
 }
 
 impl CompletionClient for AnthropicClient {
-    type Model = AnthropicModel;
+    type Model = AnthropicChatModel;
 
     fn completion_model(&self, model_name: impl Into<String>) -> Self::Model {
-        AnthropicModel::new(self.clone(), model_name.into())
+        AnthropicChatModel::new(self.clone(), model_name.into())
     }
 }

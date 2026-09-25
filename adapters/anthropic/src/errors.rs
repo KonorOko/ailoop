@@ -92,7 +92,7 @@ fn is_prompt_too_long(message: &str) -> bool {
     message.to_ascii_lowercase().contains("prompt is too long")
 }
 
-/// Failure surface of [`AnthropicModel::chat_stream`](crate::AnthropicModel)
+/// Failure surface of [`AnthropicChatModel::chat_stream`](crate::AnthropicChatModel)
 /// and the surrounding HTTP / SSE plumbing.
 ///
 /// Wrapped by the façade as

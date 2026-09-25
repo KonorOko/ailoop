@@ -22,12 +22,12 @@ use futures::stream::BoxStream;
 /// [`CompletionClient`]: ailoop_core::CompletionClient
 /// [`StreamChunk::TurnFinished`]: ailoop_core::StreamChunk::TurnFinished
 #[derive(Clone)]
-pub struct AnthropicModel {
+pub struct AnthropicChatModel {
     client: AnthropicClient,
     model: String,
 }
 
-impl AnthropicModel {
+impl AnthropicChatModel {
     /// Bind `client` to a specific `model` id. Prefer
     /// [`AnthropicClient::model`] for the one-client-one-model case
     /// — this constructor is for adapter authors composing their own
@@ -41,7 +41,7 @@ impl AnthropicModel {
 }
 
 #[async_trait::async_trait]
-impl CompletionModel for AnthropicModel {
+impl CompletionModel for AnthropicChatModel {
     type Error = AnthropicError;
 
     fn name(&self) -> &str {

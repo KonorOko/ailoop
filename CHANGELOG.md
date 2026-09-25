@@ -409,6 +409,12 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `AnthropicModel` is `AnthropicChatModel`, matching
+  `AzureOpenAIChatModel`. Both adapters now name the model type after
+  the API it drives, which leaves room for other endpoints of the same
+  provider without an asymmetric name. `AnthropicClient::model` and
+  `CompletionClient::completion_model` return it as before.
+
 - `AzureOpenAIError::Provider` carries `kind: AzureOpenAIApiErrorKind`
   instead of the raw `error_type: String`, mirroring
   `AnthropicError::Provider`. The kind comes from the event's `code`
@@ -851,6 +857,16 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Rename the Anthropic model type:
+
+```rust
+// Before (1.0.0-rc.3)
+let model: AnthropicModel = client.model("claude-sonnet-4-6");
+
+// After
+let model: AnthropicChatModel = client.model("claude-sonnet-4-6");
+```
 
 Match the typed kind on Azure mid-stream errors:
 
