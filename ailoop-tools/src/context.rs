@@ -1,5 +1,5 @@
 //! Per-dispatch context handed to every [`Tool`](crate::Tool) /
-//! [`ToolDyn`](crate::ToolDyn) call.
+//! [`ToolDyn`] call.
 //!
 //! [`ToolContext`] carries the [`RunId`] and [`StepId`] of the current
 //! dispatch plus a [`ToolActivation`] handle into the per-run active

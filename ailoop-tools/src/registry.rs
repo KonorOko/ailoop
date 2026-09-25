@@ -194,7 +194,7 @@ impl ToolRegistry {
     /// Return a shared snapshot of the catalog (every registered
     /// tool, by name, in registration order). The engine takes one
     /// at the start of each run and hands it to every per-dispatch
-    /// [`ToolActivation`] so that `list_*` reads are cheap and don't
+    /// [`ToolActivation`](crate::ToolActivation) so that `list_*` reads are cheap and don't
     /// reach back into the registry.
     pub fn catalog_arc(&self) -> Arc<IndexMap<String, Arc<dyn ToolDyn>>> {
         Arc::new(self.tools.clone())
@@ -202,7 +202,7 @@ impl ToolRegistry {
 
     /// Build a fresh per-run active-set handle initialised from the
     /// current active set. Returns the `Arc<Mutex<...>>` the engine
-    /// hands to every [`ToolActivation`] for this run; mutations
+    /// hands to every [`ToolActivation`](crate::ToolActivation) for this run; mutations
     /// inside a tool handler are visible to the engine on the next
     /// turn without touching the underlying registry.
     pub fn snapshot_active(&self) -> Arc<Mutex<IndexSet<String>>> {
