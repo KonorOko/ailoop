@@ -116,8 +116,8 @@ pub enum EngineError<E: std::error::Error> {
 /// # where M: ailoop::CompletionModel + Send + Sync, M::Error: ailoop::ProviderError {
 /// if let Err(err) = chat.run("deploy the service").await {
 ///     eprintln!("run failed: {err}");
-///     let (_cause, partial) = err.into_parts();
-///     chat.history_extend(partial);
+///     let parts = err.into_parts();
+///     chat.history_extend(parts.partial_messages);
 /// }
 /// # }
 /// ```
@@ -192,11 +192,39 @@ impl<E: std::error::Error> RunError<E> {
         &self.partial_messages
     }
 
-    /// Splits the error into its cause and its partial messages. Read
-    /// [`usage`](Self::usage) first if you need it.
-    pub fn into_parts(self) -> (EngineError<E>, Vec<Message>) {
-        (self.kind, self.partial_messages)
+    /// Splits the error into owned parts: its cause, its usage and its
+    /// partial messages.
+    pub fn into_parts(self) -> RunErrorParts<E> {
+        RunErrorParts {
+            kind: self.kind,
+            usage: self.usage,
+            partial_messages: self.partial_messages,
+        }
     }
+}
+
+/// The owned parts of a [`RunError`], returned by
+/// [`RunError::into_parts`].
+///
+/// `#[non_exhaustive]` so a later release can add parts; destructure
+/// it with `..`:
+///
+/// ```no_run
+/// # fn demo<E: std::error::Error>(err: ailoop::RunError<E>) {
+/// let ailoop::RunErrorParts { kind, partial_messages, .. } = err.into_parts();
+/// # }
+/// ```
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct RunErrorParts<E: std::error::Error> {
+    /// What made the run fail.
+    pub kind: EngineError<E>,
+    /// What the run spent before failing. See the
+    /// [`RunError` docs](RunError#usage).
+    pub usage: Usage,
+    /// Messages of the steps completed before the failure. See the
+    /// [`RunError` docs](RunError#partial-messages).
+    pub partial_messages: Vec<Message>,
 }
 
 impl<E: std::error::Error> std::fmt::Display for RunError<E> {

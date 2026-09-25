@@ -77,7 +77,6 @@ and this project adheres to
   finished turn) even though that step is left out of
   `partial_messages`. Errors raised before the run starts (history
   compaction in `Conversation::stream_with_options`) carry zero usage.
-  `into_parts` is unchanged.
 
 - `Usage` derives `PartialEq` and `Eq`.
 
@@ -114,7 +113,9 @@ and this project adheres to
 - `RunError<E>` (re-exported from `ailoop`): the error of a failed run.
   It wraps the `EngineError` cause (`kind()`, `into_kind()`) and the
   messages of the steps the run completed before failing
-  (`partial_messages()`, `into_parts()`). Until now those steps were
+  (`partial_messages()`). `into_parts()` returns a `RunErrorParts`
+  with the three owned parts (`kind`, `usage`, `partial_messages`);
+  it is `#[non_exhaustive]`, so destructure it with `..`. Until now those steps were
   lost when a run failed: the history is rolled back on `Err`, so the
   record of tools that already ran (writes, API calls) disappeared and
   the next turn could repeat them. The partial list is exactly the
