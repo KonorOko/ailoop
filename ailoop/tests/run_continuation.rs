@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 const RETRY_PROMPT: &str = "tests are failing, fix them";
 
-fn usage(input: u32, output: u32) -> Usage {
+fn usage(input: u64, output: u64) -> Usage {
     let mut usage = Usage::default();
     usage.input_tokens = input;
     usage.output_tokens = output;

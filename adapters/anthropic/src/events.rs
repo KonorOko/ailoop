@@ -83,15 +83,15 @@ pub(crate) struct MessageStartPayload {
 
 #[derive(Default, Deserialize)]
 pub(crate) struct MessageStartUsage {
-    pub input_tokens: u32,
+    pub input_tokens: u64,
     #[serde(default)]
-    pub cache_read_input_tokens: u32,
+    pub cache_read_input_tokens: u64,
     /// Legacy flat counter. The API still emits it alongside the newer
     /// `cache_creation` object so callers that only read this field keep
     /// working; when the breakdown is present, this equals
     /// `ephemeral_5m_input_tokens + ephemeral_1h_input_tokens`.
     #[serde(default)]
-    pub cache_creation_input_tokens: u32,
+    pub cache_creation_input_tokens: u64,
     /// New TTL-broken-down counter. `None` on older API versions.
     #[serde(default)]
     pub cache_creation: Option<CacheCreationBreakdown>,
@@ -109,9 +109,9 @@ pub(crate) struct MessageStartUsage {
 #[derive(Default, Deserialize)]
 pub(crate) struct CacheCreationBreakdown {
     #[serde(default)]
-    pub ephemeral_5m_input_tokens: u32,
+    pub ephemeral_5m_input_tokens: u64,
     #[serde(default)]
-    pub ephemeral_1h_input_tokens: u32,
+    pub ephemeral_1h_input_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -121,14 +121,14 @@ pub(crate) struct MessageDeltaPayload {
 
 #[derive(Default, Deserialize)]
 pub(crate) struct UsageDelta {
-    pub output_tokens: u32,
+    pub output_tokens: u64,
     /// Anthropic may include cache fields in `message_delta.usage` on
     /// some plans / beta paths; keep them defaulted so older fixtures
     /// without these fields keep deserializing.
     #[serde(default)]
-    pub cache_read_input_tokens: u32,
+    pub cache_read_input_tokens: u64,
     #[serde(default)]
-    pub cache_creation_input_tokens: u32,
+    pub cache_creation_input_tokens: u64,
     #[serde(default)]
     pub cache_creation: Option<CacheCreationBreakdown>,
 }

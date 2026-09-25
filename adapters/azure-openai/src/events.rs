@@ -85,8 +85,8 @@ pub(crate) struct FunctionDelta {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct Usage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
     #[serde(default)]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
     #[serde(default)]
@@ -96,7 +96,7 @@ pub(crate) struct Usage {
 #[derive(Debug, Deserialize)]
 pub(crate) struct PromptTokensDetails {
     #[serde(default)]
-    pub cached_tokens: u32,
+    pub cached_tokens: u64,
 }
 
 /// o-series / gpt-5 reasoning token breakdown nested under `usage`. Zero
@@ -106,7 +106,7 @@ pub(crate) struct PromptTokensDetails {
 #[derive(Debug, Deserialize)]
 pub(crate) struct CompletionTokensDetails {
     #[serde(default)]
-    pub reasoning_tokens: u32,
+    pub reasoning_tokens: u64,
 }
 
 #[cfg(test)]

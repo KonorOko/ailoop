@@ -10,6 +10,17 @@ and this project adheres to
 
 ### Added
 
+- `Usage::new(input_tokens, output_tokens)` builds a `Usage` with the
+  other counters at zero. `Usage` is `#[non_exhaustive]`, so a tool
+  outside the crate that reports its own spend through
+  `ToolContext::report_usage` had to start from `Usage::default()` and
+  assign fields one by one; `ctx.report_usage(Usage::new(1_200, 350))`
+  now does it in one call. It is a `const fn`.
+
+- `Usage` implements `Sum` (over `Usage` and `&Usage`), so per-turn
+  values collected in a middleware add up with `.iter().sum()`. It
+  saturates like `+`.
+
 - `ToolRegistry` implements `Default` (an empty registry, same as
   `ToolRegistry::new()`), so it works with `..Default::default()`,
   `#[derive(Default)]` on structs that hold one, and
@@ -421,6 +432,24 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- The seven token counters on `Usage` (`input_tokens`,
+  `output_tokens`, `cached_input_tokens`, `cache_creation_input_tokens`,
+  `cache_creation_5m_tokens`, `cache_creation_1h_tokens`,
+  `reasoning_tokens`) are `u64` instead of `u32`. A single turn never
+  gets near `u32::MAX`, but `Usage` is also an accumulator: the run
+  total, the `UsageSink` that adds nested sub-agents, and whatever an
+  application sums across runs (per-tenant billing over weeks). About
+  4.29 billion tokens is reachable in those totals. `u64` removes the
+  limit at no real cost (`Usage` is a 56-byte `Copy` struct). `Usage`
+  has no serde derive, so there is no stored format to migrate, and
+  `JsonTracer` / `TracingMiddleware` emit the same numbers. Request
+  parameters (`max_tokens` on `ChatRequest`, `RunConfig`,
+  `SubAgentConfig`, `SummarizeStrategy`) stay `u32`: the provider caps
+  them.
+
+- `OnlineCalibratedTokenizer::observe` takes `observed_tokens: u64`, so
+  a `Usage` field passes straight through without a cast.
+
 - The `Api` and `Provider` variants of `AnthropicError` and
   `AzureOpenAIError` are `#[non_exhaustive]`, so the adapters can
   surface more of the response later (a request id, the raw error
@@ -760,6 +789,27 @@ and this project adheres to
 
 ### Fixed
 
+- A panic on one thread while it held an internal lock no longer makes
+  every later use of that lock panic too. The shared state behind
+  `UsageSink`, `ToolActivation`, the engine's active-tool snapshot,
+  `SubAgentTool`'s wrap-up budget, `OnlineCalibratedTokenizer`,
+  `CachingTokenProvider`, `InMemoryHistoryStore` and `ScriptedModel`
+  used `expect` on the lock, so a single panic (a tool, a hook, or the
+  old `Usage` overflow) poisoned it and the next report, activation or
+  request panicked in turn, taking down unrelated runs that shared the
+  handle. They now recover the guard from a poisoned lock, as
+  `MaxToolCalls`, `AntiLoop` and `ApprovalMiddleware` already did. The
+  data they protect (a total, a set of names, a ratio, a cached value)
+  is replaced or updated in one step, so it is still consistent.
+
+- Adding `Usage` values (`+`, `+=`) saturates each counter at
+  `u64::MAX` instead of overflowing. Before, an overflow panicked in
+  debug builds, and inside `UsageSink::report` it did so with the lock
+  held, poisoning it for every later report; in release builds it
+  wrapped around silently and left a wrong total, which is worse for
+  billing. `Add` cannot return an error, and a counter stuck at the
+  maximum is harmless.
+
 - The Azure OpenAI adapter silently dropped mid-stream error events.
   When the service fails after the response has started, it sends
   `data: {"error":{...}}` in place of a chunk. The adapter parsed that
@@ -891,6 +941,31 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Code that stores `Usage` counters in `u32` converts them, or widens its
+own type:
+
+```rust
+// Before (1.0.0-rc.3)
+let input: u32 = usage.input_tokens;
+
+// After
+let input: u64 = usage.input_tokens;
+// or, where a u32 is required:
+let input = u32::try_from(usage.input_tokens).unwrap_or(u32::MAX);
+```
+
+`OnlineCalibratedTokenizer::observe` takes a `u64`. Passing a `Usage`
+field compiles unchanged; a count kept in `u32` needs a widening:
+
+```rust
+// Before (1.0.0-rc.3)
+let billed: u32 = /* ... */;
+tokenizer.observe(chars, billed);
+
+// After
+tokenizer.observe(chars, u64::from(billed));
+```
 
 Add `..` when destructuring adapter `Api` / `Provider` errors:
 

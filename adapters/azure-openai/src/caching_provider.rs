@@ -1,6 +1,6 @@
 //! [`CachingTokenProvider`]: TTL-bounded cache around any [`TokenProvider`].
 
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -75,13 +75,23 @@ impl<P: TokenProvider> CachingTokenProvider<P> {
     fn fresh_until(&self, fetched_at: Instant) -> Instant {
         fetched_at + self.ttl.saturating_sub(self.refresh_skew)
     }
+
+    // Poisoning only means another thread panicked mid-update; the
+    // cache is replaced whole, so it is still consistent.
+    fn read_cache(&self) -> RwLockReadGuard<'_, Option<(String, Instant)>> {
+        self.cached.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write_cache(&self) -> RwLockWriteGuard<'_, Option<(String, Instant)>> {
+        self.cached.write().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 #[async_trait]
 impl<P: TokenProvider> TokenProvider for CachingTokenProvider<P> {
     async fn token(&self) -> Result<String, AzureOpenAIError> {
         {
-            let guard = self.cached.read().expect("cache lock poisoned");
+            let guard = self.read_cache();
             if let Some((token, fetched_at)) = guard.as_ref()
                 && Instant::now() < self.fresh_until(*fetched_at)
             {
@@ -91,7 +101,7 @@ impl<P: TokenProvider> TokenProvider for CachingTokenProvider<P> {
 
         let token = self.inner.token().await?;
         let now = Instant::now();
-        *self.cached.write().expect("cache lock poisoned") = Some((token.clone(), now));
+        *self.write_cache() = Some((token.clone(), now));
         Ok(token)
     }
 }
