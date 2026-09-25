@@ -191,7 +191,7 @@ where
 /// is strictly more informative.
 fn apply_cache_creation(
     usage: &mut Usage,
-    flat_input_tokens: u32,
+    flat_input_tokens: u64,
     breakdown: Option<&crate::events::CacheCreationBreakdown>,
 ) {
     match breakdown {

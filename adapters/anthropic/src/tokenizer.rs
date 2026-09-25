@@ -113,12 +113,14 @@ impl OnlineCalibratedTokenizer {
     /// Update the EMA with a single (text length, observed tokens)
     /// sample. `text_chars` is the byte length of the text the
     /// provider tokenized; `observed_tokens` is the tokens it billed
-    /// for that text. Samples with `text_chars == 0` are ignored
-    /// (division by zero, no signal anyway).
+    /// for that text, the same type as the `Usage` counters, so
+    /// `usage.input_tokens` passes straight through. Samples with
+    /// `text_chars == 0` are ignored (division by zero, no signal
+    /// anyway).
     ///
     /// Thread-safe. Multiple middlewares can call this concurrently;
     /// the underlying lock serializes them.
-    pub fn observe(&self, text_chars: usize, observed_tokens: u32) {
+    pub fn observe(&self, text_chars: usize, observed_tokens: u64) {
         if text_chars == 0 {
             return;
         }

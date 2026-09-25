@@ -13,7 +13,7 @@ use ailoop_core::testing::{ScriptedError, ScriptedModel, ScriptedTurn};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-fn tokens(input: u32, output: u32) -> Usage {
+fn tokens(input: u64, output: u64) -> Usage {
     let mut u = Usage::default();
     u.input_tokens = input;
     u.output_tokens = output;

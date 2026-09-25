@@ -421,6 +421,24 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- The seven token counters on `Usage` (`input_tokens`,
+  `output_tokens`, `cached_input_tokens`, `cache_creation_input_tokens`,
+  `cache_creation_5m_tokens`, `cache_creation_1h_tokens`,
+  `reasoning_tokens`) are `u64` instead of `u32`. A single turn never
+  gets near `u32::MAX`, but `Usage` is also an accumulator: the run
+  total, the `UsageSink` that adds nested sub-agents, and whatever an
+  application sums across runs (per-tenant billing over weeks). About
+  4.29 billion tokens is reachable in those totals. `u64` removes the
+  limit at no real cost (`Usage` is a 56-byte `Copy` struct). `Usage`
+  has no serde derive, so there is no stored format to migrate, and
+  `JsonTracer` / `TracingMiddleware` emit the same numbers. Request
+  parameters (`max_tokens` on `ChatRequest`, `RunConfig`,
+  `SubAgentConfig`, `SummarizeStrategy`) stay `u32`: the provider caps
+  them.
+
+- `OnlineCalibratedTokenizer::observe` takes `observed_tokens: u64`, so
+  a `Usage` field passes straight through without a cast.
+
 - The `Api` and `Provider` variants of `AnthropicError` and
   `AzureOpenAIError` are `#[non_exhaustive]`, so the adapters can
   surface more of the response later (a request id, the raw error
@@ -891,6 +909,31 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Code that stores `Usage` counters in `u32` converts them, or widens its
+own type:
+
+```rust
+// Before (1.0.0-rc.3)
+let input: u32 = usage.input_tokens;
+
+// After
+let input: u64 = usage.input_tokens;
+// or, where a u32 is required:
+let input = u32::try_from(usage.input_tokens).unwrap_or(u32::MAX);
+```
+
+`OnlineCalibratedTokenizer::observe` takes a `u64`. Passing a `Usage`
+field compiles unchanged; a count kept in `u32` needs a widening:
+
+```rust
+// Before (1.0.0-rc.3)
+let billed: u32 = /* ... */;
+tokenizer.observe(chars, billed);
+
+// After
+tokenizer.observe(chars, u64::from(billed));
+```
 
 Add `..` when destructuring adapter `Api` / `Provider` errors:
 

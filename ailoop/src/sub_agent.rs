@@ -1633,7 +1633,7 @@ mod tests {
         assert_eq!(requests[1].tool_choice, Some(ToolChoice::None));
     }
 
-    fn tokens(input: u32, output: u32) -> Usage {
+    fn tokens(input: u64, output: u64) -> Usage {
         let mut u = Usage::default();
         u.input_tokens = input;
         u.output_tokens = output;
@@ -1670,7 +1670,7 @@ mod tests {
         ]
     }
 
-    fn io(u: Usage) -> (u32, u32) {
+    fn io(u: Usage) -> (u64, u64) {
         (u.input_tokens, u.output_tokens)
     }
 
