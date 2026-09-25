@@ -6,8 +6,8 @@ use std::time::Duration;
 use crate::errors::EngineError;
 use ailoop_core::{
     AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
-    FinishReason, HookAction, Message, RunConfig, RunId, StepId, StreamChunk, ToolDecision,
-    ToolResultContent, Usage, UserBlock,
+    ContinueDecision, FinishReason, HookAction, Message, RunConfig, RunId, StepId, StreamChunk,
+    ToolDecision, ToolResultContent, Usage, UserBlock,
 };
 use ailoop_history::{CompactionError, CompactionReport, History};
 use ailoop_tools::{ToolActivation, ToolContext, ToolRegistry, errors::ToolRegistryError};
@@ -799,8 +799,43 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 tools_result.push(UserBlock::tool_result(id, content));
             }
 
-            if !tools_result.is_empty() {
-                run_msgs.push(Message::User { blocks: tools_result });
+            // Completion gate: a turn that ends without tool calls to run
+            // would finish the run, unless a middleware asks to continue
+            // with an injected user message. Aborts never get here.
+            let mut continue_blocks = None;
+            if !matches!(finish_reason, FinishReason::ToolUse | FinishReason::Aborted(_)) {
+                let decision = match race_abort(
+                    run_turn_end_chain(
+                        &config.middlewares, &run_id, &step_id, &finish_reason,
+                        run_msgs.new_so_far(), &tools_result,
+                    ),
+                    &mut abort_fut,
+                ).await {
+                    Ok(d) => d,
+                    Err(reason) => {
+                        if !tools_result.is_empty() {
+                            run_msgs.push(Message::User { blocks: tools_result });
+                        }
+                        let new_messages = run_msgs.finish();
+                        let chunk = fire_abort_hooks(
+                            &config.middlewares, &run_id, reason, usage_run, new_messages,
+                        ).await;
+                        yield chunk;
+                        return;
+                    }
+                };
+                if let ContinueDecision::Continue { blocks } = decision {
+                    continue_blocks = Some(blocks);
+                }
+            }
+            let continue_run = continue_blocks.is_some();
+
+            // Tool results and injected blocks share one user message so
+            // the history never has two user turns in a row.
+            let mut user_blocks = tools_result;
+            user_blocks.extend(continue_blocks.unwrap_or_default());
+            if !user_blocks.is_empty() {
+                run_msgs.push(Message::User { blocks: user_blocks });
             }
 
             let mut chunk = StreamChunk::StepFinished {
@@ -813,7 +848,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
             for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
             yield chunk;
 
-            if !matches!(finish_reason, FinishReason::ToolUse) {
+            if !matches!(finish_reason, FinishReason::ToolUse) && !continue_run {
                 break;
             }
 
@@ -854,6 +889,43 @@ async fn run_tool_chain(
         }
     }
     ToolDecision::Continue
+}
+
+/// Asks every middleware's [`ChatMiddleware::on_turn_end`] in
+/// registration order; the first `Continue` wins. `new_messages` is the
+/// run's messages so far; `pending` are this step's tool results that
+/// have not been pushed yet (only non-empty when the model stopped
+/// without `ToolUse` after completing tool calls), appended so the hook
+/// sees the step as it will be recorded.
+async fn run_turn_end_chain(
+    chain: &[Arc<dyn ChatMiddleware>],
+    run_id: &RunId,
+    step_id: &StepId,
+    reason: &FinishReason,
+    new_messages: &[Message],
+    pending: &[UserBlock],
+) -> ContinueDecision {
+    let owned;
+    let new_messages = if pending.is_empty() {
+        new_messages
+    } else {
+        owned = [
+            new_messages,
+            &[Message::User {
+                blocks: pending.to_vec(),
+            }],
+        ]
+        .concat();
+        &owned
+    };
+    for mw in chain {
+        match mw.on_turn_end(run_id, step_id, reason, new_messages).await {
+            ContinueDecision::Stop => continue,
+            decision @ ContinueDecision::Continue { .. } => return decision,
+            _ => continue,
+        }
+    }
+    ContinueDecision::Stop
 }
 
 #[cfg(test)]

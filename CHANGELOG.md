@@ -10,6 +10,32 @@ and this project adheres to
 
 ### Added
 
+- `ChatMiddleware::on_turn_end` and `ContinueDecision` (re-exported
+  from `ailoop`): native support for the "completion gate" pattern.
+  When the model ends a turn with no tool calls to run, the engine
+  asks each middleware, in registration order, before it finishes the
+  run. Returning `ContinueDecision::Continue { blocks }` (or
+  `ContinueDecision::continue_with(text)`) adds a user message and
+  runs another iteration of the same run. The first `Continue` wins,
+  and the remaining middlewares are not asked for that turn. Until now
+  this took an outer loop around `stream_with_options`, which reset
+  `iteration` to 0, split `usage` across runs and emitted one
+  `RunFinished` per attempt. With the hook, iterations keep counting,
+  usage accumulates and a single `RunFinished` closes the run. The
+  injected message is part of the history and of `new_messages`, and
+  shows up in the `StepFinished` of the step that asked to continue.
+  The hook fires for `EndTurn`, `MaxTokens`, `StopSequence` and
+  `Other`, and receives the reason so a gate can filter. It never
+  fires for `ToolUse` or `Aborted`. Every continuation counts against
+  `max_iterations`, so a gate that never passes ends the run with
+  `AbortReason::MaxIterations`. If the turn also completed tool calls
+  (possible with `MaxTokens`), the injected blocks join the tool
+  results in one user message, so the history never has two user
+  messages in a row. The default returns `ContinueDecision::Stop`, so
+  existing middlewares are unaffected. The rustdoc of
+  `on_chat_request` now also explains how to track the current
+  iteration: record `StepStarted { iteration }` from `on_chunk` and
+  `max_iterations` from `on_run_started`, keyed by `run_id`.
 - `SubAgentConfig::wrap_up(WrapUp)`: an opt-in graceful cutoff for
   `SubAgentTool`. Today, when a child run hits its `timeout` or
   `max_iterations`, the parent gets `"sub-agent aborted (…)"` with

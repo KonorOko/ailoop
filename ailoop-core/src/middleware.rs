@@ -1,8 +1,9 @@
 //! [`ChatMiddleware`] extension point and its decision enums
-//! ([`HookAction`], [`ToolDecision`]).
+//! ([`HookAction`], [`ToolDecision`], [`ContinueDecision`]).
 
 use crate::{
     ChatRequest, FinishReason, Message, RunId, StepId, StreamChunk, ToolResultContent, Usage,
+    UserBlock,
 };
 use serde_json::Value;
 
@@ -49,6 +50,20 @@ pub trait ChatMiddleware: Send + Sync {
     /// middleware writes there is not replaced: it is appended after
     /// the builder's system prompt, and per-block `cache_control` on a
     /// [`crate::SystemPrompt::Blocks`] value is preserved.
+    ///
+    /// The current iteration is not passed here, but it is available:
+    /// the engine emits [`StreamChunk::StepStarted`] (carrying
+    /// `iteration`) through [`Self::on_chunk`] right before calling
+    /// `on_chat_request` for the same step, and
+    /// [`RunConfig::max_iterations`] arrives in
+    /// [`Self::on_run_started`]. A middleware that needs "how many
+    /// iterations are left" records both keyed by `run_id` (e.g. in a
+    /// `Mutex<HashMap<RunId, _>>`, removed in [`Self::on_run_finished`])
+    /// and reads them here. Retries by [`crate::RetryingModel`] happen
+    /// inside `chat_stream`, so this hook runs once per iteration; the
+    /// only exception is the context-overflow recovery of a
+    /// `Conversation`, which rebuilds the request and calls it again
+    /// with the same `step_id`.
     async fn on_chat_request(&self, run_id: &RunId, step_id: &StepId, req: &mut ChatRequest) {}
     /// Fired for every [`StreamChunk`] the engine emits, including
     /// chunks the engine itself synthesizes
@@ -78,6 +93,40 @@ pub trait ChatMiddleware: Send + Sync {
         usage: &Usage,
         new_messages: &[Message],
     ) {
+    }
+    /// Fired when a turn ends with nothing left for the engine to do —
+    /// the model stopped for any reason other than
+    /// [`FinishReason::ToolUse`] — right before the engine would finish
+    /// the run. Return [`ContinueDecision::Continue`] to append a user
+    /// message and keep the run going: the "completion gate" pattern,
+    /// where a middleware verifies the result and sends the model back
+    /// to work when the check fails.
+    ///
+    /// `reason` is the turn's finish reason ([`FinishReason::EndTurn`],
+    /// [`FinishReason::MaxTokens`], [`FinishReason::StopSequence`] or
+    /// [`FinishReason::Other`]); a gate usually acts only on `EndTurn`.
+    /// Never fired for [`FinishReason::Aborted`]. `new_messages` is
+    /// everything the run has added so far, including this turn's
+    /// assistant message.
+    ///
+    /// The continuation stays inside the same run: the injected message
+    /// lands in the history and in `new_messages`, the next step emits
+    /// the usual `StepStarted` with the next `iteration`, usage keeps
+    /// accumulating, and a single `RunFinished` closes the run. Every
+    /// continuation counts against [`RunConfig::max_iterations`]; a
+    /// gate that never passes ends the run with
+    /// [`crate::AbortReason::MaxIterations`].
+    ///
+    /// Middlewares are asked in registration order and the first
+    /// `Continue` wins; the rest are not asked for that turn.
+    async fn on_turn_end(
+        &self,
+        run_id: &RunId,
+        step_id: &StepId,
+        reason: &FinishReason,
+        new_messages: &[Message],
+    ) -> ContinueDecision {
+        ContinueDecision::Stop
     }
     /// Fired when a run terminates with a transport / setup-time
     /// error from the provider (i.e. an `Err` returned to the caller).
@@ -193,4 +242,30 @@ pub enum ToolDecision {
         /// [`crate::AbortReason::ToolTerminated`].
         reason: String,
     },
+}
+
+/// Decision returned from [`ChatMiddleware::on_turn_end`] to either
+/// let the run finish or keep it going with an injected user message.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default)]
+pub enum ContinueDecision {
+    /// Default: finish the run with the turn's finish reason.
+    #[default]
+    Stop,
+    /// Append a user message made of `blocks` to the history and run
+    /// another iteration. The message is recorded in the run's
+    /// `new_messages` like any other message the engine adds.
+    Continue {
+        /// Content of the injected user message.
+        blocks: Vec<UserBlock>,
+    },
+}
+
+impl ContinueDecision {
+    /// [`ContinueDecision::Continue`] with a single text block.
+    pub fn continue_with(text: impl Into<String>) -> Self {
+        ContinueDecision::Continue {
+            blocks: vec![UserBlock::text(text)],
+        }
+    }
 }
