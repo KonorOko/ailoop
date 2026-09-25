@@ -197,7 +197,7 @@ far and state clearly what remains unverified or unfinished.";
 ///
 /// The wrap-up request keeps its tool definitions (so the prompt cache
 /// is not invalidated) but sets `tool_choice` to
-/// [`ToolChoice::None_`], and [`Self::instruction`] is appended as a
+/// [`ToolChoice::None`], and [`Self::instruction`] is appended as a
 /// text block to the request's last user message. The instruction is
 /// request-only: it is never written to the child's history. Once
 /// triggered, every later request of the same run is forced too. The
@@ -335,7 +335,7 @@ impl ChatMiddleware for WrapUpMiddleware {
             }
         }
 
-        req.tool_choice = Some(ToolChoice::None_);
+        req.tool_choice = Some(ToolChoice::None);
         let instruction = UserBlock::text(self.instruction.clone());
         match req.messages.last_mut() {
             Some(Message::User { blocks }) => blocks.push(instruction),
@@ -1526,7 +1526,7 @@ mod tests {
             let requests = requests.lock().unwrap();
             assert_eq!(requests.len(), 2);
             assert_eq!(requests[0].tool_choice, None);
-            assert_eq!(requests[1].tool_choice, Some(ToolChoice::None_));
+            assert_eq!(requests[1].tool_choice, Some(ToolChoice::None));
             assert!(
                 requests[1].tools.as_ref().is_some_and(|t| !t.is_empty()),
                 "tool definitions stay on the wrap-up request"
@@ -1568,7 +1568,7 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].tool_choice, None);
-        assert_eq!(requests[1].tool_choice, Some(ToolChoice::None_));
+        assert_eq!(requests[1].tool_choice, Some(ToolChoice::None));
         assert_eq!(
             last_user_text(&requests[1]).as_deref(),
             Some(DEFAULT_WRAP_UP_INSTRUCTION)
@@ -1630,7 +1630,7 @@ mod tests {
 
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2, "the wrap-up request was sent");
-        assert_eq!(requests[1].tool_choice, Some(ToolChoice::None_));
+        assert_eq!(requests[1].tool_choice, Some(ToolChoice::None));
     }
 
     fn tokens(input: u32, output: u32) -> Usage {

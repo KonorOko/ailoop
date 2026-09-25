@@ -312,7 +312,7 @@ fn to_anthropic_tool_choice(
             obj.insert("type".into(), json!("tool"));
             obj.insert("name".into(), json!(name));
         }
-        ToolChoice::None_ => {
+        ToolChoice::None => {
             obj.insert("type".into(), json!("none"));
         }
         // ToolChoice is `#[non_exhaustive]`; future variants degrade to
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn maps_tool_choice_none() {
         let mut req = base_req();
-        req.tool_choice = Some(ToolChoice::None_);
+        req.tool_choice = Some(ToolChoice::None);
         let body = build_body("claude", &req);
         assert_eq!(body["tool_choice"], json!({ "type": "none" }));
     }

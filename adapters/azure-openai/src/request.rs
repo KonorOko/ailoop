@@ -242,7 +242,7 @@ fn to_chat_tool_choice(choice: &ToolChoice) -> Value {
             "type": "function",
             "function": { "name": name },
         }),
-        ToolChoice::None_ => json!("none"),
+        ToolChoice::None => json!("none"),
         // ToolChoice is `#[non_exhaustive]`; future variants fall back
         // to the provider default.
         _ => json!("auto"),
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn maps_tool_choice_none_as_string() {
         let mut req = base_req();
-        req.tool_choice = Some(ToolChoice::None_);
+        req.tool_choice = Some(ToolChoice::None);
         let body = build_body("dep", &req).unwrap();
         assert_eq!(body["tool_choice"], json!("none"));
     }

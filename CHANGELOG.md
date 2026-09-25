@@ -409,6 +409,11 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `ToolChoice::None_` is `ToolChoice::None`. The trailing underscore was
+  meant to avoid a clash with `Option::None`, but an enum variant is
+  always reached through its type (`ToolChoice::None`), so there was no
+  clash to avoid, and `Some(ToolChoice::None)` reads as intended.
+
 - The tool call id is `call_id` everywhere. `AssistantBlock::ToolCall`
   and the `StreamChunk::ToolCallStarted` / `ToolCallArgsDelta` /
   `ToolCallFinished` / `ToolCallMalformed` variants called it `id`,
@@ -765,6 +770,16 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Drop the trailing underscore from `ToolChoice::None_`:
+
+```rust
+// Before (1.0.0-rc.3)
+builder.tool_choice(ToolChoice::None_)
+
+// After
+builder.tool_choice(ToolChoice::None)
+```
 
 Rename `id` to `call_id` when matching or building tool call blocks
 and chunks:

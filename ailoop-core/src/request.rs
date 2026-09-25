@@ -105,7 +105,7 @@ impl ChatRequest {
 /// Constraint placed on the model's tool selection for a single
 /// request. Variant naming follows Anthropic's wire vocabulary; the
 /// Chat Completions adapter translates `Any` → `"required"` and
-/// `None_` → `"none"`.
+/// `None` → `"none"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ToolChoice {
@@ -120,9 +120,9 @@ pub enum ToolChoice {
         /// `tools` list.
         name: String,
     },
-    /// Model is forbidden from calling any tool. Trailing underscore
-    /// avoids collision with the keyword `None`.
-    None_,
+    /// Model is forbidden from calling any tool. Always written
+    /// `ToolChoice::None`; it does not shadow [`Option::None`].
+    None,
 }
 
 /// Tool description sent to the provider so the model can decide when

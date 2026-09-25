@@ -217,7 +217,7 @@ where
     }
 
     async fn summarize(&self, messages: Vec<Message>) -> Result<String, CompactionError> {
-        // Leave `tool_choice` unset rather than `None_`: some providers
+        // Leave `tool_choice` unset rather than `ToolChoice::None`: some providers
         // reject `tool_choice: none` when the request also has no
         // `tools` array, and "no tools" already implies "no tool calls".
         let mut req = ChatRequest::new(messages, self.max_tokens);
