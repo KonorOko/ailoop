@@ -118,8 +118,8 @@ async fn run_gated(target: &'static str, tags: Vec<ToolTag>) -> (Vec<String>, us
             executed: executed.clone(),
         }))
         .initial_active_tools(["enable_tool"])
-        .with_approval(move |name, _args| {
-            seen_cb.lock().unwrap().push(name);
+        .with_approval(move |req| {
+            seen_cb.lock().unwrap().push(req.tool_name);
             async move {
                 ToolDecision::Skip {
                     reason: "denied".into(),

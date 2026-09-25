@@ -40,7 +40,7 @@ async fn delete_file(_path: String) -> i32 {
 async fn approve_all_fires_for_every_tool() {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_cb = counter.clone();
-    let mw = ApprovalMiddleware::approve_all(move |_name, _args| {
+    let mw = ApprovalMiddleware::approve_all(move |_req| {
         let c = counter_cb.clone();
         async move {
             c.fetch_add(1, Ordering::SeqCst);
@@ -64,7 +64,7 @@ async fn approve_all_fires_for_every_tool() {
 async fn for_named_only_fires_for_listed_tools() {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_cb = counter.clone();
-    let mw = ApprovalMiddleware::for_named(["delete_file"], move |_name, _args| {
+    let mw = ApprovalMiddleware::for_named(["delete_file"], move |_req| {
         let c = counter_cb.clone();
         async move {
             c.fetch_add(1, Ordering::SeqCst);
@@ -89,7 +89,7 @@ async fn for_named_only_fires_for_listed_tools() {
 
 #[tokio::test]
 async fn for_named_returns_continue_for_non_gated() {
-    let mw = ApprovalMiddleware::for_named(["delete_file"], |_name, _args| async move {
+    let mw = ApprovalMiddleware::for_named(["delete_file"], |_req| async move {
         ToolDecision::Skip {
             reason: "should-not-fire".into(),
         }
@@ -105,7 +105,7 @@ async fn for_named_returns_continue_for_non_gated() {
 
 #[tokio::test]
 async fn approval_callback_decision_is_returned() {
-    let mw = ApprovalMiddleware::approve_all(|_name, _args| async move {
+    let mw = ApprovalMiddleware::approve_all(|_req| async move {
         ToolDecision::Skip {
             reason: "denied".into(),
         }
@@ -130,7 +130,7 @@ fn builder_with_approval_compiles_and_builds() {
     let _chat = Conversation::builder(MockModel)
         .tool(ListDir)
         .tool(DeleteFile)
-        .with_approval(|_name, _args| async move { ToolDecision::Continue })
+        .with_approval(|_req| async move { ToolDecision::Continue })
         .build()
         .unwrap();
 }
