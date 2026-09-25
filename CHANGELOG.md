@@ -10,6 +10,13 @@ and this project adheres to
 
 ### Added
 
+- Minimum supported Rust version: 1.88, declared as `rust-version` on
+  every crate. Edition 2024 needs 1.85, and the let chains used across
+  the crates were stabilized in 1.88 (1.87 fails to compile them).
+  With it, Cargo reports an old toolchain up front instead of failing
+  on a syntax error, and the MSRV-aware resolver picks dependency
+  versions that still build on 1.88. CI checks it.
+
 - `RunConfig` implements `Debug`. Middlewares are shown as a count,
   since they are trait objects.
 
