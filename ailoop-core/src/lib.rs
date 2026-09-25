@@ -28,6 +28,8 @@
 //!   provider adapter implements.
 //! - [`RetryingModel`], [`Retryable`], [`RetryConfig`] — backoff
 //!   decorator that wraps any [`CompletionModel`].
+//! - [`ProviderError`] — provider-agnostic classification of model
+//!   errors (context overflow) for callers above the model.
 
 #![deny(missing_docs)]
 
@@ -35,6 +37,7 @@ pub mod config;
 pub mod ids;
 pub mod message;
 pub mod middleware;
+pub mod provider_error;
 pub mod request;
 pub mod retry;
 pub mod stream;
@@ -50,6 +53,7 @@ pub use message::{
     ToolResultContent, UserBlock,
 };
 pub use middleware::{ChatMiddleware, HookAction, ToolDecision};
+pub use provider_error::ProviderError;
 pub use request::{ChatRequest, ReasoningEffort, ToolChoice, ToolDefinition, ToolTag};
 pub use retry::{RetryClassification, RetryConfig, Retryable, RetryingModel};
 pub use stream::{AbortReason, FinishReason, StreamChunk, Usage};

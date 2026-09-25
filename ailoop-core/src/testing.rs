@@ -17,6 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 
+use crate::provider_error::ProviderError;
 use crate::request::ChatRequest;
 use crate::retry::{RetryClassification, Retryable};
 use crate::stream::StreamChunk;
@@ -36,6 +37,16 @@ impl std::fmt::Display for ScriptedError {
 }
 
 impl std::error::Error for ScriptedError {}
+
+/// Test-only classification by message convention: contains
+/// `"context_overflow"` → [`ProviderError::is_context_overflow`] is
+/// `true`. Lets engine-level recovery be exercised without a real
+/// provider.
+impl ProviderError for ScriptedError {
+    fn is_context_overflow(&self) -> bool {
+        self.0.contains("context_overflow")
+    }
+}
 
 /// Test-only classification by message convention so retry-aware
 /// decorators can be exercised without a real provider:

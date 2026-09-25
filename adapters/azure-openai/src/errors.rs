@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ailoop_core::{RetryClassification, Retryable};
+use ailoop_core::{ProviderError, RetryClassification, Retryable};
 use reqwest::StatusCode;
 
 /// Discriminated category of an HTTP-level Azure OpenAI API error,
@@ -21,6 +21,15 @@ pub enum AzureOpenAIApiErrorKind {
     /// Malformed body, unknown deployment, validation failure.
     /// Permanent — retrying without changes produces the same error.
     InvalidRequest,
+    /// `context_length_exceeded` — the prompt (plus the requested
+    /// completion tokens) does not fit the deployment's context
+    /// window. Azure returns it as a 400 with `type:
+    /// "invalid_request_error"`; it is split out of
+    /// [`InvalidRequest`](Self::InvalidRequest) so callers can react
+    /// by compacting the history. Permanent for
+    /// [`RetryingModel`](ailoop_core::RetryingModel): resending the
+    /// same prompt fails the same way.
+    ContextOverflow,
     /// Azure content-safety filter blocked the request or response.
     /// Permanent — retrying produces the same block.
     ContentFilter,
@@ -52,6 +61,7 @@ impl AzureOpenAIApiErrorKind {
         match s {
             "rate_limit_exceeded" | "429" => Self::RateLimit,
             "invalid_request_error" | "BadRequest" => Self::InvalidRequest,
+            "context_length_exceeded" => Self::ContextOverflow,
             "content_filter" => Self::ContentFilter,
             "invalid_api_key" | "Unauthorized" => Self::Authentication,
             "PermissionDenied" => Self::Permission,
@@ -167,6 +177,7 @@ fn classify_kind(
         AzureOpenAIApiErrorKind::Authentication
         | AzureOpenAIApiErrorKind::Permission
         | AzureOpenAIApiErrorKind::InvalidRequest
+        | AzureOpenAIApiErrorKind::ContextOverflow
         | AzureOpenAIApiErrorKind::NotFound
         | AzureOpenAIApiErrorKind::DeploymentNotFound
         | AzureOpenAIApiErrorKind::ContentFilter => RetryClassification::Permanent,
@@ -200,8 +211,28 @@ impl Retryable for AzureOpenAIError {
     }
 }
 
+impl ProviderError for AzureOpenAIError {
+    /// `true` for [`AzureOpenAIApiErrorKind::ContextOverflow`]. Azure
+    /// validates the context length before streaming, so the signal only
+    /// arrives as an HTTP error envelope.
+    fn is_context_overflow(&self) -> bool {
+        matches!(
+            self,
+            AzureOpenAIError::Api {
+                kind: AzureOpenAIApiErrorKind::ContextOverflow,
+                ..
+            }
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ailoop_core::{ChatRequest, CompletionModel, RetryConfig, RetryingModel, StreamChunk};
+    use futures::stream::BoxStream;
+
     use super::*;
 
     #[test]
@@ -257,6 +288,35 @@ mod tests {
     }
 
     #[test]
+    fn context_overflow_is_permanent() {
+        let err = AzureOpenAIError::Api {
+            status: StatusCode::BAD_REQUEST,
+            kind: AzureOpenAIApiErrorKind::ContextOverflow,
+            message: "Your input exceeds the context window of this model.".into(),
+            retry_after: None,
+        };
+        assert_eq!(err.retry_classification(), RetryClassification::Permanent);
+    }
+
+    #[test]
+    fn provider_error_flags_only_context_overflow() {
+        let overflow = AzureOpenAIError::Api {
+            status: StatusCode::BAD_REQUEST,
+            kind: AzureOpenAIApiErrorKind::ContextOverflow,
+            message: "too long".into(),
+            retry_after: None,
+        };
+        let other = AzureOpenAIError::Api {
+            status: StatusCode::BAD_REQUEST,
+            kind: AzureOpenAIApiErrorKind::InvalidRequest,
+            message: "bad field".into(),
+            retry_after: None,
+        };
+        assert!(overflow.is_context_overflow());
+        assert!(!other.is_context_overflow());
+    }
+
+    #[test]
     fn unknown_kind_is_conservatively_transient() {
         let err = AzureOpenAIError::Api {
             status: StatusCode::BAD_GATEWAY,
@@ -267,6 +327,83 @@ mod tests {
         assert_eq!(
             err.retry_classification(),
             RetryClassification::Transient { retry_after: None },
+        );
+    }
+
+    /// Minimal model whose `chat_stream` setup always fails with the
+    /// error built by `make`, counting calls so tests can observe
+    /// whether [`RetryingModel`](ailoop_core::RetryingModel) reissued it.
+    struct FailingModel {
+        make: fn() -> AzureOpenAIError,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl CompletionModel for FailingModel {
+        type Error = AzureOpenAIError;
+
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn model(&self) -> &str {
+            "failing"
+        }
+
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> Result<BoxStream<'static, Result<StreamChunk, Self::Error>>, Self::Error> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err((self.make)())
+        }
+    }
+
+    async fn calls_through_retrying_model(make: fn() -> AzureOpenAIError) -> usize {
+        let mut config = RetryConfig::default();
+        config.base_delay = Duration::from_millis(1);
+        config.max_delay = Duration::from_millis(1);
+        config.jitter = false;
+        let model = RetryingModel::with_config(
+            FailingModel {
+                make,
+                calls: AtomicUsize::new(0),
+            },
+            config,
+        );
+        assert!(
+            model
+                .chat_stream(ChatRequest::new(vec![], 0))
+                .await
+                .is_err(),
+            "setup must fail",
+        );
+        model.inner().calls.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn retrying_model_does_not_retry_context_overflow() {
+        assert_eq!(
+            calls_through_retrying_model(|| AzureOpenAIError::Api {
+                status: StatusCode::BAD_REQUEST,
+                kind: AzureOpenAIApiErrorKind::ContextOverflow,
+                message: "too long".into(),
+                retry_after: None,
+            })
+            .await,
+            1
+        );
+        // Control: a transient error on the same harness is retried up
+        // to `max_attempts`, so the assertion above is not vacuous.
+        assert_eq!(
+            calls_through_retrying_model(|| AzureOpenAIError::Api {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                kind: AzureOpenAIApiErrorKind::ServerError,
+                message: "boom".into(),
+                retry_after: None,
+            })
+            .await,
+            3
         );
     }
 }

@@ -166,7 +166,7 @@ where
                 AnthropicEvent::Ping => { }
                 AnthropicEvent::Error { error } => {
                     Err(AnthropicError::Provider {
-                        kind: AnthropicApiErrorKind::from_error_type(&error.error_type),
+                        kind: AnthropicApiErrorKind::from_error(&error.error_type, &error.message),
                         message: error.message,
                     })?;
                 }
