@@ -90,7 +90,7 @@ pub use conversation::{
     Conversation, ConversationBuilder, DEFAULT_HISTORY_MAX_TOKENS, RunOptions, RunOutcome,
     RunStream,
 };
-pub use errors::{BuildError, EngineError};
+pub use errors::{BuildError, EngineError, RunError};
 pub use max_tool_calls::MaxToolCalls;
 
 /// Lower-level entry points outside the [`Conversation`] happy path.

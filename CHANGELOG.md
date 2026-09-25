@@ -10,6 +10,22 @@ and this project adheres to
 
 ### Added
 
+- `RunError<E>` (re-exported from `ailoop`): the error of a failed run.
+  It wraps the `EngineError` cause (`kind()`, `into_kind()`) and the
+  messages of the steps the run completed before failing
+  (`partial_messages()`, `into_parts()`). Until now those steps were
+  lost when a run failed: the history is rolled back on `Err`, so the
+  record of tools that already ran (writes, API calls) disappeared and
+  the next turn could repeat them. The partial list is exactly the
+  `new_messages_so_far` of the last `StepFinished`: every `tool_use` in
+  it has its `tool_result`, and the step that failed is left out,
+  including any text it streamed. A model error in the middle of a
+  response arrives before that step's tools run, so no executed tool
+  is missing. The rollback guarantee is unchanged; the list is a copy
+  the caller can keep or drop.
+- `Conversation::history_extend(messages)`: append several messages
+  without running, like `history_push`. Use it to keep the steps of a
+  failed run: `chat.history_extend(err.partial_messages().iter().cloned())`.
 - `StreamChunk::ToolCallMalformed { id, name, raw, error }`: closes a
   streamed tool call whose argument text is not a JSON object, in place
   of `ToolCallFinished`. `StreamChunk::tool_call_from_raw_args(id, name,
@@ -255,6 +271,20 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `Conversation::run`, `run_with_options`, `stream`,
+  `stream_with_options`, the `RunStream` error item and
+  `advanced::run_chat` (both its result and its stream items) now fail
+  with `RunError<M::Error>` instead of `EngineError<M::Error>`, so the
+  steps completed before the failure reach the caller (see `RunError`
+  under Added). `From<RunError<E>> for EngineError<E>` keeps `?`
+  working in functions that return `EngineError`; only code that
+  matches the error directly needs `.kind()` or `.into_kind()`.
+- `ChatMiddleware::on_run_error` gained a `partial_messages: &[Message]`
+  parameter with the same list, mirroring the `new_messages` of
+  `on_run_finished`, so a persistence middleware can record what the
+  run did before failing. `JsonTracer` adds `partial_messages` (a
+  count) to its `run_error` event and `TracingMiddleware` adds it as a
+  field.
 - `Conversation`'s methods and `SubAgentTool`'s `ToolDyn` impl now
   require `M::Error: ProviderError`, so the engine can tell a
   context-window overflow from other model errors. The built-in
@@ -396,6 +426,47 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+A failed run returns `RunError`. `?` into `EngineError` still compiles;
+direct matches go through `.kind()`:
+
+```rust
+// Before
+match chat.run("go").await {
+    Err(EngineError::ContextOverflow(e)) => shrink_input(e),
+    Err(e) => return Err(e),
+    Ok(outcome) => use_it(outcome),
+}
+
+// After
+match chat.run("go").await {
+    Err(err) => match err.into_kind() {
+        EngineError::ContextOverflow(e) => shrink_input(e),
+        e => return Err(e),
+    },
+    Ok(outcome) => use_it(outcome),
+}
+
+// New: keep the steps that completed before the failure
+if let Err(err) = chat.run("go").await {
+    chat.history_extend(err.partial_messages().iter().cloned());
+}
+```
+
+`on_run_error` overrides take the partial messages:
+
+```rust
+// Before
+async fn on_run_error(&self, run_id: &RunId, err: &(dyn std::error::Error + Send + Sync)) {}
+
+// After
+async fn on_run_error(
+    &self,
+    run_id: &RunId,
+    err: &(dyn std::error::Error + Send + Sync),
+    partial_messages: &[Message],
+) {}
+```
 
 ```rust
 // Before

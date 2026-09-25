@@ -1,8 +1,11 @@
+use ailoop_core::Message;
 use ailoop_prompts::PromptError;
 use ailoop_tools::errors::ToolRegistryError;
 
-/// Failure surface of [`Conversation::run`] /
-/// [`Conversation::stream`] and the underlying [`run_chat`] engine.
+/// What went wrong in a failed [`Conversation::run`] /
+/// [`Conversation::stream`] or [`run_chat`] call. Those entry points
+/// return it wrapped in a [`RunError`], which also carries the steps
+/// the run completed before failing.
 ///
 /// **Aborts are not in here.** Cancellation via
 /// [`RunConfig::cancellation`], timeout via [`RunConfig::timeout`],
@@ -77,6 +80,123 @@ pub enum EngineError<E: std::error::Error> {
     /// [`CompactionError::NotEnoughHistory`]: ailoop_history::CompactionError::NotEnoughHistory
     #[error("prompt does not fit the context window even after compaction: {0}")]
     ContextOverflow(E),
+}
+
+/// A run that ended in `Err`: the cause ([`EngineError`]) plus the
+/// messages of every step the run completed before it failed.
+///
+/// Returned by [`Conversation::run`] / [`Conversation::stream`] (and
+/// their `_with_options` variants), yielded as the error item of
+/// [`RunStream`], and returned by [`run_chat`].
+///
+/// # Partial messages
+///
+/// [`partial_messages`](Self::partial_messages) holds the messages of
+/// the steps that finished before the failure: the same list as the
+/// `new_messages_so_far` of the last [`StreamChunk::StepFinished`] the
+/// run emitted, or empty when the first step failed. Every `tool_use`
+/// in it is followed by its `tool_result`. The step that failed is left
+/// out entirely, including any assistant text streamed before the
+/// error.
+///
+/// A model error in the middle of a response arrives before that
+/// step's tools run, so the partial list records every tool the run
+/// executed.
+///
+/// # History
+///
+/// [`Conversation`] still rolls its history back on `Err`: it ends
+/// with the kickoff message, as if the run never happened. The partial
+/// messages are a copy. To keep the record of what already ran (for
+/// example tools with side effects), append them yourself:
+///
+/// ```no_run
+/// # async fn demo<M>(chat: &mut ailoop::Conversation<M>)
+/// # where M: ailoop::CompletionModel + Send + Sync, M::Error: ailoop::ProviderError {
+/// if let Err(err) = chat.run("deploy the service").await {
+///     eprintln!("run failed: {err}");
+///     let (_cause, partial) = err.into_parts();
+///     chat.history_extend(partial);
+/// }
+/// # }
+/// ```
+///
+/// `RunError` converts into [`EngineError`] with `?`, dropping the
+/// partial messages, so code that propagates `EngineError` keeps
+/// compiling.
+///
+/// [`Conversation`]: crate::Conversation
+/// [`Conversation::run`]: crate::Conversation::run
+/// [`Conversation::stream`]: crate::Conversation::stream
+/// [`RunStream`]: crate::RunStream
+/// [`run_chat`]: crate::advanced::run_chat
+/// [`StreamChunk::StepFinished`]: ailoop_core::StreamChunk::StepFinished
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct RunError<E: std::error::Error> {
+    kind: EngineError<E>,
+    partial_messages: Vec<Message>,
+}
+
+impl<E: std::error::Error> RunError<E> {
+    pub(crate) fn new(kind: EngineError<E>, partial_messages: Vec<Message>) -> Self {
+        Self {
+            kind,
+            partial_messages,
+        }
+    }
+
+    /// What made the run fail.
+    pub fn kind(&self) -> &EngineError<E> {
+        &self.kind
+    }
+
+    /// Consumes the error and returns its cause, dropping the partial
+    /// messages.
+    pub fn into_kind(self) -> EngineError<E> {
+        self.kind
+    }
+
+    /// Messages of the steps completed before the failure. See the
+    /// [type docs](Self#partial-messages).
+    pub fn partial_messages(&self) -> &[Message] {
+        &self.partial_messages
+    }
+
+    /// Splits the error into its cause and its partial messages.
+    pub fn into_parts(self) -> (EngineError<E>, Vec<Message>) {
+        (self.kind, self.partial_messages)
+    }
+}
+
+impl<E: std::error::Error> std::fmt::Display for RunError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.kind, f)
+    }
+}
+
+// `Display` already prints the cause, so `source` skips it and goes
+// one level down; error reporters would print it twice otherwise.
+impl<E: std::error::Error> std::error::Error for RunError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.kind.source()
+    }
+}
+
+/// Wraps an error raised before any step ran: the partial list is
+/// empty.
+impl<E: std::error::Error> From<EngineError<E>> for RunError<E> {
+    fn from(kind: EngineError<E>) -> Self {
+        Self::new(kind, Vec::new())
+    }
+}
+
+/// Keeps `?` working in functions that return [`EngineError`]. The
+/// partial messages are dropped.
+impl<E: std::error::Error> From<RunError<E>> for EngineError<E> {
+    fn from(err: RunError<E>) -> Self {
+        err.kind
+    }
 }
 
 /// Errors accumulated by [`ConversationBuilder`] and surfaced when

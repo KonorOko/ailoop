@@ -79,7 +79,12 @@ impl ChatMiddleware for MaxToolCalls {
         self.counts.lock().await.remove(run_id);
     }
 
-    async fn on_run_error(&self, run_id: &RunId, _err: &(dyn std::error::Error + Send + Sync)) {
+    async fn on_run_error(
+        &self,
+        run_id: &RunId,
+        _err: &(dyn std::error::Error + Send + Sync),
+        _partial_messages: &[Message],
+    ) {
         self.counts.lock().await.remove(run_id);
     }
 }

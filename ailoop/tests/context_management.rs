@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use ailoop::{
     AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, Conversation, EngineError,
-    FinishReason, History, Message, RunId, StreamChunk, ToolDefinition, ToolResultContent, Usage,
-    UserBlock,
+    FinishReason, History, Message, RunError, RunId, StreamChunk, ToolDefinition,
+    ToolResultContent, Usage, UserBlock,
 };
 use ailoop_core::testing::{ScriptedError, ScriptedModel, ScriptedTurn};
 use ailoop_tools::{ToolContext, ToolDyn};
@@ -94,7 +94,12 @@ impl ChatMiddleware for Counters {
     async fn on_chat_request(&self, _: &RunId, _: &ailoop::StepId, _: &mut ChatRequest) {
         self.chat_requests.fetch_add(1, Ordering::SeqCst);
     }
-    async fn on_run_error(&self, _: &RunId, _: &(dyn std::error::Error + Send + Sync)) {
+    async fn on_run_error(
+        &self,
+        _: &RunId,
+        _: &(dyn std::error::Error + Send + Sync),
+        _: &[Message],
+    ) {
         self.run_errors.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -181,7 +186,7 @@ fn assert_no_orphans(messages: &[Message]) {
 async fn collect(
     chat: &mut Conversation<RecordingModel>,
     input: &str,
-) -> Vec<Result<StreamChunk, EngineError<ScriptedError>>> {
+) -> Vec<Result<StreamChunk, RunError<ScriptedError>>> {
     chat.stream(input)
         .await
         .expect("run starts")
@@ -190,7 +195,7 @@ async fn collect(
 }
 
 fn compacted_counts(
-    chunks: &[Result<StreamChunk, EngineError<ScriptedError>>],
+    chunks: &[Result<StreamChunk, RunError<ScriptedError>>],
 ) -> Vec<(usize, usize)> {
     chunks
         .iter()
@@ -363,7 +368,7 @@ async fn persistent_overflow_is_a_typed_error_and_rolls_back() {
         .collect();
 
     let err = chat.run("go").await.expect_err("overflow persists");
-    match err {
+    match err.into_kind() {
         EngineError::ContextOverflow(ScriptedError(msg)) => {
             assert!(msg.contains("context_overflow"))
         }
@@ -389,7 +394,10 @@ async fn overflow_with_nothing_to_compact_fails_without_retry() {
         .unwrap();
 
     let err = chat.run("go").await.expect_err("cannot shrink");
-    assert!(matches!(err, EngineError::ContextOverflow(_)), "{err:?}");
+    assert!(
+        matches!(err.kind(), EngineError::ContextOverflow(_)),
+        "{err:?}"
+    );
     assert_eq!(*sizes.lock().unwrap(), vec![1]);
     assert_eq!(chat.history_messages().len(), 1);
 }
@@ -405,7 +413,7 @@ async fn overflow_is_a_model_error_when_recovery_is_off() {
     seed_prior_turns(&mut chat);
 
     let err = chat.run("go").await.expect_err("no recovery");
-    assert!(matches!(err, EngineError::Model(_)), "{err:?}");
+    assert!(matches!(err.kind(), EngineError::Model(_)), "{err:?}");
     assert_eq!(*sizes.lock().unwrap(), vec![5]);
     assert_eq!(chat.history_messages().len(), 5);
 }

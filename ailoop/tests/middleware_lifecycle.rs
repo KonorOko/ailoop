@@ -108,7 +108,12 @@ impl ChatMiddleware for RecordingMiddleware {
         self.push("on_run_finished");
     }
 
-    async fn on_run_error(&self, _run_id: &RunId, _err: &(dyn std::error::Error + Send + Sync)) {
+    async fn on_run_error(
+        &self,
+        _run_id: &RunId,
+        _err: &(dyn std::error::Error + Send + Sync),
+        _: &[Message],
+    ) {
         self.push("on_run_error");
     }
 }

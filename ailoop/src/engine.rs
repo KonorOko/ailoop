@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::errors::EngineError;
+use crate::errors::{EngineError, RunError};
 use ailoop_core::{
     AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
     ContinueDecision, FinishReason, HookAction, Message, RunConfig, RunId, StepId, StreamChunk,
@@ -16,7 +16,7 @@ use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
 
 /// Stream of engine chunks for one run.
-type EngineStream<'a, E> = BoxStream<'a, Result<StreamChunk, EngineError<E>>>;
+type EngineStream<'a, E> = BoxStream<'a, Result<StreamChunk, RunError<E>>>;
 
 type AbortFuture = Pin<Box<dyn Future<Output = AbortReason> + Send>>;
 
@@ -102,16 +102,19 @@ async fn fire_abort_hooks(
     chunk
 }
 
+/// Turns an `Err` into a [`RunError`] carrying the run's completed
+/// steps and fires `on_run_error` with them.
 macro_rules! bail_with_hooks {
-    ($result: expr, $chain: expr, $run_id: expr) => {
+    ($result: expr, $chain: expr, $run_id: expr, $run_msgs: expr) => {
         match $result {
             Ok(v) => Ok(v),
             Err(e) => {
                 let err: EngineError<_> = e.into();
+                let partial = $run_msgs.completed().to_vec();
                 for mw in $chain {
-                    mw.on_run_error($run_id, &err).await;
+                    mw.on_run_error($run_id, &err, &partial).await;
                 }
-                Err(err)
+                Err(RunError::new(err, partial))
             }
         }
     };
@@ -134,7 +137,8 @@ pub(crate) struct ContextOptions {
 /// restores the messages and pin mask captured at construction. That
 /// keeps the pre-existing contract that a run ending in `Err` (or a
 /// stream dropped mid-run) leaves the history exactly as it was when
-/// the run started, even when the run compacted it along the way.
+/// the run started, even when the run compacted it along the way. The
+/// steps completed before an `Err` travel in [`RunError`] instead.
 struct ManagedHistory<'a> {
     history: &'a mut History,
     rollback: Option<(Vec<Message>, Vec<bool>)>,
@@ -172,6 +176,9 @@ enum RunContext<'a> {
 struct RunMessages<'a> {
     context: RunContext<'a>,
     new_messages: Vec<Message>,
+    /// Length of the `new_messages` prefix made of finished steps,
+    /// reported as [`RunError::partial_messages`] if the run fails.
+    completed_len: usize,
 }
 
 impl<'a> RunMessages<'a> {
@@ -192,6 +199,17 @@ impl<'a> RunMessages<'a> {
 
     fn new_so_far(&self) -> &[Message] {
         &self.new_messages
+    }
+
+    /// Marks everything pushed so far as a finished step. Called once
+    /// per step, after its tool results are pushed, so the prefix never
+    /// ends on a `tool_use` without its `tool_result`.
+    fn complete_step(&mut self) {
+        self.completed_len = self.new_messages.len();
+    }
+
+    fn completed(&self) -> &[Message] {
+        &self.new_messages[..self.completed_len]
     }
 
     /// Commit the run's changes to the managed history and hand back
@@ -272,6 +290,10 @@ async fn history_compacted_chunk(
 /// [`ConversationBuilder::recover_from_context_overflow`] are only
 /// available through [`Conversation`](crate::Conversation).
 ///
+/// A run that fails yields a [`RunError`] whose
+/// [`partial_messages`](RunError::partial_messages) hold the steps
+/// completed before the failure.
+///
 /// [`Conversation::run`]: crate::Conversation::run
 /// [`Conversation::stream`]: crate::Conversation::stream
 /// [`ConversationBuilder::compact_between_iterations`]: crate::ConversationBuilder::compact_between_iterations
@@ -281,7 +303,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
     messages: Vec<Message>,
     tools: &'a ToolRegistry,
     config: RunConfig,
-) -> Result<BoxStream<'a, Result<StreamChunk, EngineError<M::Error>>>, EngineError<M::Error>> {
+) -> Result<BoxStream<'a, Result<StreamChunk, RunError<M::Error>>>, RunError<M::Error>> {
     Ok(run_engine(
         model,
         RunContext::Plain(messages),
@@ -329,6 +351,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
     let mut run_msgs = RunMessages {
         context,
         new_messages: Vec::new(),
+        completed_len: 0,
     };
     let run_id = config.run_id.clone().unwrap_or_default();
     // Snapshot the catalog + active set once at run start. Per-turn
@@ -437,7 +460,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     // Best effort: nothing to drop yet. The overflow
                     // recovery below is the safety net.
                     Err(CompactionError::NotEnoughHistory) => proactive_compaction = false,
-                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &config.middlewares, &run_id)?,
+                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &config.middlewares, &run_id, run_msgs)?,
                 }
             }
 
@@ -507,11 +530,11 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                 let recoverable = is_overflow(&error)
                     && run_msgs.managed().is_some_and(|m| m.options.recover_from_overflow);
                 if !recoverable {
-                    bail_with_hooks!(Err::<(), _>(EngineError::Model(error)), &config.middlewares, &run_id)?;
+                    bail_with_hooks!(Err::<(), _>(EngineError::Model(error)), &config.middlewares, &run_id, run_msgs)?;
                     unreachable!();
                 }
                 if overflow_recovered {
-                    bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &config.middlewares, &run_id)?;
+                    bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &config.middlewares, &run_id, run_msgs)?;
                     unreachable!();
                 }
                 overflow_recovered = true;
@@ -535,9 +558,9 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     // Nothing the strategy can drop, or dropping it did
                     // not shrink the prompt: resending would fail again.
                     Ok(_) | Err(CompactionError::NotEnoughHistory) => {
-                        bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &config.middlewares, &run_id)?;
+                        bail_with_hooks!(Err::<(), _>(EngineError::ContextOverflow(error)), &config.middlewares, &run_id, run_msgs)?;
                     }
-                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &config.middlewares, &run_id)?,
+                    Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &config.middlewares, &run_id, run_msgs)?,
                 }
             };
 
@@ -568,7 +591,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                     Some(c) => c,
                     None => break,
                 };
-                let chunk = bail_with_hooks!(chunk.map_err(EngineError::Model), &config.middlewares, &run_id)?;
+                let chunk = bail_with_hooks!(chunk.map_err(EngineError::Model), &config.middlewares, &run_id, run_msgs)?;
 
                 // Mutating phase first: every `_mut` runs before any
                 // observer, so the engine itself, the assistant-history
@@ -740,7 +763,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
                                 };
                                 ToolResultContent::error(format!("Tool '{name}' not found. Available tools: [{}]", available_tools.join(", ")))
                             },
-                            Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id)?,
+                            Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &config.middlewares, &run_id, run_msgs)?,
                             Err(reason) => {
                                 if !tools_result.is_empty() {
                                     run_msgs.push(Message::User { blocks: std::mem::take(&mut tools_result) });
@@ -868,6 +891,7 @@ fn run_engine<'a, M: CompletionModel + Sync + Send>(
             if !user_blocks.is_empty() {
                 run_msgs.push(Message::User { blocks: user_blocks });
             }
+            run_msgs.complete_step();
 
             let mut chunk = StreamChunk::StepFinished {
                 run_id: run_id.clone(),
