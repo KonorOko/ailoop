@@ -10,7 +10,8 @@ use crate::{
 
 /// Reports what [`History::compact_if_needed`] did when it ran.
 /// Returned wrapped in `Option`: `None` means compaction was not needed
-/// (history fits within `max_tokens`).
+/// (history fits within `max_tokens` minus the
+/// [reserved tokens](HistoryBuilder::reserved_tokens)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CompactionReport {
@@ -55,6 +56,10 @@ pub struct History {
     /// `false` and only the explicit pin API flips the flag.
     pinned: Vec<bool>,
     max_tokens: usize,
+    /// Headroom subtracted from `max_tokens` before comparing it
+    /// against [`Self::estimated_tokens`]. See
+    /// [`HistoryBuilder::reserved_tokens`].
+    reserved_tokens: usize,
     preserve_n_last: usize,
     strategy: Box<dyn CompactionStrategy>,
     /// Tokenizer used to size [`Self::messages`] against
@@ -83,8 +88,8 @@ impl History {
     /// Restore a `History` whose history is `messages` and whose
     /// pin mask is `pinned`. The two vectors must have the same length;
     /// otherwise a [`FromMessagesError::LengthMismatch`] is returned.
-    /// All other configuration (budget, strategy, tokenizer, preserved
-    /// tail size) comes from `builder` — pass the same configuration
+    /// All other configuration (budget, reserved tokens, strategy,
+    /// tokenizer, preserved tail size) comes from `builder` — pass the same configuration
     /// the original conversation used so compaction behaves
     /// consistently across resumes.
     pub fn from_messages(
@@ -118,6 +123,10 @@ impl History {
     /// configured [`Tokenizer`]. The accuracy of this number is only
     /// as good as the tokenizer wired into the builder — under the
     /// default [`CharTokenizer`] it is a `len() / 4` ballpark.
+    ///
+    /// Counts the messages only: the system prompt, tool schemas and
+    /// the model's output are not included. Account for those with
+    /// [`HistoryBuilder::reserved_tokens`].
     pub fn estimated_tokens(&self) -> usize {
         self.tokenizer.count_messages(&self.messages)
     }
@@ -251,8 +260,9 @@ impl History {
 
     /// Run the configured [`CompactionStrategy`] when
     /// [`estimated_tokens`](Self::estimated_tokens) reaches the
-    /// budget; otherwise return `Ok(None)` and leave the history
-    /// untouched.
+    /// effective budget, `max_tokens - reserved_tokens` (saturating at
+    /// zero; see [`HistoryBuilder::reserved_tokens`]); otherwise return
+    /// `Ok(None)` and leave the history untouched.
     ///
     /// On success returns `Ok(Some(report))` describing the
     /// before/after counts and the strategy name. The engine emits
@@ -269,7 +279,8 @@ impl History {
     /// [`CompactionStrategy`]: crate::CompactionStrategy
     /// [`StreamChunk::HistoryCompacted`]: ailoop_core::StreamChunk::HistoryCompacted
     pub async fn compact_if_needed(&mut self) -> Result<Option<CompactionReport>, CompactionError> {
-        if self.estimated_tokens() < self.max_tokens {
+        let threshold = self.max_tokens.saturating_sub(self.reserved_tokens);
+        if self.estimated_tokens() < threshold {
             return Ok(None);
         }
 
@@ -301,6 +312,7 @@ impl History {
 /// `Self` so calls chain; [`build`](Self::build) is infallible.
 pub struct HistoryBuilder {
     max_tokens: usize,
+    reserved_tokens: usize,
     preserve_n_last: usize,
     tokenizer: Box<dyn Tokenizer>,
     strategy: Box<dyn CompactionStrategy>,
@@ -310,6 +322,7 @@ impl HistoryBuilder {
     fn new(max_tokens: usize) -> Self {
         Self {
             max_tokens,
+            reserved_tokens: 0,
             preserve_n_last: 4,
             // Fallback default — see the doc on `History::tokenizer`.
             // Production code should override via `Self::tokenizer`.
@@ -330,16 +343,55 @@ impl HistoryBuilder {
         self
     }
 
+    /// Tokens to set aside for everything that shares the context
+    /// window with the history but is not counted by
+    /// [`History::estimated_tokens`]. Default: 0.
+    ///
+    /// [`History::compact_if_needed`] compacts once the history
+    /// reaches `max_tokens.saturating_sub(reserved)` instead of
+    /// `max_tokens`. Size the reserve to cover:
+    ///
+    /// - the system prompt;
+    /// - the tool schemas sent with each request (their cost depends
+    ///   on the provider's serialization and on which tools are
+    ///   active);
+    /// - the `max_tokens` requested for the model's output;
+    /// - the tokenizer's estimation error. The default
+    ///   [`CharTokenizer`] is a `len() / 4` heuristic and can be off
+    ///   by a wide margin for code, JSON or non-English text; a real
+    ///   tokenizer narrows this but rarely to zero.
+    ///
+    /// With `max_tokens` set to the model's context window, this keeps
+    /// the budget expressed in the provider's terms while the reserve
+    /// carries the slack, rather than folding a guessed factor into
+    /// `max_tokens` itself.
+    ///
+    /// A reserve at or above `max_tokens` does not panic: the effective
+    /// budget saturates at zero, so every call to `compact_if_needed`
+    /// runs the strategy. When there is nothing left to drop (the
+    /// history is no longer than `preserve_n_last`), the strategy
+    /// returns [`CompactionError::NotEnoughHistory`].
+    ///
+    /// ```
+    /// use ailoop_history::History;
+    ///
+    /// // 200K context window; reserve 8K for output and 12K for the
+    /// // system prompt, tool schemas and tokenizer error.
+    /// let history = History::builder(200_000)
+    ///     .reserved_tokens(20_000)
+    ///     .build();
+    /// # let _ = history;
+    /// ```
+    pub fn reserved_tokens(mut self, n: usize) -> Self {
+        self.reserved_tokens = n;
+        self
+    }
+
     /// Wire a [`Tokenizer`] into the manager. Replaces the default
     /// [`CharTokenizer`] fallback so [`History::compact_if_needed`]
     /// measures the budget in real tokens rather than `len() / 4`.
     pub fn tokenizer(self, tokenizer: Box<dyn Tokenizer>) -> HistoryBuilder {
-        HistoryBuilder {
-            max_tokens: self.max_tokens,
-            preserve_n_last: self.preserve_n_last,
-            tokenizer,
-            strategy: self.strategy,
-        }
+        HistoryBuilder { tokenizer, ..self }
     }
 
     /// Wire a [`CompactionStrategy`] into the manager. Replaces the
@@ -350,12 +402,7 @@ impl HistoryBuilder {
     /// [`CompactionStrategy`]: crate::CompactionStrategy
     /// [`TruncateStrategy`]: crate::TruncateStrategy
     pub fn strategy(self, strategy: Box<dyn CompactionStrategy>) -> HistoryBuilder {
-        HistoryBuilder {
-            max_tokens: self.max_tokens,
-            preserve_n_last: self.preserve_n_last,
-            tokenizer: self.tokenizer,
-            strategy,
-        }
+        HistoryBuilder { strategy, ..self }
     }
 
     /// Finalize the configuration and build the [`History`].
@@ -365,6 +412,7 @@ impl HistoryBuilder {
             messages: Vec::new(),
             pinned: Vec::new(),
             max_tokens: self.max_tokens,
+            reserved_tokens: self.reserved_tokens,
             preserve_n_last: self.preserve_n_last,
             strategy: self.strategy,
             tokenizer: self.tokenizer,
@@ -565,6 +613,82 @@ mod tests {
         assert!(report.after < report.before);
         // After compaction the tail is still bound by `preserve_n_last`.
         assert_eq!(report.after, 2);
+    }
+
+    /// Bills every text block at 10 tokens so budgets can be reasoned
+    /// about in message counts.
+    struct TenPerMessage;
+    impl Tokenizer for TenPerMessage {
+        fn count_text(&self, _text: &str) -> usize {
+            10
+        }
+    }
+
+    fn five_messages(builder: HistoryBuilder) -> History {
+        let mut mgr = builder
+            .tokenizer(Box::new(TenPerMessage))
+            .preserve_n_last(2)
+            .build();
+        for i in 0..5 {
+            mgr.add_message(Message::user(format!("q{i}")));
+        }
+        mgr
+    }
+
+    #[tokio::test]
+    async fn reserved_tokens_lowers_the_compaction_threshold() {
+        // 50 tokens fit under 60 on their own...
+        let mut unreserved = five_messages(History::builder(60));
+        assert_eq!(unreserved.estimated_tokens(), 50);
+        assert!(unreserved.compact_if_needed().await.unwrap().is_none());
+
+        // ...but not under 60 - 15 = 45.
+        let mut reserved = five_messages(History::builder(60).reserved_tokens(15));
+        assert_eq!(
+            reserved.estimated_tokens(),
+            50,
+            "the reserve must not change estimated_tokens"
+        );
+        let report = reserved
+            .compact_if_needed()
+            .await
+            .unwrap()
+            .expect("history over max_tokens - reserved must compact");
+        assert_eq!((report.before, report.after), (5, 2));
+    }
+
+    #[tokio::test]
+    async fn reserved_tokens_at_or_above_max_tokens_saturates() {
+        for reserved in [60, 1_000, usize::MAX] {
+            let mut mgr = five_messages(History::builder(60).reserved_tokens(reserved));
+            let report = mgr
+                .compact_if_needed()
+                .await
+                .unwrap()
+                .expect("effective budget of zero must compact");
+            assert_eq!(report.after, 2);
+
+            // Nothing left beyond the preserved tail: the strategy
+            // reports it instead of panicking.
+            assert!(matches!(
+                mgr.compact_if_needed().await,
+                Err(CompactionError::NotEnoughHistory)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn from_messages_keeps_reserved_tokens() {
+        let messages: Vec<Message> = (0..5).map(|i| Message::user(format!("q{i}"))).collect();
+        let builder = History::builder(60)
+            .reserved_tokens(15)
+            .tokenizer(Box::new(TenPerMessage))
+            .preserve_n_last(2);
+        let mut mgr = History::from_messages(builder, messages, vec![false; 5]).unwrap();
+        assert!(
+            mgr.compact_if_needed().await.unwrap().is_some(),
+            "restored history must use the builder's reserve"
+        );
     }
 
     #[test]
