@@ -91,6 +91,21 @@ impl Default for RunConfig {
     }
 }
 
+impl std::fmt::Debug for RunConfig {
+    /// Middlewares are trait objects, so only their count is shown.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunConfig")
+            .field("system_prompt", &self.system_prompt)
+            .field("max_iterations", &self.max_iterations)
+            .field("max_tokens", &self.max_tokens)
+            .field("middlewares", &self.middlewares.len())
+            .field("run_id", &self.run_id)
+            .field("timeout", &self.timeout)
+            .field("cancellation", &self.cancellation)
+            .finish()
+    }
+}
+
 impl RunConfig {
     /// Build a config with the given iteration cap and otherwise
     /// default values. Equivalent to

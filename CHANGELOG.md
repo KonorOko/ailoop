@@ -10,6 +10,9 @@ and this project adheres to
 
 ### Added
 
+- `RunConfig` implements `Debug`. Middlewares are shown as a count,
+  since they are trait objects.
+
 - `ChatMiddleware::on_run_dropped(&self, run_id)`: a third closing
   hook, fired when the caller drops a run's stream before the run
   closed (a `select!` that picks another branch, an outer timeout, a
@@ -50,10 +53,10 @@ and this project adheres to
   `ToolResult` chunk and the middleware hooks. `ToolContext::detached`
   mints a synthetic one.
 
-- `ApprovalRequest::call_id` and `ApprovalRequest::with_call_id`.
-  `ApprovalMiddleware` fills it, so an approval UI or verifier can
-  tell apart two identical calls in one step and match its decision
-  to the `ToolResult` chunk. `ApprovalRequest::new` leaves it empty.
+- `ApprovalRequest::call_id`, so an approval UI or verifier can tell
+  apart two identical calls in one step and match its decision to the
+  `ToolResult` chunk. `ApprovalRequest::new(call, args)` takes the
+  call's `ToolCallInfo`, so the id is always set.
 
 - `JsonTracer` writes `call_id` on `before_tool_call` and
   `after_tool_call` lines, and `TracingMiddleware` adds a `call_id`
@@ -74,7 +77,6 @@ and this project adheres to
   finished turn) even though that step is left out of
   `partial_messages`. Errors raised before the run starts (history
   compaction in `Conversation::stream_with_options`) carry zero usage.
-  `into_parts` is unchanged.
 
 - `Usage` derives `PartialEq` and `Eq`.
 
@@ -89,8 +91,8 @@ and this project adheres to
   `messages` (the context sent to the model on the step that produced
   the call, after every middleware's `on_chat_request`). The type is
   `#[non_exhaustive]` so more context can be added without breaking
-  callbacks; `ApprovalRequest::new` plus `with_tags` / `with_messages`
-  build one outside the crate, e.g. to unit-test a verifier. Its
+  callbacks; `ApprovalRequest::new(ToolCallInfo, args)` plus
+  `with_tags` / `with_messages` build one outside the crate, e.g. to unit-test a verifier. Its
   rustdoc describes a model-based risky-action verifier: tags pick what
   gets reviewed, the verifier allows, denies or escalates to a human,
   it fails closed on error or timeout, and it reads intent from the
@@ -111,7 +113,9 @@ and this project adheres to
 - `RunError<E>` (re-exported from `ailoop`): the error of a failed run.
   It wraps the `EngineError` cause (`kind()`, `into_kind()`) and the
   messages of the steps the run completed before failing
-  (`partial_messages()`, `into_parts()`). Until now those steps were
+  (`partial_messages()`). `into_parts()` returns a `RunErrorParts`
+  with the three owned parts (`kind`, `usage`, `partial_messages`);
+  it is `#[non_exhaustive]`, so destructure it with `..`. Until now those steps were
   lost when a run failed: the history is rolled back on `Err`, so the
   record of tools that already ran (writes, API calls) disappeared and
   the next turn could repeat them. The partial list is exactly the
@@ -357,6 +361,13 @@ and this project adheres to
 
 ### Changed
 
+- `ToolContext::new`, `ToolActivation::new`, `ToolRegistry::catalog_arc`
+  and `ToolRegistry::snapshot_active` are hidden from the docs and not
+  covered by semver. They are the engine's plumbing: their signatures
+  expose `indexmap` types and have changed twice in this release
+  (`call_id`, `cancellation`). Tools and tests build a context with
+  `ToolContext::detached()`, whose signature is stable.
+
 - `RunFinished.usage`, `RunOutcome.usage` and the `usage` passed to
   `ChatMiddleware::on_run_finished` now mean **everything the run
   spent**: its own provider turns plus usage reported by tools.
@@ -397,6 +408,58 @@ and this project adheres to
   "Tool calls within a step" on `ChatMiddleware`.
 
 ### Changed (BREAKING)
+
+- The modules of `ailoop-core` (`config`, `ids`, `message`,
+  `middleware`, `provider_error`, `request`, `retry`, `stream`),
+  `ailoop-history` (`compaction`, `errors`, `history`, `history_store`,
+  `snapshot`) and `ailoop-tools` (`context`, `errors`, `registry`,
+  `schema`, `timeout`) are private. Every public item was already
+  re-exported at the crate root (and from the `ailoop` facade), so each
+  type had two paths, and the module layout was part of the API: moving
+  a type between files would have been a breaking change. Only the root
+  paths remain. `ailoop_core::testing` (behind the `testing` feature)
+  and `ailoop::advanced` stay public.
+
+- `CompletionModel` requires `Send + Sync`. Its docs already said
+  implementations must be both, since the engine and `RetryingModel`
+  hold models across `.await`s, but the trait did not declare it, so
+  every function generic over a model had to spell out
+  `M: CompletionModel + Send + Sync`. The bound now comes with the
+  trait; `M: CompletionModel` is enough. Every model that worked with
+  the engine already met it, so only a model that could never be used
+  by a `Conversation` stops compiling.
+
+- The `StreamChunk` variants the engine emits (`RunStarted`,
+  `StepStarted`, `StepFinished`, `ToolResult`, `RunFinished`,
+  `HistoryCompacted`) are `#[non_exhaustive]`. The enum already was, so
+  new chunks could be added, but a variant's fields could not grow
+  without breaking every match that listed them all, and these are the
+  chunks most likely to carry more context later. Match them with `..`.
+  Code outside `ailoop-core` builds them with the new constructors
+  `StreamChunk::run_started`, `step_started`, `step_finished`,
+  `tool_result`, `run_finished` and `history_compacted`, e.g. to feed a
+  middleware's `on_chunk` in a test. The variants providers emit
+  (`TextDelta`, `ToolCall*`, `Reasoning*`, `TurnFinished`) are
+  unchanged: adapters and `ScriptedModel` scripts keep building them
+  with struct syntax.
+
+- The run-level hooks of `ChatMiddleware` take one context struct in
+  place of positional arguments:
+  `on_run_started(&RunStartInfo)`, `on_chat_request(&StepInfo, req)`,
+  `on_run_finished(&RunFinishedInfo)`, `on_turn_end(&TurnEndInfo)` and
+  `on_run_error(&RunErrorInfo)`. Each positional argument added to a
+  hook broke every middleware that overrode it; this release alone
+  added `usage` and `partial_messages` to `on_run_error` that way. The
+  structs are `#[non_exhaustive]`, so later releases can add fields
+  without breaking implementations. Their fields are public and have
+  the old parameters' names, except `err`, which is now `error`. The
+  borrowed ones (`RunStartInfo`, `RunFinishedInfo`, `TurnEndInfo`,
+  `RunErrorInfo`) borrow from the engine for the duration of the hook,
+  so nothing is cloned. Each has a `new(...)` constructor for
+  unit-testing a middleware. `ChatRequest` stays a separate argument of
+  `on_chat_request` because the hook borrows it mutably, like `args` in
+  the tool hooks. `on_run_dropped(run_id)` and the chunk hooks are
+  unchanged.
 
 - `RunConfig::default().max_iterations` is now 25 (was 10). One
   iteration is one model turn plus the tool calls it triggers. Every
@@ -529,19 +592,23 @@ and this project adheres to
     timeout that fires at the same instant.
   - `Terminated { reason }`: a middleware returned
     `HookAction::Terminate` from `on_run_started`.
-  - `ToolTerminated { tool_name, reason }`: a middleware (`AntiLoop`,
-    `MaxToolCalls`, or your own) returned `ToolDecision::Terminate`. It
-    now also names the refused tool.
+  - `ToolTerminated { tool_name, call_id, reason }`: a middleware
+    (`AntiLoop`, `MaxToolCalls`, or your own) returned
+    `ToolDecision::Terminate`. It now also names the refused tool and
+    carries the refused call's id.
 
-  `AbortReason` is `#[non_exhaustive]`. Its `Display` renders exactly
+  `AbortReason` is `#[non_exhaustive]`, and so are its struct variants
+  `Terminated` and `ToolTerminated`: match them with `..` and build them
+  with `AbortReason::terminated(reason)` /
+  `AbortReason::tool_terminated(tool_name, call_id, reason)`. Its `Display` renders exactly
   the old strings (`"timeout exceeded after 30s"`,
   `"cancelled by caller"`, or the middleware reason verbatim), so text
   shown to users or to a parent model (for example
   `SubAgentTool`'s `"sub-agent aborted: …"`) is unchanged.
   `JsonTracer`'s `run_finished` payload keeps `reason.detail` and
   gains `reason.abort_kind` (`timeout` / `cancelled` / `terminated` /
-  `tool_terminated` / `max_iterations`) plus `reason.tool_name` for
-  tool terminations.
+  `tool_terminated` / `max_iterations`) plus `reason.tool_name` and
+  `reason.call_id` for tool terminations.
 - Reaching `RunConfig::max_iterations` (or `RunOptions::max_iterations`
   / `SubAgentConfig::max_iterations`) is now an abort, not an error.
   The run returns `Ok` with
@@ -687,6 +754,73 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Import from the crate root (or from `ailoop`) instead of a module
+path:
+
+```rust
+// Before (1.0.0-rc.3)
+use ailoop_core::stream::StreamChunk;
+use ailoop_tools::errors::ToolRegistryError;
+
+// After
+use ailoop::{StreamChunk, ToolRegistryError};
+```
+
+Engine-emitted chunks need `..` in patterns and a constructor outside
+`ailoop-core`:
+
+```rust
+// Before (1.0.0-rc.3)
+if let StreamChunk::StepStarted { run_id, step_id, iteration } = &chunk { /* .. */ }
+let chunk = StreamChunk::RunFinished { run_id, reason, usage, new_messages };
+
+// After
+if let StreamChunk::StepStarted { run_id, step_id, iteration, .. } = &chunk { /* .. */ }
+let chunk = StreamChunk::run_finished(run_id, reason, usage, new_messages);
+```
+
+Run-level hooks take a context struct; read the old arguments from its
+fields:
+
+```rust
+use ailoop::{RunErrorInfo, RunFinishedInfo, RunStartInfo, StepInfo, TurnEndInfo};
+
+// Before (1.0.0-rc.3)
+async fn on_run_started(&self, run_id: &RunId, messages: &[Message], config: &RunConfig) -> HookAction {
+    self.start(run_id, config.max_iterations);
+    HookAction::Continue
+}
+async fn on_chat_request(&self, run_id: &RunId, step_id: &StepId, req: &mut ChatRequest) { /* .. */ }
+async fn on_run_finished(&self, run_id: &RunId, reason: &FinishReason, usage: &Usage, new_messages: &[Message]) {
+    self.finish(run_id, usage);
+}
+async fn on_run_error(&self, run_id: &RunId, err: &(dyn Error + Send + Sync)) {
+    self.fail(run_id, err);
+}
+
+// After
+async fn on_run_started(&self, run: &RunStartInfo<'_>) -> HookAction {
+    self.start(run.run_id, run.config.max_iterations);
+    HookAction::Continue
+}
+async fn on_chat_request(&self, step: &StepInfo, req: &mut ChatRequest) {
+    // step.run_id, step.step_id
+}
+async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
+    self.finish(run.run_id, run.usage);
+}
+async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
+    self.fail(run.run_id, run.error); // also run.usage, run.partial_messages
+}
+async fn on_turn_end(&self, turn: &TurnEndInfo<'_>) -> ContinueDecision {
+    // turn.run_id, turn.step_id, turn.reason, turn.new_messages
+    ContinueDecision::Stop
+}
+```
+
+To unit-test a middleware, build the context with its constructor,
+e.g. `RunFinishedInfo::new(&run_id, &FinishReason::EndTurn, &usage, &[])`.
 
 To keep the old cap of 10 iterations, set it explicitly:
 

@@ -7,12 +7,13 @@ use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use ailoop::{
-    Conversation, Message, Sanitize, ToolDefinition, ToolResultContent, advanced::run_chat,
+    Conversation, Message, Sanitize, StepInfo, ToolDefinition, ToolResultContent,
+    advanced::run_chat,
 };
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{
-    AssistantBlock, ChatMiddleware, ChatRequest, FinishReason, RunConfig, RunId, StepId,
-    StreamChunk, Usage, UserBlock,
+    AssistantBlock, ChatMiddleware, ChatRequest, FinishReason, RunConfig, StreamChunk, Usage,
+    UserBlock,
 };
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
 use futures::StreamExt;
@@ -27,7 +28,7 @@ struct RequestRecorder {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for RequestRecorder {
-    async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         self.captures.lock().unwrap().push(req.messages.clone());
     }
 }

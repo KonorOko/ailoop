@@ -16,7 +16,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use ailoop::{Conversation, Message, ToolDefinition, ToolResultContent, advanced::run_chat};
+use ailoop::{
+    Conversation, Message, RunStartInfo, ToolDefinition, ToolResultContent, advanced::run_chat,
+};
 use ailoop_core::testing::ScriptedModel;
 use ailoop_core::{ChatMiddleware, FinishReason, RunConfig, StreamChunk, ToolCallInfo, Usage};
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
@@ -455,12 +457,7 @@ async fn replacing_run_finished_variant_is_ignored_on_abort() {
 
     #[async_trait::async_trait]
     impl ChatMiddleware for Deny {
-        async fn on_run_started(
-            &self,
-            _run_id: &ailoop::RunId,
-            _messages: &[Message],
-            _config: &RunConfig,
-        ) -> ailoop::HookAction {
+        async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> ailoop::HookAction {
             ailoop::HookAction::Terminate {
                 reason: "stop".into(),
             }

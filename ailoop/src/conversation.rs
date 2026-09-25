@@ -236,7 +236,7 @@ impl RunOptions {
 
 impl<M> Conversation<M>
 where
-    M: CompletionModel + Send + Sync,
+    M: CompletionModel,
     M::Error: ProviderError,
 {
     /// Start a [`ConversationBuilder`] for `model`. Equivalent to
@@ -276,7 +276,7 @@ where
     ///
     /// ```no_run
     /// # async fn demo<M>(chat: &mut ailoop::Conversation<M>)
-    /// # where M: ailoop::CompletionModel + Send + Sync, M::Error: ailoop::ProviderError {
+    /// # where M: ailoop::CompletionModel, M::Error: ailoop::ProviderError {
     /// if let Err(err) = chat.run("migrate the database").await {
     ///     chat.history_extend(err.partial_messages().iter().cloned());
     /// }
@@ -375,6 +375,7 @@ where
                 reason,
                 usage,
                 new_messages,
+                ..
             } = chunk?
             {
                 finished = Some((run_id, reason, usage, new_messages));
@@ -521,12 +522,8 @@ where
 
         let prelude: BoxStream<'_, Result<StreamChunk, RunError<M::Error>>> = match report {
             Some(r) => {
-                let mut chunk = StreamChunk::HistoryCompacted {
-                    run_id,
-                    before_count: r.before,
-                    after_count: r.after,
-                    strategy: r.strategy,
-                };
+                let mut chunk =
+                    StreamChunk::history_compacted(run_id, r.before, r.after, r.strategy);
                 let middlewares = self.middlewares.clone();
                 Box::pin(futures::stream::once(async move {
                     for mw in &middlewares {
@@ -1626,6 +1623,7 @@ mod tests {
                 before_count,
                 after_count,
                 strategy,
+                ..
             } => {
                 assert!(after_count < before_count, "compaction must shrink history");
                 assert_eq!(strategy, "truncate");
@@ -1638,7 +1636,7 @@ mod tests {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.unwrap();
             match &chunk {
-                StreamChunk::RunStarted { run_id }
+                StreamChunk::RunStarted { run_id, .. }
                 | StreamChunk::StepStarted { run_id, .. }
                 | StreamChunk::StepFinished { run_id, .. }
                 | StreamChunk::ToolResult { run_id, .. }
@@ -1722,7 +1720,7 @@ mod tests {
     // middleware has run.
 
     use ailoop_core::testing::ScriptedModel;
-    use ailoop_core::{FinishReason, RunId, StepId, ToolChoice, Usage};
+    use ailoop_core::{FinishReason, RunId, RunStartInfo, StepInfo, ToolChoice, Usage};
     use std::sync::Mutex;
 
     #[derive(Clone, Default)]
@@ -1744,7 +1742,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ChatMiddleware for RecordingMiddleware {
-        async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+        async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
             *self.out.lock().unwrap() = Some(Recorded {
                 temperature: req.temperature,
                 top_p: req.top_p,
@@ -1840,7 +1838,7 @@ mod tests {
         struct Override;
         #[async_trait::async_trait]
         impl ChatMiddleware for Override {
-            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
                 req.temperature = Some(1.0);
             }
         }
@@ -1937,7 +1935,7 @@ mod tests {
         struct Override;
         #[async_trait::async_trait]
         impl ChatMiddleware for Override {
-            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
                 req.max_tokens = 77;
             }
         }
@@ -1996,7 +1994,7 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl ChatMiddleware for Recorder {
-            async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+            async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
                 self.captures.lock().unwrap().push(req.messages.clone());
             }
         }
@@ -2116,13 +2114,8 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl ChatMiddleware for ConfigSpy {
-            async fn on_run_started(
-                &self,
-                _run_id: &RunId,
-                _messages: &[Message],
-                config: &RunConfig,
-            ) -> ailoop_core::HookAction {
-                *self.captured.lock().unwrap() = Some(config.max_iterations);
+            async fn on_run_started(&self, run: &RunStartInfo<'_>) -> ailoop_core::HookAction {
+                *self.captured.lock().unwrap() = Some(run.config.max_iterations);
                 ailoop_core::HookAction::Continue
             }
         }
@@ -2149,13 +2142,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ChatMiddleware for MaxIterationsSpy {
-        async fn on_run_started(
-            &self,
-            _run_id: &RunId,
-            _messages: &[Message],
-            config: &RunConfig,
-        ) -> ailoop_core::HookAction {
-            *self.captured.lock().unwrap() = Some(config.max_iterations);
+        async fn on_run_started(&self, run: &RunStartInfo<'_>) -> ailoop_core::HookAction {
+            *self.captured.lock().unwrap() = Some(run.config.max_iterations);
             ailoop_core::HookAction::Continue
         }
     }

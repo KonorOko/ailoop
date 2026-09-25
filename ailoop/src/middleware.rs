@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use ailoop_core::{
-    ChatMiddleware, ChatRequest, FinishReason, Message, ReasoningEffort, RunId, StepId,
-    SystemBlock, SystemPrompt, ToolCallInfo, ToolChoice, ToolDecision, ToolTag, Usage,
+    ChatMiddleware, ChatRequest, Message, ReasoningEffort, RunErrorInfo, RunFinishedInfo, RunId,
+    StepId, StepInfo, SystemBlock, SystemPrompt, ToolCallInfo, ToolChoice, ToolDecision, ToolTag,
 };
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -31,7 +31,7 @@ pub(crate) struct SystemPromptMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for SystemPromptMiddleware {
-    async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         let mut prompt = self.base.clone();
 
         if let Some(tools) = &req.tools {
@@ -132,7 +132,7 @@ pub(crate) struct RequestDefaultsMiddleware {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for RequestDefaultsMiddleware {
-    async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         if req.temperature.is_none() {
             req.temperature = self.defaults.temperature;
         }
@@ -255,9 +255,7 @@ pub struct ApprovalRequest {
     /// Step (model turn) that produced the call.
     pub step_id: StepId,
     /// Provider-assigned id of the call, the same as `call_id` on
-    /// [`ToolCallInfo`] and on the `ToolResult` chunk. Empty unless set
-    /// with [`with_call_id`](Self::with_call_id);
-    /// [`ApprovalMiddleware`] always fills it.
+    /// [`ToolCallInfo`] and on the `ToolResult` chunk.
     pub call_id: String,
     /// Wire name of the tool.
     pub tool_name: String,
@@ -279,26 +277,21 @@ pub struct ApprovalRequest {
 }
 
 impl ApprovalRequest {
-    /// A request with empty `call_id`, `tags` and `messages`; set them
-    /// with [`with_call_id`](Self::with_call_id),
+    /// A request for the call `call` with arguments `args`. The run,
+    /// step, call id and tool name come from `call`; `tags` and
+    /// `messages` start empty, set them with
     /// [`with_tags`](Self::with_tags) and
     /// [`with_messages`](Self::with_messages).
-    pub fn new(run_id: RunId, step_id: StepId, tool_name: impl Into<String>, args: Value) -> Self {
+    pub fn new(call: ToolCallInfo, args: Value) -> Self {
         Self {
-            run_id,
-            step_id,
-            call_id: String::new(),
-            tool_name: tool_name.into(),
+            run_id: call.run_id,
+            step_id: call.step_id,
+            call_id: call.call_id,
+            tool_name: call.name,
             args,
             tags: Arc::from([]),
             messages: Arc::from([]),
         }
-    }
-
-    /// Replace `call_id`.
-    pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
-        self.call_id = call_id.into();
-        self
     }
 
     /// Replace `tags`.
@@ -433,12 +426,12 @@ where
 
 #[async_trait::async_trait]
 impl ChatMiddleware for ApprovalMiddleware {
-    async fn on_chat_request(&self, run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, step: &StepInfo, req: &mut ChatRequest) {
         // One copy per step, shared by every gated call of the step.
         // Overwrites the previous step (and a same-step retry after
         // context-overflow recovery).
         let messages: Arc<[Message]> = Arc::from(req.messages.as_slice());
-        self.contexts().insert(run_id.clone(), messages);
+        self.contexts().insert(step.run_id.clone(), messages);
     }
 
     async fn on_before_tool_call(&self, call: &ToolCallInfo, args: &Value) -> ToolDecision {
@@ -455,36 +448,18 @@ impl ChatMiddleware for ApprovalMiddleware {
             .get(&call.name)
             .cloned()
             .unwrap_or_else(|| Arc::from([]));
-        let req = ApprovalRequest::new(
-            call.run_id.clone(),
-            call.step_id.clone(),
-            &call.name,
-            args.clone(),
-        )
-        .with_call_id(&call.call_id)
-        .with_tags(tags)
-        .with_messages(messages);
+        let req = ApprovalRequest::new(call.clone(), args.clone())
+            .with_tags(tags)
+            .with_messages(messages);
         (self.callback)(req).await
     }
 
-    async fn on_run_finished(
-        &self,
-        run_id: &RunId,
-        _reason: &FinishReason,
-        _usage: &Usage,
-        _new_messages: &[Message],
-    ) {
-        self.contexts().remove(run_id);
+    async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
+        self.contexts().remove(run.run_id);
     }
 
-    async fn on_run_error(
-        &self,
-        run_id: &RunId,
-        _err: &(dyn std::error::Error + Send + Sync),
-        _usage: &Usage,
-        _partial_messages: &[Message],
-    ) {
-        self.contexts().remove(run_id);
+    async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
+        self.contexts().remove(run.run_id);
     }
 
     fn on_run_dropped(&self, run_id: &RunId) {
@@ -495,6 +470,7 @@ impl ChatMiddleware for ApprovalMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ailoop_core::{FinishReason, Usage};
 
     fn gate() -> ApprovalMiddleware {
         ApprovalMiddleware::approve_all(|_req| async { ToolDecision::Continue })
@@ -502,7 +478,20 @@ mod tests {
 
     async fn record_step(mw: &ApprovalMiddleware, run_id: &RunId) {
         let mut req = ChatRequest::new(vec![Message::user("hi")], 1024);
-        mw.on_chat_request(run_id, &StepId::new(), &mut req).await;
+        mw.on_chat_request(&StepInfo::new(run_id.clone(), StepId::new()), &mut req)
+            .await;
+    }
+
+    #[test]
+    fn approval_request_new_takes_identity_from_call() {
+        let call = ToolCallInfo::new(RunId::new(), StepId::new(), "toolu_1", "rm");
+        let req = ApprovalRequest::new(call.clone(), serde_json::json!({"path": "/tmp"}));
+        assert_eq!(req.run_id, call.run_id);
+        assert_eq!(req.step_id, call.step_id);
+        assert_eq!(req.call_id, "toolu_1");
+        assert_eq!(req.tool_name, "rm");
+        assert!(req.tags.is_empty());
+        assert!(req.messages.is_empty());
     }
 
     #[tokio::test]
@@ -512,8 +501,13 @@ mod tests {
         record_step(&mw, &run_id).await;
         assert_eq!(mw.tracked_runs(), 1);
 
-        mw.on_run_finished(&run_id, &FinishReason::EndTurn, &Usage::default(), &[])
-            .await;
+        mw.on_run_finished(&RunFinishedInfo::new(
+            &run_id,
+            &FinishReason::EndTurn,
+            &Usage::default(),
+            &[],
+        ))
+        .await;
         assert_eq!(mw.tracked_runs(), 0);
     }
 
@@ -527,7 +521,8 @@ mod tests {
         assert_eq!(mw.tracked_runs(), 2);
 
         let err = std::io::Error::other("boom");
-        mw.on_run_error(&run_id, &err, &Usage::default(), &[]).await;
+        mw.on_run_error(&RunErrorInfo::new(&run_id, &err, &Usage::default(), &[]))
+            .await;
         assert_eq!(mw.tracked_runs(), 1, "only the failed run is dropped");
     }
 }

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use ailoop_core::{
-    AssistantBlock, ChatMiddleware, ChatRequest, Message, RunId, StepId, ToolCallInfo,
+    AssistantBlock, ChatMiddleware, ChatRequest, Message, StepInfo, ToolCallInfo,
     ToolResultContent, UserBlock,
 };
 use serde_json::Value;
@@ -166,7 +166,7 @@ impl Default for Sanitize {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for Sanitize {
-    async fn on_chat_request(&self, _: &RunId, _: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         let user_active = !self.user_text.is_empty();
         let assistant_active = self.assistant_text_enabled && !self.assistant_text.is_empty();
         if !user_active && !assistant_active {

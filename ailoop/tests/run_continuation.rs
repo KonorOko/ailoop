@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use ailoop::{
     AbortReason, ChatMiddleware, ChatRequest, ContinueDecision, Conversation, FinishReason,
-    HookAction, Message, RunConfig, RunId, StepId, StreamChunk, ToolDefinition, ToolResultContent,
-    Usage, UserBlock, advanced::run_chat,
+    HookAction, Message, RunConfig, RunStartInfo, StepInfo, StreamChunk, ToolDefinition,
+    ToolResultContent, TurnEndInfo, Usage, UserBlock, advanced::run_chat,
 };
 use ailoop_core::testing::ScriptedModel;
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
@@ -93,14 +93,8 @@ impl Gate {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for Gate {
-    async fn on_turn_end(
-        &self,
-        _run_id: &RunId,
-        _step_id: &StepId,
-        reason: &FinishReason,
-        _new_messages: &[Message],
-    ) -> ContinueDecision {
-        self.reasons.lock().unwrap().push(reason.clone());
+    async fn on_turn_end(&self, turn: &TurnEndInfo<'_>) -> ContinueDecision {
+        self.reasons.lock().unwrap().push(turn.reason.clone());
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if n < self.fail_times {
             ContinueDecision::continue_with(RETRY_PROMPT)
@@ -116,7 +110,7 @@ struct RequestLog(Mutex<Vec<Vec<Message>>>);
 
 #[async_trait::async_trait]
 impl ChatMiddleware for RequestLog {
-    async fn on_chat_request(&self, _run_id: &RunId, _step_id: &StepId, req: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
         self.0.lock().unwrap().push(req.messages.clone());
     }
 }
@@ -354,12 +348,7 @@ struct Terminate;
 
 #[async_trait::async_trait]
 impl ChatMiddleware for Terminate {
-    async fn on_run_started(
-        &self,
-        _run_id: &RunId,
-        _messages: &[Message],
-        _config: &RunConfig,
-    ) -> HookAction {
+    async fn on_run_started(&self, _run: &RunStartInfo<'_>) -> HookAction {
         HookAction::Terminate {
             reason: "no".into(),
         }
@@ -418,13 +407,7 @@ struct EmptyContinue(AtomicUsize);
 
 #[async_trait::async_trait]
 impl ChatMiddleware for EmptyContinue {
-    async fn on_turn_end(
-        &self,
-        _run_id: &RunId,
-        _step_id: &StepId,
-        _reason: &FinishReason,
-        _new_messages: &[Message],
-    ) -> ContinueDecision {
+    async fn on_turn_end(&self, _turn: &TurnEndInfo<'_>) -> ContinueDecision {
         self.0.fetch_add(1, Ordering::SeqCst);
         ContinueDecision::Continue { blocks: vec![] }
     }

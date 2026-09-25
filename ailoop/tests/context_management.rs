@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use ailoop::{
     AssistantBlock, ChatMiddleware, ChatRequest, CompletionModel, Conversation, EngineError,
-    FinishReason, History, Message, RunError, RunId, StreamChunk, ToolDefinition,
+    FinishReason, History, Message, RunError, RunErrorInfo, StepInfo, StreamChunk, ToolDefinition,
     ToolResultContent, Usage, UserBlock,
 };
 use ailoop_core::testing::{ScriptedError, ScriptedModel, ScriptedTurn};
@@ -91,16 +91,10 @@ struct Counters {
 
 #[async_trait]
 impl ChatMiddleware for Counters {
-    async fn on_chat_request(&self, _: &RunId, _: &ailoop::StepId, _: &mut ChatRequest) {
+    async fn on_chat_request(&self, _step: &StepInfo, _: &mut ChatRequest) {
         self.chat_requests.fetch_add(1, Ordering::SeqCst);
     }
-    async fn on_run_error(
-        &self,
-        _: &RunId,
-        _: &(dyn std::error::Error + Send + Sync),
-        _: &Usage,
-        _: &[Message],
-    ) {
+    async fn on_run_error(&self, _run: &RunErrorInfo<'_>) {
         self.run_errors.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -143,7 +137,7 @@ fn overflow_turn() -> ScriptedTurn {
 /// (100 tokens per message, 400 in total).
 fn seed_prior_turns<M>(chat: &mut Conversation<M>)
 where
-    M: CompletionModel + Send + Sync,
+    M: CompletionModel,
     M::Error: ailoop::ProviderError,
 {
     for i in 0..2 {
@@ -231,7 +225,7 @@ async fn compacts_between_iterations_when_enabled() {
     let chunks: Vec<StreamChunk> = chunks.into_iter().map(|c| c.expect("no error")).collect();
 
     let run_id = match &chunks[0] {
-        StreamChunk::RunStarted { run_id } => run_id.clone(),
+        StreamChunk::RunStarted { run_id, .. } => run_id.clone(),
         other => panic!("no pre-run compaction expected, got {other:?}"),
     };
     let pos = |pred: &dyn Fn(&StreamChunk) -> bool| chunks.iter().position(pred).unwrap();
@@ -245,6 +239,7 @@ async fn compacts_between_iterations_when_enabled() {
             before_count,
             after_count,
             strategy,
+            ..
         } => {
             assert_eq!(compacted_run_id, &run_id);
             // 4 prior + kickoff + tool_use + tool_result → kickoff + pair.

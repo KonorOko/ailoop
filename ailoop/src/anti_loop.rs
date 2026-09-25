@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use ailoop_core::{
-    ChatMiddleware, FinishReason, Message, RunId, StepId, StreamChunk, ToolCallInfo, ToolDecision,
-    Usage,
+    ChatMiddleware, RunErrorInfo, RunFinishedInfo, RunId, RunStartInfo, StepId, StreamChunk,
+    ToolCallInfo, ToolDecision,
 };
 use serde_json::Value;
 
@@ -189,15 +189,10 @@ impl AntiLoop {
 
 #[async_trait::async_trait]
 impl ChatMiddleware for AntiLoop {
-    async fn on_run_started(
-        &self,
-        run_id: &RunId,
-        _messages: &[Message],
-        _config: &ailoop_core::RunConfig,
-    ) -> ailoop_core::HookAction {
+    async fn on_run_started(&self, run: &RunStartInfo<'_>) -> ailoop_core::HookAction {
         self.inner()
             .runs
-            .insert(run_id.clone(), RunState::default());
+            .insert(run.run_id.clone(), RunState::default());
         ailoop_core::HookAction::Continue
     }
 
@@ -308,24 +303,12 @@ impl ChatMiddleware for AntiLoop {
         ToolDecision::Continue
     }
 
-    async fn on_run_finished(
-        &self,
-        run_id: &RunId,
-        _reason: &FinishReason,
-        _usage: &Usage,
-        _new_messages: &[Message],
-    ) {
-        self.forget(run_id);
+    async fn on_run_finished(&self, run: &RunFinishedInfo<'_>) {
+        self.forget(run.run_id);
     }
 
-    async fn on_run_error(
-        &self,
-        run_id: &RunId,
-        _err: &(dyn std::error::Error + Send + Sync),
-        _usage: &Usage,
-        _partial_messages: &[Message],
-    ) {
-        self.forget(run_id);
+    async fn on_run_error(&self, run: &RunErrorInfo<'_>) {
+        self.forget(run.run_id);
     }
 
     fn on_run_dropped(&self, run_id: &RunId) {

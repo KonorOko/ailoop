@@ -187,7 +187,7 @@ pub struct SummarizeStrategy<M> {
 
 impl<M> SummarizeStrategy<M>
 where
-    M: CompletionModel + Send + Sync + 'static,
+    M: CompletionModel + 'static,
 {
     /// Build a strategy that calls `model` to summarize dropped
     /// history. Defaults: [`DEFAULT_SUMMARIZER_PROMPT`] as the system
@@ -250,7 +250,7 @@ where
 #[async_trait]
 impl<M> CompactionStrategy for SummarizeStrategy<M>
 where
-    M: CompletionModel + Send + Sync + 'static,
+    M: CompletionModel + 'static,
 {
     fn name(&self) -> &'static str {
         "summarize"
