@@ -564,6 +564,14 @@ and this project adheres to
 
 ### Fixed
 
+- `Conversation::run` / `run_with_options` panicked ("engine guarantees
+  a RunFinished chunk before the stream terminates") when a middleware's
+  `on_chunk_mut` replaced the terminal `RunFinished` with another
+  variant, and a streaming consumer never saw the run end. The engine
+  now keeps the variant of `RunFinished`: a middleware may still rewrite
+  its fields, but if the chunk comes back as anything else, the original
+  is restored before `on_chunk` observers and the consumer see it.
+
 - `ApprovalMiddleware`, `MaxToolCalls` and `AntiLoop` leaked a run's
   state when the caller dropped the stream mid-run. Each keeps a map
   keyed by `RunId` (the step's messages for approval requests, the
