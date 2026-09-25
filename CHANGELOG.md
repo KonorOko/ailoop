@@ -17,7 +17,10 @@ and this project adheres to
   run. Returning `ContinueDecision::Continue { blocks }` (or
   `ContinueDecision::continue_with(text)`) adds a user message and
   runs another iteration of the same run. The first `Continue` wins,
-  and the remaining middlewares are not asked for that turn. Until now
+  and the remaining middlewares are not asked for that turn. A
+  `Continue` with no blocks counts as `Stop` (and the next middleware
+  is asked), since continuing without a new user message would send a
+  request that ends on the assistant's own turn. Until now
   this took an outer loop around `stream_with_options`, which reset
   `iteration` to 0, split `usage` across runs and emitted one
   `RunFinished` per attempt. With the hook, iterations keep counting,

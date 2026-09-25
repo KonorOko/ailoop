@@ -118,7 +118,10 @@ pub trait ChatMiddleware: Send + Sync {
     /// [`crate::AbortReason::MaxIterations`].
     ///
     /// Middlewares are asked in registration order and the first
-    /// `Continue` wins; the rest are not asked for that turn.
+    /// `Continue` wins; the rest are not asked for that turn. A
+    /// `Continue` with no blocks counts as [`ContinueDecision::Stop`]:
+    /// continuing without a new user message would send a request
+    /// that ends on the assistant's own turn.
     async fn on_turn_end(
         &self,
         run_id: &RunId,
@@ -254,7 +257,8 @@ pub enum ContinueDecision {
     Stop,
     /// Append a user message made of `blocks` to the history and run
     /// another iteration. The message is recorded in the run's
-    /// `new_messages` like any other message the engine adds.
+    /// `new_messages` like any other message the engine adds. Empty
+    /// `blocks` count as [`ContinueDecision::Stop`].
     Continue {
         /// Content of the injected user message.
         blocks: Vec<UserBlock>,
