@@ -10,6 +10,11 @@ and this project adheres to
 
 ### Added
 
+- `ToolRegistry` implements `Default` (an empty registry, same as
+  `ToolRegistry::new()`), so it works with `..Default::default()`,
+  `#[derive(Default)]` on structs that hold one, and
+  `std::mem::take`.
+
 - Minimum supported Rust version: 1.88, declared as `rust-version` on
   every crate. Edition 2024 needs 1.85, and the let chains used across
   the crates were stabilized in 1.88 (1.87 fails to compile them).

@@ -28,6 +28,7 @@ use crate::errors::ToolRegistryError;
 ///
 /// [`Conversation`]: https://docs.rs/ailoop
 /// [`ChatRequest::tools`]: ailoop_core::ChatRequest::tools
+#[derive(Default)]
 pub struct ToolRegistry {
     tools: IndexMap<String, Arc<dyn ToolDyn>>,
     active_tools: IndexSet<String>,
@@ -146,12 +147,10 @@ impl<T: Tool> ToolDyn for T {
 }
 
 impl ToolRegistry {
-    /// Build an empty registry with no tools and no active set.
+    /// Build an empty registry with no tools and no active set. Same
+    /// as [`ToolRegistry::default`].
     pub fn new() -> Self {
-        Self {
-            tools: IndexMap::new(),
-            active_tools: IndexSet::new(),
-        }
+        Self::default()
     }
 
     /// Look up `name` and dispatch the call with a freshly built
