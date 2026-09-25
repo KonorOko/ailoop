@@ -109,3 +109,27 @@ async fn async_trait_reexport_implements_chat_middleware() {
     let decision = AlwaysContinue.on_turn_end(&turn).await;
     assert!(matches!(decision, ContinueDecision::Continue { .. }));
 }
+
+/// With the `testing` feature, a whole run can be scripted from the
+/// facade alone.
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn scripted_model_is_reachable_through_the_testing_feature() {
+    use ailoop::testing::ScriptedModel;
+    use ailoop::{Conversation, StreamChunk};
+
+    let model = ScriptedModel::new([vec![
+        StreamChunk::TextDelta {
+            delta: "hello".into(),
+        },
+        StreamChunk::TurnFinished {
+            reason: FinishReason::EndTurn,
+            usage: Usage::new(3, 1),
+            service_tier: None,
+        },
+    ]]);
+    let mut chat = Conversation::builder(model).build().unwrap();
+    let outcome = chat.run("hi").await.unwrap();
+    assert_eq!(outcome.final_text.as_deref(), Some("hello"));
+    assert_eq!(outcome.usage.input_tokens, 3);
+}

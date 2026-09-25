@@ -10,6 +10,14 @@ and this project adheres to
 
 ### Added
 
+- `testing` feature on `ailoop`, which exposes `ailoop::testing` (a
+  re-export of `ailoop_core::testing`: `ScriptedModel`, `ScriptedError`,
+  `ScriptedTurn`). `ScriptedModel` was only reachable through the
+  `testing` feature of `ailoop-core`, so testing your own middlewares or
+  tools against a scripted run meant depending on `ailoop-core`
+  directly. Enable it under `[dev-dependencies]`:
+  `ailoop = { version = "…", features = ["testing"] }`.
+
 - `ailoop::async_trait`: the facade re-exports the `async_trait`
   attribute macro. `ChatMiddleware`, `CompactionStrategy` and
   `CompletionModel` are `async_trait` traits, so implementing one meant

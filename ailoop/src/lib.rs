@@ -133,6 +133,23 @@ pub use max_tool_calls::MaxToolCalls;
 pub mod advanced {
     pub use crate::engine::run_chat;
 }
+
+/// Test doubles for exercising your own middlewares, tools and
+/// conversation code without a real provider.
+///
+/// [`ScriptedModel`](testing::ScriptedModel) replays a queue of scripted
+/// turns (chunks, setup errors, mid-stream errors) as a
+/// [`CompletionModel`]. Enabled by the `testing` feature; add it under
+/// `[dev-dependencies]` so it stays out of release builds:
+///
+/// ```toml
+/// [dev-dependencies]
+/// ailoop = { version = "1", features = ["testing"] }
+/// ```
+#[cfg(feature = "testing")]
+pub mod testing {
+    pub use ailoop_core::testing::*;
+}
 pub use json_tracer::JsonTracer;
 pub use middleware::{ApprovalMiddleware, ApprovalRequest};
 pub use sanitize::{Sanitize, TextRewriter, ToolArgsRewriter, ToolResultRewriter};
