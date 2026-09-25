@@ -94,6 +94,30 @@ the underlying wire format — Anthropic supports image and document
 content natively; the Azure Chat Completions adapter surfaces a typed
 error for document blocks it can't represent.
 
+### Custom middleware
+
+Middlewares observe or reshape every step of a run. `ChatMiddleware` is an
+`async_trait` trait; the macro is re-exported from `ailoop`, so there is no
+extra dependency to add:
+
+```rust
+use ailoop::{ChatMiddleware, ContinueDecision, TurnEndInfo};
+
+struct LogTurns;
+
+#[ailoop::async_trait]
+impl ChatMiddleware for LogTurns {
+    async fn on_turn_end(&self, turn: &TurnEndInfo<'_>) -> ContinueDecision {
+        println!("turn ended: {:?}", turn.reason);
+        ContinueDecision::Stop
+    }
+}
+
+let mut chat = Conversation::builder(model)
+    .middleware(std::sync::Arc::new(LogTurns))
+    .build()?;
+```
+
 ## Examples
 
 The repository ships with five runnable examples. All five require an

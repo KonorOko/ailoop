@@ -108,14 +108,16 @@ pub struct SubAgentConfig {
     /// whatever the child wrote before the cap reaches the parent.
     /// With [`Self::wrap_up`] set, the last allowed iteration becomes
     /// a no-tools summary turn instead. `None` leaves the child at the
-    /// engine default (25 iterations, see
+    /// engine default ([`DEFAULT_MAX_ITERATIONS`](crate::DEFAULT_MAX_ITERATIONS),
+    /// 25 iterations; see
     /// [`RunConfig::max_iterations`](ailoop_core::RunConfig::max_iterations)).
     pub max_iterations: Option<usize>,
     /// Per-turn `max_tokens` override for every [`ChatRequest`] the
     /// child run builds. Mapped to [`RunOptions::max_tokens`], so it
     /// takes precedence over the child's
     /// [`ConversationBuilder::max_tokens`](crate::ConversationBuilder::max_tokens);
-    /// `None` falls through to the child's builder default (or 4096).
+    /// `None` falls through to the child's builder default (or
+    /// [`DEFAULT_MAX_TOKENS`](crate::DEFAULT_MAX_TOKENS), 4096).
     /// A middleware on the child that rewrites `req.max_tokens` still
     /// wins.
     ///

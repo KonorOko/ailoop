@@ -162,14 +162,15 @@ pub struct RunOptions {
     ///
     /// Precedence, highest first: this field >
     /// [`ConversationBuilder::max_iterations`] > the engine default
-    /// (25). `None` falls through to the builder default. The resolved
+    /// ([`DEFAULT_MAX_ITERATIONS`](crate::DEFAULT_MAX_ITERATIONS), 25). `None` falls through to the builder default. The resolved
     /// value is what [`RunConfig::max_iterations`] carries.
     pub max_iterations: Option<usize>,
     /// Per-run `max_tokens` cap for every `ChatRequest` of this run.
     ///
     /// Precedence, highest first: a user middleware that rewrites
     /// `req.max_tokens` in `on_chat_request` > this field >
-    /// [`ConversationBuilder::max_tokens`] > the engine default (4096).
+    /// [`ConversationBuilder::max_tokens`] > the engine default
+    /// ([`DEFAULT_MAX_TOKENS`](crate::DEFAULT_MAX_TOKENS), 4096).
     /// `None` falls through to the builder default. The resolved value
     /// is what [`RunConfig::max_tokens`] carries, so `on_run_started`
     /// observers (e.g. [`JsonTracer`](crate::JsonTracer)) see the cap
@@ -1057,7 +1058,8 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     }
 
     /// Default `max_tokens` cap for every [`ChatRequest`] of every
-    /// run, replacing the engine default (4096).
+    /// run, replacing the engine default
+    /// ([`DEFAULT_MAX_TOKENS`](crate::DEFAULT_MAX_TOKENS), 4096).
     ///
     /// A per-run [`RunOptions::max_tokens`] (and therefore
     /// [`SubAgentConfig::max_tokens`](crate::SubAgentConfig::max_tokens)
@@ -1072,7 +1074,8 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     }
 
     /// Default iteration cap for every run, replacing the engine
-    /// default (25, see [`RunConfig::max_iterations`]).
+    /// default ([`DEFAULT_MAX_ITERATIONS`](crate::DEFAULT_MAX_ITERATIONS),
+    /// 25; see [`RunConfig::max_iterations`]).
     ///
     /// A per-run [`RunOptions::max_iterations`] (and therefore
     /// [`SubAgentConfig::max_iterations`](crate::SubAgentConfig::max_iterations)

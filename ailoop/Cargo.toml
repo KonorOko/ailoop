@@ -30,6 +30,7 @@ tracing = { workspace = true, optional = true }
 
 [features]
 tracing = ["dep:tracing"]
+testing = ["ailoop-core/testing"]
 
 [dev-dependencies]
 ailoop-core = { workspace = true, features = ["testing"] }

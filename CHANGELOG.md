@@ -10,6 +10,52 @@ and this project adheres to
 
 ### Added
 
+- The `ailoop` facade re-exports `PromptError`. It is the error of
+  `PromptSection::from_file` and the payload of `BuildError::Prompt`
+  (a missing file passed to `system_prompt_file` or
+  `tool_with_prompt_file`), so matching on its `LoadFile` case meant
+  depending on `ailoop-prompts` directly.
+
+- `DEFAULT_MAX_ITERATIONS` (`usize`, 25) and `DEFAULT_MAX_TOKENS`
+  (`u32`, 4096), re-exported from `ailoop`. They name the defaults
+  `RunConfig::default()` uses (and `ChatRequest::default()` for
+  `max_tokens`), which were bare literals, so code that derives its own
+  limits from them (for example "twice the default" for a sub-agent)
+  follows any future change instead of copying the number. Same style
+  as `DEFAULT_HISTORY_MAX_TOKENS`. The values do not change.
+
+- `HookAction` and `ToolDecision` derive `Debug`, and `FinishReason`
+  derives `PartialEq` and `Eq`. A middleware unit test can now print the
+  decision it got back and write
+  `assert_eq!(outcome.finish_reason, FinishReason::EndTurn)` instead of
+  `matches!`. The decision enums get only `Debug` on purpose: a future
+  variant may carry a value that cannot be cloned or compared, and
+  adding a derive later is compatible while removing one is not.
+  `FinishReason` takes the same commitment `AbortReason` already made.
+
+- `testing` feature on `ailoop`, which exposes `ailoop::testing` (a
+  re-export of `ailoop_core::testing`: `ScriptedModel`, `ScriptedError`,
+  `ScriptedTurn`). `ScriptedModel` was only reachable through the
+  `testing` feature of `ailoop-core`, so testing your own middlewares or
+  tools against a scripted run meant depending on `ailoop-core`
+  directly. Enable it under `[dev-dependencies]`:
+  `ailoop = { version = "…", features = ["testing"] }`.
+
+- `ailoop::async_trait`: the facade re-exports the `async_trait`
+  attribute macro. `ChatMiddleware`, `CompactionStrategy` and
+  `CompletionModel` are `async_trait` traits, so implementing one meant
+  adding `async-trait` to your own `Cargo.toml` and keeping its version
+  in line with ailoop's. Write `#[ailoop::async_trait]` on the `impl`
+  block instead; the macro's expansion does not refer to the
+  `async-trait` crate, so no direct dependency is needed.
+
+- The `ailoop` facade re-exports `CompactionOutput`, `CompactionStats`
+  and `DEFAULT_SUMMARIZER_PROMPT`. Implementing `CompactionStrategy`
+  means returning a `CompactionOutput`, and `History::compact_if_needed`
+  / `force_compact` return `CompactionStats`, so both had to be imported
+  from `ailoop-history` directly; everything else from the sub-crates
+  was already reachable through `ailoop`.
+
 - `Usage::new(input_tokens, output_tokens)` builds a `Usage` with the
   other counters at zero. `Usage` is `#[non_exhaustive]`, so a tool
   outside the crate that reports its own spend through

@@ -47,6 +47,27 @@
 //!   parent agent can delegate to it.
 //! - [`advanced::run_chat`] — escape hatch for engine-level access
 //!   without a [`History`] in the loop.
+//!
+//! ## Writing a middleware
+//!
+//! [`ChatMiddleware`] (like [`CompactionStrategy`] and
+//! [`CompletionModel`]) is an `async_trait` trait. The macro is
+//! re-exported as [`macro@async_trait`], so an implementation needs no
+//! `async-trait` dependency of its own:
+//!
+//! ```
+//! use ailoop::{ChatMiddleware, ContinueDecision, TurnEndInfo};
+//!
+//! struct LogTurns;
+//!
+//! #[ailoop::async_trait]
+//! impl ChatMiddleware for LogTurns {
+//!     async fn on_turn_end(&self, turn: &TurnEndInfo<'_>) -> ContinueDecision {
+//!         println!("turn ended: {:?}", turn.reason);
+//!         ContinueDecision::Stop
+//!     }
+//! }
+//! ```
 
 #![deny(missing_docs)]
 
@@ -64,20 +85,28 @@ mod tracing_middleware;
 
 pub use ailoop_core::{
     AbortReason, AssistantBlock, CacheControl, CancellationToken, CharTokenizer, ChatMiddleware,
-    ChatRequest, CompletionClient, CompletionModel, ContinueDecision, FinishReason, HookAction,
-    Message, ProviderError, ReasoningEffort, RetryClassification, RetryConfig, Retryable,
-    RetryingModel, RunConfig, RunErrorInfo, RunFinishedInfo, RunId, RunStartInfo, Source, StepId,
-    StepInfo, StreamChunk, SystemBlock, SystemPrompt, Tokenizer, ToolCallInfo, ToolChoice,
-    ToolDecision, ToolDefinition, ToolResultBlock, ToolResultContent, ToolTag, TurnEndInfo, Usage,
-    UserBlock,
+    ChatRequest, CompletionClient, CompletionModel, ContinueDecision, DEFAULT_MAX_ITERATIONS,
+    DEFAULT_MAX_TOKENS, FinishReason, HookAction, Message, ProviderError, ReasoningEffort,
+    RetryClassification, RetryConfig, Retryable, RetryingModel, RunConfig, RunErrorInfo,
+    RunFinishedInfo, RunId, RunStartInfo, Source, StepId, StepInfo, StreamChunk, SystemBlock,
+    SystemPrompt, Tokenizer, ToolCallInfo, ToolChoice, ToolDecision, ToolDefinition,
+    ToolResultBlock, ToolResultContent, ToolTag, TurnEndInfo, Usage, UserBlock,
 };
 pub use ailoop_derive::{ToolJsonType, ailoop_tool};
 pub use ailoop_history::{
-    CompactionError, CompactionStrategy, ConversationSnapshot, FromMessagesError, History,
-    HistoryBuilder, HistoryStore, InMemoryHistoryStore, JsonFileHistoryStore,
-    JsonFileHistoryStoreError, SummarizeStrategy, TruncateStrategy,
+    CompactionError, CompactionOutput, CompactionStats, CompactionStrategy, ConversationSnapshot,
+    DEFAULT_SUMMARIZER_PROMPT, FromMessagesError, History, HistoryBuilder, HistoryStore,
+    InMemoryHistoryStore, JsonFileHistoryStore, JsonFileHistoryStoreError, SummarizeStrategy,
+    TruncateStrategy,
 };
-pub use ailoop_prompts::{Prompt, PromptBuilder, PromptSection};
+pub use ailoop_prompts::{Prompt, PromptBuilder, PromptError, PromptSection};
+/// Attribute macro for implementing the crate's async traits
+/// ([`ChatMiddleware`], [`CompactionStrategy`], [`CompletionModel`], …).
+///
+/// Re-exported from the `async-trait` crate so implementations can write
+/// `#[ailoop::async_trait]` without adding (and version-matching) that
+/// dependency themselves.
+pub use async_trait::async_trait;
 // Note: `ToolJsonType` is also re-exported above from `ailoop_derive` as
 // the derive macro of the same name. The two live in different
 // namespaces (one is a trait, one is a macro), so both can be brought
@@ -103,6 +132,23 @@ pub use max_tool_calls::MaxToolCalls;
 /// message slice and a pre-built [`ToolRegistry`]).
 pub mod advanced {
     pub use crate::engine::run_chat;
+}
+
+/// Test doubles for exercising your own middlewares, tools and
+/// conversation code without a real provider.
+///
+/// [`ScriptedModel`](testing::ScriptedModel) replays a queue of scripted
+/// turns (chunks, setup errors, mid-stream errors) as a
+/// [`CompletionModel`]. Enabled by the `testing` feature; add it under
+/// `[dev-dependencies]` so it stays out of release builds:
+///
+/// ```toml
+/// [dev-dependencies]
+/// ailoop = { version = "1", features = ["testing"] }
+/// ```
+#[cfg(feature = "testing")]
+pub mod testing {
+    pub use ailoop_core::testing::*;
 }
 pub use json_tracer::JsonTracer;
 pub use middleware::{ApprovalMiddleware, ApprovalRequest};

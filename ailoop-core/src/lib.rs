@@ -46,7 +46,7 @@ pub mod testing;
 mod tokenizer;
 mod traits;
 
-pub use config::RunConfig;
+pub use config::{DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_TOKENS, RunConfig};
 pub use ids::{RunId, StepId};
 pub use message::{
     AssistantBlock, CacheControl, Message, Source, SystemBlock, SystemPrompt, ToolResultBlock,

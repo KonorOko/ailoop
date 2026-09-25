@@ -9,10 +9,22 @@ use crate::ids::RunId;
 use crate::message::SystemPrompt;
 use crate::middleware::ChatMiddleware;
 
+/// Default for [`RunConfig::max_iterations`]: the number of provider
+/// turns a run may take before the engine aborts it with
+/// [`crate::AbortReason::MaxIterations`]. A safety brake, not a budget;
+/// see the field docs.
+pub const DEFAULT_MAX_ITERATIONS: usize = 25;
+
+/// Default for [`RunConfig::max_tokens`] (and
+/// [`crate::ChatRequest::max_tokens`]): the output-token cap sent with
+/// every request when neither the conversation nor the run sets one.
+pub const DEFAULT_MAX_TOKENS: u32 = 4096;
+
 /// Per-run configuration consumed by the engine entry point.
 ///
-/// The defaults shipped via [`RunConfig::default`] are 25 iterations,
-/// 4096 max output tokens and no timeout. They are safety brakes, not a
+/// The defaults shipped via [`RunConfig::default`] are 25 iterations
+/// ([`DEFAULT_MAX_ITERATIONS`]), 4096 max output tokens
+/// ([`DEFAULT_MAX_TOKENS`]) and no timeout. They are safety brakes, not a
 /// budget: in production, set `max_iterations` and `timeout`
 /// explicitly and add a tool-call cap (`MaxToolCalls` in the `ailoop`
 /// crate). Use struct-update syntax to override what you need:
@@ -34,7 +46,7 @@ pub struct RunConfig {
     /// prevents runaway tool-use loops; pair with an [`crate::ChatMiddleware`]
     /// such as `AntiLoop` for content-aware loop detection.
     ///
-    /// Defaults to 25. This is a safety brake, not a budget: it bounds
+    /// Defaults to [`DEFAULT_MAX_ITERATIONS`] (25). This is a safety brake, not a budget: it bounds
     /// how long a runaway loop can go on, not what a run costs (a turn
     /// can spend any number of tokens). Every
     /// [`crate::ContinueDecision::Continue`] from `on_turn_end` counts as
@@ -49,6 +61,7 @@ pub struct RunConfig {
     /// Default `max_tokens` for every per-turn [`crate::ChatRequest`]
     /// the engine builds. User-supplied middlewares can override this
     /// per request via [`crate::ChatMiddleware::on_chat_request`].
+    /// Defaults to [`DEFAULT_MAX_TOKENS`] (4096).
     pub max_tokens: u32,
     /// Middlewares the engine invokes in registration order. The
     /// façade prepends an internal middleware that injects per-request
@@ -81,8 +94,8 @@ impl Default for RunConfig {
     fn default() -> Self {
         Self {
             system_prompt: None,
-            max_iterations: 25,
-            max_tokens: 4096,
+            max_iterations: DEFAULT_MAX_ITERATIONS,
+            max_tokens: DEFAULT_MAX_TOKENS,
             middlewares: vec![],
             run_id: None,
             timeout: None,
@@ -130,5 +143,14 @@ mod tests {
     #[test]
     fn run_config_default_max_iterations_is_25() {
         assert_eq!(RunConfig::default().max_iterations, 25);
+    }
+
+    #[test]
+    fn run_config_default_uses_the_named_consts() {
+        let config = RunConfig::default();
+        assert_eq!(config.max_iterations, DEFAULT_MAX_ITERATIONS);
+        assert_eq!(config.max_tokens, DEFAULT_MAX_TOKENS);
+        assert_eq!(DEFAULT_MAX_TOKENS, 4096);
+        assert_eq!(crate::ChatRequest::default().max_tokens, DEFAULT_MAX_TOKENS);
     }
 }

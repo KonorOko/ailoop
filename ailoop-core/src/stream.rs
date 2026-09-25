@@ -380,7 +380,7 @@ impl StreamChunk {
 }
 
 /// Reason a provider turn (or an entire run) ended.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FinishReason {
     /// Model produced a complete reply with no tool call. The natural
