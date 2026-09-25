@@ -236,7 +236,7 @@ impl RunOptions {
 
 impl<M> Conversation<M>
 where
-    M: CompletionModel + Send + Sync,
+    M: CompletionModel,
     M::Error: ProviderError,
 {
     /// Start a [`ConversationBuilder`] for `model`. Equivalent to
@@ -276,7 +276,7 @@ where
     ///
     /// ```no_run
     /// # async fn demo<M>(chat: &mut ailoop::Conversation<M>)
-    /// # where M: ailoop::CompletionModel + Send + Sync, M::Error: ailoop::ProviderError {
+    /// # where M: ailoop::CompletionModel, M::Error: ailoop::ProviderError {
     /// if let Err(err) = chat.run("migrate the database").await {
     ///     chat.history_extend(err.partial_messages().iter().cloned());
     /// }

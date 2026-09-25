@@ -447,7 +447,7 @@ async fn history_compacted_chunk(
 /// [`Conversation::stream`]: crate::Conversation::stream
 /// [`ConversationBuilder::compact_between_iterations`]: crate::ConversationBuilder::compact_between_iterations
 /// [`ConversationBuilder::recover_from_context_overflow`]: crate::ConversationBuilder::recover_from_context_overflow
-pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
+pub async fn run_chat<'a, M: CompletionModel>(
     model: &'a M,
     messages: Vec<Message>,
     tools: &'a ToolRegistry,
@@ -471,7 +471,7 @@ pub async fn run_chat<'a, M: CompletionModel + Sync + Send>(
 /// set, receives every token this run spends (own turns and tool
 /// reports) as it happens; `SubAgentTool` passes its own
 /// `ToolContext::usage_sink` here.
-pub(crate) fn run_with_history<'a, M: CompletionModel + Sync + Send>(
+pub(crate) fn run_with_history<'a, M: CompletionModel>(
     model: &'a M,
     history: &'a mut History,
     tools: &'a ToolRegistry,
@@ -496,7 +496,7 @@ pub(crate) fn run_with_history<'a, M: CompletionModel + Sync + Send>(
     )
 }
 
-fn run_engine<'a, M: CompletionModel + Sync + Send>(
+fn run_engine<'a, M: CompletionModel>(
     model: &'a M,
     context: RunContext<'a>,
     tools: &'a ToolRegistry,

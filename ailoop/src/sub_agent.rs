@@ -438,7 +438,7 @@ fn budget_label(reason: &AbortReason) -> &'static str {
 /// # use std::sync::Arc;
 /// # async fn build<M>(researcher_model: M, parent_model: M)
 /// # -> Result<(), Box<dyn std::error::Error>>
-/// # where M: ailoop::CompletionModel + Send + Sync + 'static, M::Error: ailoop::ProviderError {
+/// # where M: ailoop::CompletionModel + 'static, M::Error: ailoop::ProviderError {
 /// // 1. Build the child conversation (its own model, history, prompt).
 /// let researcher = ailoop::Conversation::builder(researcher_model)
 ///     .system_prompt("You are a focused research sub-agent.")
@@ -466,7 +466,7 @@ fn budget_label(reason: &AbortReason) -> &'static str {
 /// # use std::time::Duration;
 /// # async fn build<M>(researcher_model: M)
 /// # -> Result<(), Box<dyn std::error::Error>>
-/// # where M: ailoop::CompletionModel + Send + Sync + 'static, M::Error: ailoop::ProviderError {
+/// # where M: ailoop::CompletionModel + 'static, M::Error: ailoop::ProviderError {
 /// let researcher = ailoop::Conversation::builder(researcher_model).build()?;
 /// let tool = ailoop::SubAgentTool::with_config(
 ///     "researcher",
@@ -488,7 +488,7 @@ pub struct SubAgentTool<M: CompletionModel> {
 
 impl<M> SubAgentTool<M>
 where
-    M: CompletionModel + Send + Sync + 'static,
+    M: CompletionModel + 'static,
 {
     /// Wrap `conversation` as a tool exposing `name` /
     /// `description` to the parent's [`CompletionModel`]. Use
@@ -532,7 +532,7 @@ where
 #[async_trait::async_trait]
 impl<M> ToolDyn for SubAgentTool<M>
 where
-    M: CompletionModel + Send + Sync + 'static,
+    M: CompletionModel + 'static,
     M::Error: ProviderError,
 {
     fn name(&self) -> String {

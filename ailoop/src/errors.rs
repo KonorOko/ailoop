@@ -113,7 +113,7 @@ pub enum EngineError<E: std::error::Error> {
 ///
 /// ```no_run
 /// # async fn demo<M>(chat: &mut ailoop::Conversation<M>)
-/// # where M: ailoop::CompletionModel + Send + Sync, M::Error: ailoop::ProviderError {
+/// # where M: ailoop::CompletionModel, M::Error: ailoop::ProviderError {
 /// if let Err(err) = chat.run("deploy the service").await {
 ///     eprintln!("run failed: {err}");
 ///     let parts = err.into_parts();

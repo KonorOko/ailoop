@@ -402,6 +402,15 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- `CompletionModel` requires `Send + Sync`. Its docs already said
+  implementations must be both, since the engine and `RetryingModel`
+  hold models across `.await`s, but the trait did not declare it, so
+  every function generic over a model had to spell out
+  `M: CompletionModel + Send + Sync`. The bound now comes with the
+  trait; `M: CompletionModel` is enough. Every model that worked with
+  the engine already met it, so only a model that could never be used
+  by a `Conversation` stops compiling.
+
 - The `StreamChunk` variants the engine emits (`RunStarted`,
   `StepStarted`, `StepFinished`, `ToolResult`, `RunFinished`,
   `HistoryCompacted`) are `#[non_exhaustive]`. The enum already was, so

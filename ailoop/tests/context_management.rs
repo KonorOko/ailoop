@@ -137,7 +137,7 @@ fn overflow_turn() -> ScriptedTurn {
 /// (100 tokens per message, 400 in total).
 fn seed_prior_turns<M>(chat: &mut Conversation<M>)
 where
-    M: CompletionModel + Send + Sync,
+    M: CompletionModel,
     M::Error: ailoop::ProviderError,
 {
     for i in 0..2 {

@@ -123,7 +123,7 @@ impl<M> RetryingModel<M> {
 #[async_trait]
 impl<M> CompletionModel for RetryingModel<M>
 where
-    M: CompletionModel + Send + Sync,
+    M: CompletionModel,
     M::Error: Retryable,
 {
     type Error = M::Error;
