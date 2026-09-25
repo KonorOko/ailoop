@@ -47,6 +47,27 @@
 //!   parent agent can delegate to it.
 //! - [`advanced::run_chat`] — escape hatch for engine-level access
 //!   without a [`History`] in the loop.
+//!
+//! ## Writing a middleware
+//!
+//! [`ChatMiddleware`] (like [`CompactionStrategy`] and
+//! [`CompletionModel`]) is an `async_trait` trait. The macro is
+//! re-exported as [`macro@async_trait`], so an implementation needs no
+//! `async-trait` dependency of its own:
+//!
+//! ```
+//! use ailoop::{ChatMiddleware, ContinueDecision, TurnEndInfo};
+//!
+//! struct LogTurns;
+//!
+//! #[ailoop::async_trait]
+//! impl ChatMiddleware for LogTurns {
+//!     async fn on_turn_end(&self, turn: &TurnEndInfo<'_>) -> ContinueDecision {
+//!         println!("turn ended: {:?}", turn.reason);
+//!         ContinueDecision::Stop
+//!     }
+//! }
+//! ```
 
 #![deny(missing_docs)]
 
@@ -79,6 +100,13 @@ pub use ailoop_history::{
     TruncateStrategy,
 };
 pub use ailoop_prompts::{Prompt, PromptBuilder, PromptSection};
+/// Attribute macro for implementing the crate's async traits
+/// ([`ChatMiddleware`], [`CompactionStrategy`], [`CompletionModel`], …).
+///
+/// Re-exported from the `async-trait` crate so implementations can write
+/// `#[ailoop::async_trait]` without adding (and version-matching) that
+/// dependency themselves.
+pub use async_trait::async_trait;
 // Note: `ToolJsonType` is also re-exported above from `ailoop_derive` as
 // the derive macro of the same name. The two live in different
 // namespaces (one is a trait, one is a macro), so both can be brought

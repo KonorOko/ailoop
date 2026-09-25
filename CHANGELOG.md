@@ -10,6 +10,14 @@ and this project adheres to
 
 ### Added
 
+- `ailoop::async_trait`: the facade re-exports the `async_trait`
+  attribute macro. `ChatMiddleware`, `CompactionStrategy` and
+  `CompletionModel` are `async_trait` traits, so implementing one meant
+  adding `async-trait` to your own `Cargo.toml` and keeping its version
+  in line with ailoop's. Write `#[ailoop::async_trait]` on the `impl`
+  block instead; the macro's expansion does not refer to the
+  `async-trait` crate, so no direct dependency is needed.
+
 - The `ailoop` facade re-exports `CompactionOutput`, `CompactionStats`
   and `DEFAULT_SUMMARIZER_PROMPT`. Implementing `CompactionStrategy`
   means returning a `CompactionOutput`, and `History::compact_if_needed`

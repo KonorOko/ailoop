@@ -23,6 +23,11 @@ use crate::RunConfig;
 /// you need. Implementors must be `Send + Sync` because the engine
 /// holds them behind `Arc<dyn ChatMiddleware>`.
 ///
+/// The trait is declared with `#[async_trait]`, so an implementation
+/// needs the same attribute on its `impl` block. The `ailoop` facade
+/// re-exports the macro: write `#[ailoop::async_trait]` and skip adding
+/// `async-trait` to your own `Cargo.toml`.
+///
 /// # Tool calls within a step
 ///
 /// When the model requests several tools in one turn, the tool hooks

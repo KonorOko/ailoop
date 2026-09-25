@@ -52,3 +52,60 @@ async fn compaction_types_are_reexported() {
     assert_eq!(stats.strategy, "truncate");
     assert!(stats.after <= stats.before);
 }
+
+/// A user-defined strategy, written with the facade's `async_trait`
+/// re-export and returning the facade's `CompactionOutput`.
+struct KeepLast;
+
+#[ailoop::async_trait]
+impl ailoop::CompactionStrategy for KeepLast {
+    fn name(&self) -> &'static str {
+        "keep_last"
+    }
+
+    async fn compact(
+        &self,
+        messages: &[ailoop::Message],
+        pinned: &[bool],
+        _preserve_n_last: usize,
+    ) -> Result<ailoop::CompactionOutput, ailoop::CompactionError> {
+        let n = messages.len() - 1;
+        Ok(ailoop::CompactionOutput::new(
+            messages[n..].to_vec(),
+            pinned[n..].to_vec(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn async_trait_reexport_implements_compaction_strategy() {
+    let mut history = ailoop::History::builder(1_000)
+        .strategy(Box::new(KeepLast))
+        .build();
+    history.add_message(ailoop::Message::user("one"));
+    history.add_message(ailoop::Message::user("two"));
+    let stats = history.force_compact().await.unwrap();
+    assert_eq!(stats.strategy, "keep_last");
+    assert_eq!(history.messages().len(), 1);
+}
+
+struct AlwaysContinue;
+
+#[ailoop::async_trait]
+impl ailoop::ChatMiddleware for AlwaysContinue {
+    async fn on_turn_end(&self, _turn: &TurnEndInfo<'_>) -> ContinueDecision {
+        ContinueDecision::continue_with("again")
+    }
+}
+
+#[tokio::test]
+async fn async_trait_reexport_implements_chat_middleware() {
+    use ailoop::ChatMiddleware;
+
+    let run_id = RunId::new();
+    let step_id = StepId::new();
+    let reason = FinishReason::EndTurn;
+    let turn = TurnEndInfo::new(&run_id, &step_id, &reason, &[]);
+    let decision = AlwaysContinue.on_turn_end(&turn).await;
+    assert!(matches!(decision, ContinueDecision::Continue { .. }));
+}
