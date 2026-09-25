@@ -1,6 +1,6 @@
 use ailoop_core::{Message, Usage};
 use ailoop_prompts::PromptError;
-use ailoop_tools::errors::ToolRegistryError;
+use ailoop_tools::ToolRegistryError;
 
 /// What went wrong in a failed [`Conversation::run`] /
 /// [`Conversation::stream`] or [`run_chat`] call. Those entry points
@@ -40,7 +40,7 @@ pub enum EngineError<E: std::error::Error> {
     /// `Error` tool result back to the model rather than aborting the
     /// run).
     #[error("tool error: {0}")]
-    Tool(#[from] ailoop_tools::errors::ToolRegistryError),
+    Tool(#[from] ailoop_tools::ToolRegistryError),
 
     /// History compaction failed. Typically this means a configured
     /// [`CompactionStrategy`] could not satisfy the token budget — see

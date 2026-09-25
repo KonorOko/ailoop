@@ -12,9 +12,7 @@ use ailoop_core::{
     ToolResultContent, TurnEndInfo, Usage, UserBlock,
 };
 use ailoop_history::{CompactionError, CompactionReport, History};
-use ailoop_tools::{
-    ToolActivation, ToolContext, ToolRegistry, UsageSink, errors::ToolRegistryError,
-};
+use ailoop_tools::{ToolActivation, ToolContext, ToolRegistry, ToolRegistryError, UsageSink};
 use async_stream::try_stream;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;

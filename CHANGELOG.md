@@ -402,6 +402,17 @@ and this project adheres to
 
 ### Changed (BREAKING)
 
+- The modules of `ailoop-core` (`config`, `ids`, `message`,
+  `middleware`, `provider_error`, `request`, `retry`, `stream`),
+  `ailoop-history` (`compaction`, `errors`, `history`, `history_store`,
+  `snapshot`) and `ailoop-tools` (`context`, `errors`, `registry`,
+  `schema`, `timeout`) are private. Every public item was already
+  re-exported at the crate root (and from the `ailoop` facade), so each
+  type had two paths, and the module layout was part of the API: moving
+  a type between files would have been a breaking change. Only the root
+  paths remain. `ailoop_core::testing` (behind the `testing` feature)
+  and `ailoop::advanced` stay public.
+
 - `CompletionModel` requires `Send + Sync`. Its docs already said
   implementations must be both, since the engine and `RetryingModel`
   hold models across `.await`s, but the trait did not declare it, so
@@ -736,6 +747,18 @@ and this project adheres to
   now reports the cap actually sent instead of the engine default.
 
 ### Migration
+
+Import from the crate root (or from `ailoop`) instead of a module
+path:
+
+```rust
+// Before (1.0.0-rc.3)
+use ailoop_core::stream::StreamChunk;
+use ailoop_tools::errors::ToolRegistryError;
+
+// After
+use ailoop::{StreamChunk, ToolRegistryError};
+```
 
 Engine-emitted chunks need `..` in patterns and a constructor outside
 `ailoop-core`:

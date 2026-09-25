@@ -348,7 +348,7 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ailoop_core::request::{ToolDefinition, ToolTag};
+    use ailoop_core::{ToolDefinition, ToolTag};
     use serde::Deserialize;
     use std::io::Write;
     use tempfile::NamedTempFile;

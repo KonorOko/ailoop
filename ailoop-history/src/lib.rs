@@ -40,11 +40,11 @@
 
 #![deny(missing_docs)]
 
-pub mod compaction;
-pub mod errors;
-pub mod history;
-pub mod history_store;
-pub mod snapshot;
+mod compaction;
+mod errors;
+mod history;
+mod history_store;
+mod snapshot;
 
 pub use compaction::{
     CompactionOutput, CompactionStrategy, DEFAULT_SUMMARIZER_PROMPT, SummarizeStrategy,
