@@ -8,6 +8,8 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [1.0.0-rc.4] — 2026-09-25
+
 This release contains breaking changes. Every entry describes the
 change against 1.0.0-rc.3. The Migration section at the end starts with
 an upgrade checklist and has a before/after snippet for each breaking
@@ -1530,7 +1532,8 @@ workspace-wide API audit (closed 2026-05-10).
 - Other providers (OpenAI public, Bedrock, Vertex, local engines)
   are not implemented.
 
-[Unreleased]: https://github.com/KonorOko/ailoop/compare/v1.0.0-rc.3...HEAD
+[Unreleased]: https://github.com/KonorOko/ailoop/compare/v1.0.0-rc.4...HEAD
+[1.0.0-rc.4]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.4
 [1.0.0-rc.3]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.1
