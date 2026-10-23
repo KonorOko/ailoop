@@ -56,6 +56,10 @@ impl<T: ToolDyn> ToolDyn for TimeoutTool<T> {
         self.inner.tool_definition()
     }
 
+    fn concurrency_safe(&self) -> bool {
+        self.inner.concurrency_safe()
+    }
+
     async fn call(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolResultContent {
         match tokio::time::timeout(self.timeout, self.inner.call(args, ctx)).await {
             Ok(content) => content,
@@ -88,6 +92,9 @@ mod tests {
                 json!({ "type": "object", "properties": {}, "required": [] }),
                 vec![ToolTag::ReadOnly],
             )
+        }
+        fn concurrency_safe(&self) -> bool {
+            true
         }
         async fn call(&self, _: serde_json::Value, _: &ToolContext) -> ToolResultContent {
             ToolResultContent::text("ok")
@@ -124,6 +131,16 @@ mod tests {
         let def = wrapped.tool_definition();
         assert_eq!(def.name, "instant");
         assert_eq!(def.tags, vec![ToolTag::ReadOnly]);
+    }
+
+    /// The wrapper keeps the inner tool's concurrency safety, so
+    /// wrapping a safe tool does not make its calls run one at a time.
+    #[test]
+    fn delegates_concurrency_safety() {
+        let safe = TimeoutTool::new(InstantTool, Duration::from_millis(10));
+        assert!(safe.concurrency_safe());
+        let unsafe_tool = TimeoutTool::new(SlowTool, Duration::from_millis(10));
+        assert!(!unsafe_tool.concurrency_safe());
     }
 
     /// A call that resolves inside the budget passes through untouched.

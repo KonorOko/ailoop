@@ -110,7 +110,8 @@ and this project adheres to
     have not run, and a result must not skip a transform such as
     `Sanitize`.
   - `SubAgentTool` is not concurrency-safe (its child conversation is
-    behind a lock), and MCP tools are not either for now.
+    behind a lock), and MCP tools are not either for now. `TimeoutTool`
+    is as safe as the tool it wraps.
 
   The middleware contract in "Tool calls within a step" now describes
   this order instead of reserving it for a later release.
