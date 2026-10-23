@@ -161,7 +161,14 @@ impl ToolContext {
     /// Cancelling it, from the engine or from the tool itself, stops
     /// only this call: sibling calls, the run and the caller's token are
     /// untouched. A run that finishes normally (or fails with an error)
-    /// leaves it alone.
+    /// leaves it alone. A tool that cancels it itself is stopped like
+    /// any cancelled call: the engine drops its future at the next
+    /// `.await` and records the call as cancelled by the caller, so
+    /// cleanup that must run to completion should not await after
+    /// cancelling. To stop the tasks a tool spawned without stopping
+    /// the tool, cancel a `child_token()` handed to them instead. To end
+    /// the whole run, return a `Terminate` from a middleware, or cancel
+    /// the token the caller passed in `RunConfig::cancellation`.
     ///
     /// The engine already wraps each tool call in a `select!` against
     /// the run-wide abort signal, so on cancellation the tool future

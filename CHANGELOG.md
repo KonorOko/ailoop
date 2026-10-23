@@ -181,6 +181,17 @@ and this project adheres to
     suspension and returns an error result to the parent.
   - `RunId` and `StepId` now implement `Serialize` / `Deserialize`.
 
+### Changed (BREAKING)
+
+- A tool cancelling its own `ToolContext::cancellation` token now
+  stops only its own call, not the run. Before, the token was a clone
+  of the caller's `RunConfig::cancellation`, so `ctx.cancellation()
+  .cancel()` aborted the whole run (and cancelled the caller's token);
+  now each call gets a child token (see `RunControl::cancel_tool`), so
+  the same line drops the tool's own future and answers the call as
+  cancelled by the caller, and the run goes on. Code that used it to
+  stop the run must end the run another way; see Migration.
+
 ### Fixed
 
 - A `Conversation` run is now committed when its `RunFinished` reaches
@@ -208,6 +219,22 @@ and this project adheres to
   error leaves the token alone. Sub-agents get the same guarantee: when
   a parent run aborts mid-call, the work the child run's tools spawned
   is cancelled too.
+
+### Migration
+
+- A tool that stopped the run by cancelling its own token:
+
+  ```rust
+  // Before: cancelled the caller's token, aborting the run.
+  ctx.cancellation().cancel();
+
+  // After: return a Terminate from a middleware's
+  // on_before_tool_call / on_after_tool_call (the run ends with
+  // FinishReason::Aborted(ToolTerminated)), or keep a clone of the
+  // CancellationToken passed in RunOptions::cancellation and cancel
+  // that one (FinishReason::Aborted(Cancelled)).
+  caller_token.cancel();
+  ```
 
 ## [1.0.0-rc.4] — 2026-09-25
 
