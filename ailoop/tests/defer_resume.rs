@@ -546,13 +546,23 @@ async fn dropped_resume_keeps_the_suspension() {
         1,
     );
     s.chat.run("clean up").await.expect("runs");
-    let stream = s
+    let suspended = s.chat.messages().to_vec();
+    let mut stream = s
         .chat
         .resume_stream([("t1".into(), ResumeDecision::Approve)], RunOptions::new())
         .await
         .expect("starts");
+    // Drop it mid-run, once the resumed step has closed.
+    while let Some(chunk) = stream.next().await {
+        if matches!(chunk.expect("no error"), StreamChunk::StepFinished { .. }) {
+            break;
+        }
+    }
     drop(stream);
+
+    assert_eq!(s.delete.calls(), 1);
     assert!(s.chat.suspension().is_some());
+    assert_eq!(s.chat.messages(), suspended.as_slice());
 }
 
 /// A sub-agent whose run suspends reports an error to the parent and
