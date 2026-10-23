@@ -2,8 +2,12 @@ use std::sync::Arc;
 
 use ailoop_core::{ToolDefinition, ToolResultContent};
 use ailoop_tools::{ToolContext, ToolDyn};
-use rmcp::model::{CallToolRequestParams, Content, RawContent};
+use rmcp::model::{
+    CallToolRequestParams, Content, Meta, NumberOrString, ProgressToken, RawContent,
+};
 use rmcp::service::{RoleClient, RunningService};
+
+use crate::progress::ProgressRouter;
 
 /// `ToolDyn` wrapper around a single tool exposed by an MCP server.
 ///
@@ -20,10 +24,17 @@ use rmcp::service::{RoleClient, RunningService};
 ///
 /// [`ToolResultContent`]: ailoop_core::ToolResultContent
 ///
+/// Each call asks the server for progress (a `progressToken` in the
+/// request's `_meta`); the server's `notifications/progress` for it are
+/// forwarded through [`ToolContext::progress`], so they reach the run's
+/// stream as `ToolProgress` chunks. Servers that do not report progress
+/// simply send none.
+///
 /// [`McpConnection`]: crate::McpConnection
 /// [`SubAgentTool`]: https://docs.rs/ailoop
 pub struct McpTool {
-    pub(crate) client: Arc<RunningService<RoleClient, ()>>,
+    pub(crate) client: Arc<RunningService<RoleClient, ProgressRouter>>,
+    pub(crate) progress: ProgressRouter,
     /// Engine-facing name (`mcp__<server>__<tool>`).
     pub(crate) name_for_engine: String,
     /// Original name as exposed by the server — what we send back on
@@ -42,7 +53,7 @@ impl ToolDyn for McpTool {
         self.definition.clone()
     }
 
-    async fn call(&self, args: serde_json::Value, _ctx: &ToolContext) -> ToolResultContent {
+    async fn call(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolResultContent {
         let mut req = CallToolRequestParams::new(self.name_at_server.clone());
         if let serde_json::Value::Object(map) = args {
             req = req.with_arguments(map);
@@ -51,7 +62,16 @@ impl ToolDyn for McpTool {
         // the tool takes no inputs) are sent without `arguments`, which
         // matches the MCP semantics for "no args".
 
-        match self.client.call_tool(req).await {
+        // Unique across runs sharing this connection: call ids come from
+        // the provider and only need to be unique within a run.
+        let token = format!("{}:{}", ctx.run_id(), ctx.call_id());
+        req.meta = Some(Meta::with_progress_token(ProgressToken(
+            NumberOrString::String(token.clone().into()),
+        )));
+        let _routed = self.progress.register(token, ctx.progress_sink().clone());
+        let result = self.client.call_tool(req).await;
+
+        match result {
             Err(e) => ToolResultContent::error(format!("MCP transport error: {e}")),
             Ok(result) => {
                 let text = stringify_content(&result.content);

@@ -148,6 +148,24 @@ impl ChatMiddleware for TracingMiddleware {
                     "run suspended on deferred tool calls",
                 );
             }
+            StreamChunk::ToolProgress {
+                run_id,
+                step_id,
+                call_id,
+                progress,
+                ..
+            } => {
+                tracing::debug!(
+                    target: "ailoop.tool",
+                    run_id = %run_id,
+                    step_id = %step_id,
+                    call_id = %call_id,
+                    progress = ?progress.progress,
+                    total = ?progress.total,
+                    message = ?progress.message,
+                    "tool progress",
+                );
+            }
             StreamChunk::InboundDelivered {
                 run_id,
                 step_id,

@@ -17,7 +17,7 @@ use crate::{Message, RunId, StepId, ToolResultContent};
 /// 2. **Engine lifecycle events**, synthesized by the engine itself
 ///    around the provider stream — `RunStarted`, `StepStarted`,
 ///    `StepFinished`, `ToolResult`, `RunFinished`, `HistoryCompacted`,
-///    `InboundDelivered`, `RunSuspended`.
+///    `InboundDelivered`, `RunSuspended`, `ToolProgress`.
 ///
 /// Every chunk reaches every [`crate::ChatMiddleware::on_chunk`]; the
 /// engine also drives its own assistant-history reconstruction off
@@ -267,6 +267,22 @@ pub enum StreamChunk {
         /// The step it stopped in and its calls.
         suspension: crate::Suspension,
     },
+    /// A running tool reported progress through
+    /// `ToolContext::progress`. Emitted while the call runs, always
+    /// before its [`Self::ToolResult`]; never recorded in history.
+    /// Delivery is best-effort: updates a tool sends faster than the run
+    /// forwards them, or after its call has its result, are dropped.
+    #[non_exhaustive]
+    ToolProgress {
+        /// Run the call belongs to.
+        run_id: RunId,
+        /// Step the call belongs to.
+        step_id: StepId,
+        /// The call reporting, as on its `ToolCallStarted`.
+        call_id: String,
+        /// What it reported.
+        progress: ToolProgress,
+    },
     /// Messages queued on the run's [`crate::RunControl`] entered the
     /// run when a turn closed. Emitted after that turn's `ToolResult`
     /// chunks and before its `StepFinished`, once the blocks are part
@@ -327,6 +343,21 @@ impl StreamChunk {
             step_id,
             call_id: call_id.into(),
             content,
+        }
+    }
+
+    /// Build a [`StreamChunk::ToolProgress`].
+    pub fn tool_progress(
+        run_id: RunId,
+        step_id: StepId,
+        call_id: impl Into<String>,
+        progress: ToolProgress,
+    ) -> Self {
+        Self::ToolProgress {
+            run_id,
+            step_id,
+            call_id: call_id.into(),
+            progress,
         }
     }
 
@@ -416,6 +447,53 @@ impl StreamChunk {
             raw,
             error,
         }
+    }
+}
+
+/// A progress update from a running tool, carried by
+/// [`StreamChunk::ToolProgress`]. Mirrors MCP's `notifications/progress`,
+/// except that `progress` is optional so an update can be just a
+/// message. Every field is optional; build with [`Self::new`] and the
+/// `with_*` methods.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub struct ToolProgress {
+    /// Progress so far. Should increase with every update, even when the
+    /// total is unknown.
+    pub progress: Option<f64>,
+    /// Total to reach, when known.
+    pub total: Option<f64>,
+    /// Human-readable description of the current state.
+    pub message: Option<String>,
+}
+
+impl ToolProgress {
+    /// An empty update; add fields with the `with_*` methods.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// An update carrying only `message`.
+    pub fn message(message: impl Into<String>) -> Self {
+        Self::new().with_message(message)
+    }
+
+    /// Set [`Self::progress`].
+    pub fn with_progress(mut self, progress: f64) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    /// Set [`Self::total`].
+    pub fn with_total(mut self, total: f64) -> Self {
+        self.total = Some(total);
+        self
+    }
+
+    /// Set [`Self::message`].
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = Some(message.into());
+        self
     }
 }
 

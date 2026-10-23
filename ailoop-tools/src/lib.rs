@@ -49,7 +49,7 @@ mod registry;
 mod schema;
 mod timeout;
 
-pub use context::{ToolActivation, ToolActivationError, ToolContext, UsageSink};
+pub use context::{ProgressSink, ToolActivation, ToolActivationError, ToolContext, UsageSink};
 pub use errors::ToolRegistryError;
 pub use registry::{Tool, ToolDyn, ToolRegistry};
 pub use schema::ToolJsonType;
