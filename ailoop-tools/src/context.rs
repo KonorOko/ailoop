@@ -130,20 +130,24 @@ impl ToolContext {
         &self.activation
     }
 
-    /// Cancellation token tied to the enclosing run.
+    /// Cancellation token for this tool call.
     ///
-    /// The engine hands every tool of a run the same token: a child of
-    /// [`RunConfig::cancellation`][rc] when the caller supplied one, a
-    /// fresh token otherwise, so the getter never returns `None`. It
-    /// fires whenever the run aborts or goes away before it ends:
+    /// The engine gives each call its own token, a child of the run's,
+    /// which in turn is a child of [`RunConfig::cancellation`][rc] when
+    /// the caller supplied one; the getter never returns `None`. It
+    /// fires when this call is cancelled through
+    /// [`RunControl::cancel_tool`][ct], and whenever the run aborts or
+    /// goes away before it ends:
     ///
     /// - the caller cancels its token;
     /// - [`RunConfig::timeout`][to] elapses;
     /// - a middleware or tool ends the run with `Terminate`;
     /// - the caller drops the run's stream.
     ///
-    /// The run cancelling it never cancels the caller's token. A run
-    /// that finishes normally (or fails with an error) leaves it alone.
+    /// Cancelling it, from the engine or from the tool itself, stops
+    /// only this call: sibling calls, the run and the caller's token are
+    /// untouched. A run that finishes normally (or fails with an error)
+    /// leaves it alone.
     ///
     /// The engine already wraps each tool call in a `select!` against
     /// the run-wide abort signal, so on cancellation the tool future
@@ -169,6 +173,7 @@ impl ToolContext {
     ///
     /// [rc]: ailoop_core::RunConfig::cancellation
     /// [to]: ailoop_core::RunConfig::timeout
+    /// [ct]: ailoop_core::RunControl::cancel_tool
     pub fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
     }

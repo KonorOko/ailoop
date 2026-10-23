@@ -183,7 +183,8 @@ pub struct RunOptions {
     /// Handle for controlling this run from outside while it is in
     /// flight: messages pushed on it are delivered between turns and
     /// end up in the conversation history like any other message of
-    /// the run. Same semantics as [`ailoop_core::RunConfig::control`];
+    /// the run, and `cancel_tool` stops one tool call while the run
+    /// goes on. Same semantics as [`ailoop_core::RunConfig::control`];
     /// see [`RunControl`](crate::RunControl). The handle can outlive the
     /// run: what it did not deliver stays queued for the next one.
     pub control: Option<RunControl>,

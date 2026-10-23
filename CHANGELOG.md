@@ -38,6 +38,29 @@ and this project adheres to
     messages.
   - Without a `RunControl`, runs behave as before.
 
+- `RunControl::cancel_tool(call_id)`: stop one tool call and let the run
+  go on, with the `call_id` from its `ToolCallStarted` chunk. Before,
+  the only way to stop a tool was to cancel the whole run. Every call
+  of the step in flight can be cancelled, including one still waiting
+  its turn; `cancel_tool` returns `false` for any other id. The call
+  gets an `is_error` result and the run continues:
+  - cancelled before its turn: the tool is not invoked and no tool hook
+    fires; the result reads "Tool not run: cancelled by the caller";
+  - cancelled while its `before` hooks run (an approval being asked):
+    those hooks are not interrupted, and if they let the call through
+    the tool is not invoked; the `after` hooks fire with the same
+    result. A `Skip` or `Terminate` from the hooks still wins;
+  - cancelled while running: the call's token fires and the engine
+    drops the tool future, so it stops even if the tool ignores the
+    token. The result reads "Tool cancelled by the caller while
+    running; it may have partly completed", because the tool may
+    already have had its effect. The `after` hooks fire with it.
+
+  To make this possible, `ToolContext::cancellation` is now a token per
+  call, a child of the run's: it still fires on every run abort, but
+  cancelling it (from the engine or from the tool) stops only that
+  call.
+
 ### Fixed
 
 - `ToolContext::cancellation` now fires on every abort of the run, not
