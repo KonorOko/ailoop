@@ -75,7 +75,9 @@ and this project adheres to
   - cancelled while its `before` hooks run (an approval being asked):
     those hooks are not interrupted, and if they let the call through
     the tool is not invoked; the `after` hooks fire with the same
-    result. A `Skip` or `Terminate` from the hooks still wins;
+    result. A `Skip` or `Terminate` from the hooks still wins. The same
+    holds for a call of a batch cancelled after its hooks, before the
+    batch got to run it;
   - cancelled while running: the call's token fires and the engine
     drops the tool future, so it stops even if the tool ignores the
     token. The result reads "Tool cancelled by the caller while

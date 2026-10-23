@@ -87,6 +87,7 @@ impl ToolDyn for Hang {
 #[derive(Default)]
 struct Quick {
     name: &'static str,
+    safe: bool,
     calls: AtomicUsize,
     token: Mutex<Option<CancellationToken>>,
     cancel: Option<(RunControl, &'static str)>,
@@ -111,6 +112,9 @@ impl ToolDyn for Quick {
     }
     fn tool_definition(&self) -> ToolDefinition {
         definition(self.name)
+    }
+    fn concurrency_safe(&self) -> bool {
+        self.safe
     }
     async fn call(&self, _: Value, ctx: &ToolContext) -> ToolResultContent {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -354,4 +358,51 @@ async fn caller_cancellation_still_aborts_the_run() {
         FinishReason::Aborted(AbortReason::Cancelled)
     );
     assert!(!control.cancel_tool("t1"));
+}
+
+/// Cancels `target` from the `before` hook of `on`.
+struct CancelAtGate {
+    control: RunControl,
+    on: &'static str,
+    target: &'static str,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for CancelAtGate {
+    async fn on_before_tool_call(&self, call: &ToolCallInfo, _args: &Value) -> ToolDecision {
+        if call.call_id == self.on {
+            assert!(self.control.cancel_tool(self.target));
+        }
+        ToolDecision::Continue
+    }
+}
+
+/// A call of a batch cancelled after its gates passed, but before the
+/// batch started running, never ran: the model is told so rather than
+/// that it may have partly completed.
+#[tokio::test]
+async fn a_batch_call_cancelled_before_it_starts_is_not_run() {
+    let control = RunControl::new();
+    let quick = Arc::new(Quick {
+        safe: true,
+        ..Quick::named("quick")
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register(quick.clone()).unwrap();
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "quick"), ("t2", "quick")]),
+        text_turn("done"),
+    ]);
+    let gate = Arc::new(CancelAtGate {
+        control: control.clone(),
+        on: "t2",
+        target: "t1",
+    });
+    let mut config = config(&control, vec![gate]);
+    config.tool_concurrency = 2;
+    let chunks = collect(&model, &registry, config).await;
+
+    assert_error(result_of(&chunks, "t1"), NOT_RUN);
+    assert_eq!(result_of(&chunks, "t2").as_text(), Some("ok"));
+    assert_eq!(quick.calls(), 1);
 }

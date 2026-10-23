@@ -1210,12 +1210,18 @@ fn run_engine<'a, M: CompletionModel>(
                         .with_usage_sink(delegated.clone())
                         .with_progress_sink(ProgressSink::new(id.clone(), progress_tx.clone()));
                         Some(async move {
-                            let result = tokio::select! {
+                            // Cancelled after its gates but before its turn
+                            // to run came (a sibling's gate, a full batch):
+                            // the tool was never invoked.
+                            if token.is_cancelled() {
+                                return (index, CallOutput::NotStarted);
+                            }
+                            let output = tokio::select! {
                                 biased;
-                                _ = token.cancelled() => None,
-                                result = tools.tool_call_with_ctx(name, args.clone(), &ctx) => Some(result),
+                                _ = token.cancelled() => CallOutput::Cancelled,
+                                result = tools.tool_call_with_ctx(name, args.clone(), &ctx) => CallOutput::Finished(result),
                             };
-                            (index, result)
+                            (index, output)
                         })
                     }
                     _ => None,
@@ -1292,14 +1298,15 @@ fn run_engine<'a, M: CompletionModel>(
                         continue;
                     };
                     *content = Some(match output {
-                        None => cancelled_while_running(),
-                        Some(Ok(content)) => content,
+                        CallOutput::NotStarted => cancelled_before_run(),
+                        CallOutput::Cancelled => cancelled_while_running(),
+                        CallOutput::Finished(Ok(content)) => content,
                         // Unreachable while the active set stays a subset
                         // of the catalog; kept in-band all the same.
-                        Some(Err(ToolRegistryError::NotFound(_))) => {
+                        CallOutput::Finished(Err(ToolRegistryError::NotFound(_))) => {
                             unavailable_tool(name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()))
                         },
-                        Some(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &guard, usage_run + delegated.total(), run_msgs)?,
+                        CallOutput::Finished(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &guard, usage_run + delegated.total(), run_msgs)?,
                     });
                 }
 
@@ -1523,6 +1530,16 @@ fn run_engine<'a, M: CompletionModel>(
 
 /// How many progress updates a run buffers before dropping new ones.
 const PROGRESS_BUFFER: usize = 64;
+
+/// How a call of a batch ended.
+enum CallOutput {
+    /// `RunControl::cancel_tool` stopped it before the tool was invoked.
+    NotStarted,
+    /// `RunControl::cancel_tool` stopped it while the tool ran.
+    Cancelled,
+    /// The tool returned.
+    Finished(Result<ToolResultContent, ToolRegistryError>),
+}
 
 /// What a batch in flight produced next: its results, or a progress
 /// update from one of its calls.
