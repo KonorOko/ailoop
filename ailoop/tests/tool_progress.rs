@@ -265,3 +265,67 @@ async fn a_burst_never_blocks_the_tool() {
 fn detached_context_ignores_progress() {
     ToolContext::detached().progress(ToolProgress::message("nobody listens"));
 }
+
+/// `t1` returns at once, leaving a task that reports when `t2` lets it;
+/// `t2` lets it and waits for that report before returning, so the
+/// update arrives after `t1` has its result but while the batch runs.
+struct ReportAfterReturn {
+    release: Arc<tokio::sync::Notify>,
+    reported: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl ToolDyn for ReportAfterReturn {
+    fn name(&self) -> &str {
+        "work"
+    }
+    fn tool_definition(&self) -> ToolDefinition {
+        ToolDefinition::new("work", "reports", json!({"type": "object"}), vec![])
+    }
+    fn concurrency_safe(&self) -> bool {
+        true
+    }
+    async fn call(&self, _: Value, ctx: &ToolContext) -> ToolResultContent {
+        if ctx.call_id() == "t1" {
+            let sink = ctx.progress_sink().clone();
+            let (release, reported) = (self.release.clone(), self.reported.clone());
+            tokio::spawn(async move {
+                release.notified().await;
+                sink.report(ToolProgress::message("too late"));
+                reported.notify_one();
+            });
+        } else {
+            self.release.notify_one();
+            self.reported.notified().await;
+        }
+        ToolResultContent::text("done")
+    }
+}
+
+/// An update sent after its call returned is dropped even while the
+/// rest of its batch still runs.
+#[tokio::test]
+async fn an_update_after_the_call_returned_is_dropped_mid_batch() {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(ReportAfterReturn {
+            release: Arc::default(),
+            reported: Arc::default(),
+        }))
+        .unwrap();
+    let model = ScriptedModel::new([calls_turn(&[("t1", "work"), ("t2", "work")]), end_turn()]);
+    let mut config = RunConfig::default();
+    config.tool_concurrency = 2;
+    let chunks: Vec<StreamChunk> = run_chat(&model, vec![Message::user("hi")], &registry, config)
+        .await
+        .expect("run starts")
+        .map(|c| c.expect("no error"))
+        .collect()
+        .await;
+
+    let progress = chunks
+        .iter()
+        .filter(|c| matches!(c, StreamChunk::ToolProgress { .. }))
+        .count();
+    assert_eq!(progress, 0);
+}

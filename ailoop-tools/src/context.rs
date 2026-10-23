@@ -15,6 +15,7 @@
 //! through [`ToolContext::report_usage`]; the engine folds it into the
 //! run total on `RunFinished.usage`. See [`UsageSink`].
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use ailoop_core::{RunId, StepId, ToolDefinition, ToolProgress, Usage};
@@ -252,6 +253,9 @@ pub struct ProgressSink {
 struct ProgressSinkInner {
     call_id: String,
     sender: tokio::sync::mpsc::Sender<(String, ToolProgress)>,
+    /// Cleared once the call has its result: later updates (from a
+    /// task the tool left running) are stale.
+    open: AtomicBool,
 }
 
 impl ProgressSink {
@@ -268,14 +272,28 @@ impl ProgressSink {
             inner: Some(Arc::new(ProgressSinkInner {
                 call_id: call_id.into(),
                 sender,
+                open: AtomicBool::new(true),
             })),
         }
     }
 
-    /// Send `progress`. Dropped when nobody listens or the run's buffer
-    /// is full; never blocks.
-    pub fn report(&self, progress: ToolProgress) {
+    /// Drop every update sent from now on, through any clone.
+    ///
+    /// Engine plumbing, hidden from the docs and not covered by semver:
+    /// its signature may change in any release.
+    #[doc(hidden)]
+    pub fn close(&self) {
         if let Some(inner) = &self.inner {
+            inner.open.store(false, Ordering::Release);
+        }
+    }
+
+    /// Send `progress`. Dropped when nobody listens, the run's buffer
+    /// is full, or the call already has its result; never blocks.
+    pub fn report(&self, progress: ToolProgress) {
+        if let Some(inner) = &self.inner
+            && inner.open.load(Ordering::Acquire)
+        {
             let _ = inner.sender.try_send((inner.call_id.clone(), progress));
         }
     }

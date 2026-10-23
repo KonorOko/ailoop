@@ -28,8 +28,9 @@ and this project adheres to
   show a spinner. Updates go out while the call runs and always before
   its `ToolResult`, and they never enter the history. Delivery is
   best-effort: reporting never blocks the tool, a run buffers 64
-  updates and drops the rest, and an update sent after its call has its
-  result (from a task left running) is dropped. `JsonTracer` logs
+  updates and drops the rest, and an update sent once its call is over
+  (from a task left running, or after `cancel_tool`) is dropped, even
+  while other calls of its batch still run. `JsonTracer` logs
   `tool_progress` (the message only in verbose mode), and
   `TracingMiddleware` logs a debug `ailoop.tool` event.
 - `ailoop-mcp` forwards MCP progress: every `tools/call` carries a

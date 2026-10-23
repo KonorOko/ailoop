@@ -1230,6 +1230,7 @@ fn run_engine<'a, M: CompletionModel>(
                 // run's abort first.
                 let runs = slots.iter().enumerate().filter_map(|(index, slot)| match slot {
                     Slot::Gated { id, name, args, token, content: None, .. } => {
+                        let progress = ProgressSink::new(id.clone(), progress_tx.clone());
                         let ctx = ToolContext::new(
                             run_id.clone(),
                             step_id.clone(),
@@ -1238,8 +1239,12 @@ fn run_engine<'a, M: CompletionModel>(
                             token.clone(),
                         )
                         .with_usage_sink(delegated.clone())
-                        .with_progress_sink(ProgressSink::new(id.clone(), progress_tx.clone()));
+                        .with_progress_sink(progress.clone());
                         Some(async move {
+                            // Updates sent once the call is over (it
+                            // returned, or its future was dropped) are
+                            // stale, even while the batch still runs.
+                            let _close = CloseOnDrop(progress);
                             // Cancelled after its gates but before its turn
                             // to run came (a sibling's gate, a full batch):
                             // the tool was never invoked.
@@ -1561,6 +1566,15 @@ fn run_engine<'a, M: CompletionModel>(
     };
 
     Box::pin(stream)
+}
+
+/// Closes a call's [`ProgressSink`] when the call's future ends.
+struct CloseOnDrop(ProgressSink);
+
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        self.0.close();
+    }
 }
 
 /// How many progress updates a run buffers before dropping new ones.
