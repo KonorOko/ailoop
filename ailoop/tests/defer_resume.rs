@@ -811,3 +811,48 @@ async fn a_waiting_call_cancelled_before_the_suspension_never_runs() {
     );
     assert_no_orphans(chat.messages());
 }
+
+/// Signals when `on_run_finished` starts, then never returns.
+#[derive(Default)]
+struct HangOnFinish {
+    entered: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for HangOnFinish {
+    async fn on_run_finished(&self, _run: &ailoop::RunFinishedInfo<'_>) {
+        self.entered.notify_one();
+        std::future::pending::<()>().await;
+    }
+}
+
+/// A suspending run dropped while its closing hooks run is rolled back
+/// as a whole: the history does not end on tool calls without results
+/// while the conversation has no suspension to resume.
+#[tokio::test]
+async fn drop_during_closing_hooks_rolls_the_suspension_back_too() {
+    let hang = Arc::new(HangOnFinish::default());
+    let mut chat = Conversation::builder(ScriptedModel::new(vec![
+        calls_turn(&[("t1", "delete")]),
+        text_turn("done"),
+    ]))
+    .tool_dyn(Probe::new("delete"))
+    .middleware(Gate::deferring(&["delete"]))
+    .middleware(hang.clone())
+    .build()
+    .expect("build");
+    let mut stream = chat.stream("clean up").await.expect("starts");
+    loop {
+        tokio::select! {
+            biased;
+            _ = hang.entered.notified() => break,
+            chunk = stream.next() => {
+                chunk.expect("the run reaches its closing hooks").expect("no error");
+            }
+        }
+    }
+    drop(stream);
+
+    assert!(chat.suspension().is_none());
+    assert_no_orphans(chat.messages());
+}

@@ -183,6 +183,18 @@ and this project adheres to
 
 ### Fixed
 
+- A `Conversation` run is now committed when its `RunFinished` reaches
+  the consumer, as the `RunStream` docs say, and not earlier. Before,
+  the history was committed when the run started its closing hooks
+  (`on_run_finished`, and the `on_chunk*` hooks of the final chunks),
+  while the suspension slot was only updated with `RunFinished`. A
+  stream dropped during those hooks (a caller-side timeout around a
+  slow tracer or store) kept the run's messages but not its
+  suspension: a suspending run left the history ending on tool calls
+  with no suspension to resume, and a resumed run left the old
+  suspension next to the step it had closed. Now such a drop rolls the
+  whole run back, like any other drop, and the messages the run took
+  from its `RunControl` go back in the queue.
 - `ToolContext::cancellation` now fires on every abort of the run, not
   only when the caller cancels its own token: a `RunConfig::timeout`
   that elapses, a `Terminate` from a middleware or tool, and a dropped

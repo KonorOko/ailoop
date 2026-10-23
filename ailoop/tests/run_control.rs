@@ -409,3 +409,58 @@ async fn conversation_commits_delivered_messages() {
         .expect("build");
     assert!(has_steer(restored.messages()));
 }
+
+/// Signals when `on_run_finished` starts, then never returns: a slow
+/// closing hook the caller gives up on.
+#[derive(Default)]
+struct HangOnFinish {
+    entered: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for HangOnFinish {
+    async fn on_run_finished(&self, _run: &ailoop::RunFinishedInfo<'_>) {
+        self.entered.notify_one();
+        std::future::pending::<()>().await;
+    }
+}
+
+/// A run dropped while its closing hooks run never handed its
+/// `RunFinished` over: the conversation rolls it back, so the messages
+/// it delivered go back in the queue instead of being lost.
+#[tokio::test]
+async fn drop_during_closing_hooks_puts_delivered_messages_back() {
+    let control = RunControl::new();
+    let hang = Arc::new(HangOnFinish::default());
+    let mut chat = Conversation::builder(ScriptedModel::new([
+        tool_call_turn("t1"),
+        text_turn("done"),
+    ]))
+    .tool_dyn(Arc::new(PushWhileRunning(control.clone())))
+    .middleware(hang.clone())
+    .build()
+    .expect("build");
+    let mut stream = chat
+        .stream_with_options("hi", RunOptions::new().control(control.clone()))
+        .await
+        .expect("starts");
+    loop {
+        tokio::select! {
+            biased;
+            _ = hang.entered.notified() => break,
+            chunk = stream.next() => {
+                let chunk = chunk.expect("the run reaches its closing hooks");
+                assert!(!matches!(chunk, Ok(StreamChunk::RunFinished { .. })));
+            }
+        }
+    }
+    drop(stream);
+
+    let has_steer = chat
+        .messages()
+        .iter()
+        .any(|m| matches!(m, Message::User { blocks } if blocks.iter().any(|b| is_text(b, STEER))));
+    assert!(!has_steer, "the run was rolled back");
+    let ids: Vec<String> = control.take_pending().into_iter().map(|m| m.id).collect();
+    assert_eq!(ids, ["m1"]);
+}

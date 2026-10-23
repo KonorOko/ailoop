@@ -104,6 +104,13 @@ struct RunGuard {
     /// run's messages, which a dropped run never commits, so a drop
     /// puts them back in the queue.
     taken: std::sync::Mutex<Vec<Inbound>>,
+    /// Set once `RunFinished` reached the consumer: from then on the
+    /// run is committed, whatever happens to the stream.
+    handed_over: Arc<AtomicBool>,
+    /// Set when the run fails with an error, whose delivered messages
+    /// travel in its partial messages instead of going back in the
+    /// queue.
+    errored: AtomicBool,
 }
 
 impl RunGuard {
@@ -112,6 +119,7 @@ impl RunGuard {
         run_id: RunId,
         tool_cancellation: CancellationToken,
         control: Option<RunControl>,
+        handed_over: Arc<AtomicBool>,
     ) -> Self {
         Self {
             middlewares,
@@ -121,6 +129,8 @@ impl RunGuard {
             ended: AtomicBool::new(false),
             control,
             taken: std::sync::Mutex::default(),
+            handed_over,
+            errored: AtomicBool::new(false),
         }
     }
 
@@ -183,6 +193,7 @@ impl RunGuard {
         partial_messages: &[Message],
     ) {
         self.ended.store(true, Ordering::Relaxed);
+        self.errored.store(true, Ordering::Relaxed);
         for mw in self.pending() {
             mw.on_run_error(&RunErrorInfo::new(
                 &self.run_id,
@@ -201,10 +212,15 @@ impl Drop for RunGuard {
         self.clear_calls();
         if !self.ended.load(Ordering::Relaxed) {
             self.tool_cancellation.cancel();
-            if let Some(control) = &self.control {
-                let taken = std::mem::take(self.taken.get_mut().unwrap_or_else(|e| e.into_inner()));
-                control.restore(taken);
-            }
+        }
+        // A run dropped before it handed `RunFinished` over is rolled
+        // back, even if its closing hooks had started.
+        if !self.handed_over.load(Ordering::SeqCst)
+            && !self.errored.load(Ordering::Relaxed)
+            && let Some(control) = &self.control
+        {
+            let taken = std::mem::take(self.taken.get_mut().unwrap_or_else(|e| e.into_inner()));
+            control.restore(taken);
         }
         for mw in self.pending() {
             mw.on_run_dropped(&self.run_id);
@@ -436,26 +452,26 @@ pub(crate) struct ContextOptions {
 }
 
 /// A [`History`] the engine appends to in place for the duration of a
-/// run, with rollback: until [`Self::commit`] runs, dropping this value
-/// restores the messages and pin mask captured at construction. That
-/// keeps the pre-existing contract that a run ending in `Err` (or a
-/// stream dropped mid-run) leaves the history exactly as it was when
-/// the run started, even when the run compacted it along the way. The
-/// steps completed before an `Err` travel in [`RunError`] instead.
+/// run, with rollback: unless the run handed its `RunFinished` over to
+/// the consumer, dropping this value restores the messages and pin
+/// mask captured at construction. That keeps the contract that a run
+/// ending in `Err` (or a stream dropped mid-run, closing hooks
+/// included) leaves the history exactly as it was when the run
+/// started, even when the run compacted it along the way. The steps
+/// completed before an `Err` travel in [`RunError`] instead.
 struct ManagedHistory<'a> {
     history: &'a mut History,
     rollback: Option<(Vec<Message>, Vec<bool>)>,
     options: ContextOptions,
-}
-
-impl ManagedHistory<'_> {
-    fn commit(&mut self) {
-        self.rollback = None;
-    }
+    /// The run's [`RunGuard::handed_over`], set by [`run_engine`].
+    handed_over: Arc<AtomicBool>,
 }
 
 impl Drop for ManagedHistory<'_> {
     fn drop(&mut self) {
+        if self.handed_over.load(Ordering::SeqCst) {
+            return;
+        }
         if let Some((messages, pinned)) = self.rollback.take() {
             self.history
                 .replace_messages(messages, pinned)
@@ -519,9 +535,6 @@ impl<'a> RunMessages<'a> {
     /// the run's messages. Called exactly once, right before the
     /// terminal `RunFinished` is built.
     fn finish(&mut self) -> Vec<Message> {
-        if let RunContext::Managed(managed) = &mut self.context {
-            managed.commit();
-        }
         std::mem::take(&mut self.new_messages)
     }
 
@@ -652,6 +665,7 @@ pub(crate) fn run_with_history<'a, M: CompletionModel>(
         history,
         rollback,
         options,
+        handed_over: Arc::default(),
     };
     run_engine(
         model,
@@ -665,7 +679,7 @@ pub(crate) fn run_with_history<'a, M: CompletionModel>(
 
 fn run_engine<'a, M: CompletionModel>(
     model: &'a M,
-    context: RunContext<'a>,
+    mut context: RunContext<'a>,
     tools: &'a ToolRegistry,
     mut config: RunConfig,
     is_overflow: fn(&M::Error) -> bool,
@@ -673,6 +687,15 @@ fn run_engine<'a, M: CompletionModel>(
 ) -> EngineStream<'a, M::Error> {
     // A resumed run starts by finishing the suspended step instead of
     // asking the model; `resumed_from` lets observers correlate it.
+    // The run is committed once its `RunFinished` reaches the consumer,
+    // atomically with that delivery: a stream dropped any earlier, its
+    // closing hooks included, rolls the history back and puts the
+    // messages it took from its `RunControl` back in the queue.
+    let handed_over = Arc::new(AtomicBool::new(false));
+    if let RunContext::Managed(managed) = &mut context {
+        managed.handed_over = handed_over.clone();
+    }
+    let committed = handed_over.clone();
     let mut resuming = config.resume.take();
     if let Some(resume) = &resuming {
         config.resumed_from = Some(resume.suspension.run_id.clone());
@@ -726,6 +749,7 @@ fn run_engine<'a, M: CompletionModel>(
             run_id.clone(),
             tool_cancellation.clone(),
             config.control.clone(),
+            handed_over.clone(),
         );
         // Progress tools report while they run, `(call_id, update)`.
         // Bounded and fed with `try_send`, so a chatty tool never blocks
@@ -1670,7 +1694,11 @@ fn run_engine<'a, M: CompletionModel>(
         yield chunk;
     };
 
-    Box::pin(stream)
+    Box::pin(stream.inspect(move |item| {
+        if let Ok(StreamChunk::RunFinished { .. }) = item {
+            committed.store(true, Ordering::SeqCst);
+        }
+    }))
 }
 
 /// Closes a call's [`ProgressSink`] when the call's future ends.
