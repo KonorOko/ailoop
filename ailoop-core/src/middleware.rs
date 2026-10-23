@@ -107,19 +107,13 @@ pub trait ChatMiddleware: Send + Sync {
     /// the builder's system prompt, and per-block `cache_control` on a
     /// [`crate::SystemPrompt::Blocks`] value is preserved.
     ///
-    /// The current iteration is not passed here, but it is available:
-    /// the engine emits [`StreamChunk::StepStarted`] (carrying
-    /// `iteration`) through [`Self::on_chunk`] right before calling
-    /// `on_chat_request` for the same step, and
-    /// [`RunConfig::max_iterations`] arrives in
-    /// [`Self::on_run_started`]. A middleware that needs "how many
-    /// iterations are left" records both keyed by `run_id` (e.g. in a
-    /// `Mutex<HashMap<RunId, _>>`, removed in [`Self::on_run_finished`])
-    /// and reads them here. Retries by [`crate::RetryingModel`] happen
-    /// inside `chat_stream`, so this hook runs once per iteration; the
-    /// only exception is the context-overflow recovery of a
-    /// `Conversation`, which rebuilds the request and calls it again
-    /// with the same `step_id`.
+    /// `step` carries the iteration and the run's cap: iterations left,
+    /// counting this one, are `step.max_iterations - step.iteration`.
+    /// Count with those rather than with calls to this hook. Retries by
+    /// [`crate::RetryingModel`] happen inside `chat_stream` and do not
+    /// call it again, but the context-overflow recovery of a
+    /// `Conversation` rebuilds the request and calls it a second time
+    /// for the same step, with the same `step_id` and `iteration`.
     async fn on_chat_request(&self, step: &StepInfo, req: &mut ChatRequest) {}
     /// Fired for every [`StreamChunk`] the engine emits, including
     /// chunks the engine itself synthesizes
@@ -348,12 +342,33 @@ pub struct StepInfo {
     /// The step itself; the same `step_id` the engine puts on
     /// [`StreamChunk::StepStarted`].
     pub step_id: StepId,
+    /// Zero-based index of the step in its run; the same `iteration` as
+    /// on [`StreamChunk::StepStarted`].
+    pub iteration: usize,
+    /// The run's iteration cap, [`RunConfig::max_iterations`]. The run
+    /// aborts with [`crate::AbortReason::MaxIterations`] instead of
+    /// starting step number `max_iterations`.
+    pub max_iterations: usize,
 }
 
 impl StepInfo {
-    /// Build the identity of a step.
+    /// Build the identity of a step, as the first step of a run with
+    /// the default cap ([`crate::DEFAULT_MAX_ITERATIONS`]). Set both
+    /// with [`Self::with_iteration`].
     pub fn new(run_id: RunId, step_id: StepId) -> Self {
-        Self { run_id, step_id }
+        Self {
+            run_id,
+            step_id,
+            iteration: 0,
+            max_iterations: crate::DEFAULT_MAX_ITERATIONS,
+        }
+    }
+
+    /// Set [`Self::iteration`] and [`Self::max_iterations`].
+    pub fn with_iteration(mut self, iteration: usize, max_iterations: usize) -> Self {
+        self.iteration = iteration;
+        self.max_iterations = max_iterations;
+        self
     }
 }
 
