@@ -61,6 +61,34 @@ and this project adheres to
   cancelling it (from the engine or from the tool) stops only that
   call.
 
+- Concurrent tool execution, opt-in: `ConversationBuilder::tool_concurrency(n)`
+  (or `RunConfig::tool_concurrency`) lets up to `n` tool calls of one
+  step run at the same time, for tools that declare it safe with
+  `ToolDyn::concurrency_safe` (`Tool::CONCURRENCY_SAFE`, or
+  `#[ailoop_tool(concurrency_safe)]`). Before, calls always ran one at a
+  time, so a turn that asked for several independent reads waited for
+  each in turn. The default stays `1` and every tool defaults to not
+  safe, so nothing changes unless both are set. How a step runs:
+  - Consecutive calls to safe tools form a batch; a call to any other
+    tool runs alone, in order, as a barrier.
+  - Within a batch, every call's `on_before_tool_call*` hooks
+    (approvals included) run first, one call at a time in the model's
+    order, so `ApprovalMiddleware` still asks once at a time and
+    `AntiLoop` / `MaxToolCalls` see the same sequence as before. Then
+    the calls that passed run together, each still cancellable with
+    `cancel_tool`. Then the `on_after_tool_call*` hooks and `ToolResult`
+    chunks follow in the model's order, once the whole batch is done.
+  - A `Terminate` at any gate of a batch runs no call of it. If the run
+    aborts while a batch runs, every call of that batch is answered as
+    not run, including those that had finished: their `after` hooks
+    have not run, and a result must not skip a transform such as
+    `Sanitize`.
+  - `SubAgentTool` is not concurrency-safe (its child conversation is
+    behind a lock), and MCP tools are not either for now.
+
+  The middleware contract in "Tool calls within a step" now describes
+  this order instead of reserving it for a later release.
+
 ### Fixed
 
 - `ToolContext::cancellation` now fires on every abort of the run, not

@@ -95,6 +95,19 @@ pub struct RunConfig {
     /// run. `None` (the default) leaves the run as it would be without
     /// one.
     pub control: Option<RunControl>,
+    /// How many tool calls of one step may run at the same time. Only
+    /// calls whose tool reports `concurrency_safe` run together: a run
+    /// of consecutive such calls forms a batch, and any other call runs
+    /// alone, in order, as a barrier. Within a batch the
+    /// `on_before_tool_call*` hooks (approvals included) still run one
+    /// call at a time in the model's order before any call executes,
+    /// and the `on_after_tool_call*` hooks and `ToolResult` chunks follow
+    /// in the model's order once the whole batch is done. The default,
+    /// `1`, runs every call alone (`0` counts as `1`).
+    ///
+    /// Unrelated to `ChatRequest::disable_parallel_tool_use`, which
+    /// controls whether the model may ask for several calls per turn.
+    pub tool_concurrency: usize,
 }
 
 impl Default for RunConfig {
@@ -108,6 +121,7 @@ impl Default for RunConfig {
             timeout: None,
             cancellation: None,
             control: None,
+            tool_concurrency: 1,
         }
     }
 }
@@ -124,6 +138,7 @@ impl std::fmt::Debug for RunConfig {
             .field("timeout", &self.timeout)
             .field("cancellation", &self.cancellation)
             .field("control", &self.control)
+            .field("tool_concurrency", &self.tool_concurrency)
             .finish()
     }
 }

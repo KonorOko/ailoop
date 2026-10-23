@@ -930,14 +930,27 @@ fn run_engine<'a, M: CompletionModel>(
                 run_msgs.push(Message::Assistant { blocks: assistant_blocks });
             }
 
-            // Calls run one at a time in the model's order. That is an
-            // implementation detail, not part of the contract: the
-            // `ChatMiddleware` docs leave the order between calls of a
-            // step open so they can run concurrently later. What must
-            // hold either way: per-call hook order, `tools_result` in
-            // the model's order, and on abort every call answered:
-            // completed calls keep their result, the rest get an error
-            // from `abort_step`.
+            // Calls go through in batches, in the model's order. With
+            // `tool_concurrency` above 1, a run of consecutive calls to
+            // `concurrency_safe` tools forms one batch; any other call is
+            // a batch of its own. For each batch:
+            //
+            // 1. gates, one call at a time in the model's order (active
+            //    set, `cancel_tool`, `before` hooks, the tool decision),
+            //    so approvals, `AntiLoop` and `MaxToolCalls` see the same
+            //    sequence they would without concurrency;
+            // 2. the calls that passed run together, up to
+            //    `tool_concurrency` at once;
+            // 3. `after` hooks and `ToolResult` chunks, in the model's
+            //    order, once the whole batch is done.
+            //
+            // With the default of 1 every batch holds one call, which is
+            // plain sequential execution. On abort every call is
+            // answered: completed batches keep their results, and the
+            // calls of the batch in flight and those after it get an
+            // error from `abort_step`. A call that ran but has not been
+            // through its `after` hooks counts as not run, so no result
+            // skips a transform like `Sanitize`.
             //
             // Each call gets its own token, a child of the run's, so
             // `RunControl::cancel_tool` stops one call without touching
@@ -957,214 +970,249 @@ fn run_engine<'a, M: CompletionModel>(
                     control.register_call(id.clone(), token.clone());
                 }
             }
+            let concurrency = config.tool_concurrency.max(1);
+            let batchable = |call: &PendingCall| match call {
+                PendingCall::Run { name, .. } => {
+                    concurrency > 1 && catalog.get(name).is_some_and(|tool| tool.concurrency_safe())
+                }
+                PendingCall::Rejected { .. } => false,
+            };
             let mut tools_result = Vec::new();
-            let mut pending = tool_calls.into_iter();
-            while let Some(call) = pending.next() {
-                // Only tools in the run's active set can run. A name the
-                // model was never shown (deferred, or not registered at
-                // all) gets the same "not found" reply either way. The
-                // set is read at dispatch time, not when the model was
-                // prompted.
-                let call = match call {
-                    PendingCall::Run { id, name, .. }
-                        if !active_snapshot
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .contains(&name) =>
-                    {
-                        let content = unavailable_tool(&name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()));
-                        PendingCall::Rejected { id, content }
-                    }
-                    // Cancelled through `RunControl::cancel_tool` before
-                    // its turn came: like a rejection, no hook fires.
-                    PendingCall::Run { id, .. }
-                        if call_tokens.get(&id).is_some_and(CancellationToken::is_cancelled) =>
-                    {
-                        PendingCall::Rejected { id, content: cancelled_before_run() }
-                    }
-                    call => call,
-                };
-                let (id, name, mut args) = match call {
-                    PendingCall::Run { id, name, args } => (id, name, args),
-                    // Nothing runs, so no tool hook fires: the synthesized
-                    // error only goes out as a ToolResult chunk.
-                    PendingCall::Rejected { id, content } => {
-                        let mut chunk = StreamChunk::tool_result(
-                            run_id.clone(),
-                            step_id.clone(),
-                            id.clone(),
-                            content.clone(),
-                        );
-                        for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
-                        for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
-                        yield chunk;
-                        if let Some(control) = &config.control { control.unregister_call(&id); }
-                        tools_result.push(UserBlock::tool_result(id, content));
-                        continue;
-                    }
-                };
-                let call_token = call_tokens
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| tool_cancellation.child_token());
-                let call = ToolCallInfo::new(run_id.clone(), step_id.clone(), id.clone(), name.clone());
-
-                // Input-transform phase: every `_mut` runs before any
-                // gating decision so a sanitizer can rewrite args before
-                // an `ApprovalMiddleware` sees them. Mutated `args` flow
-                // through to the tool invocation below.
-                let mut abort_reason = None;
-                for mw in &config.middlewares {
-                    if let Err(reason) = race_abort(
-                        mw.on_before_tool_call_mut(&call, &mut args),
-                        &mut abort_fut,
-                    ).await {
-                        abort_reason = Some(reason);
-                        break;
+            let mut pending = tool_calls.into_iter().peekable();
+            while let Some(first) = pending.next() {
+                let mut batch = Vec::new();
+                if batchable(&first) {
+                    while let Some(next) = pending.next_if(|c| batchable(c)) {
+                        batch.push(next);
                     }
                 }
-                if let Some(abort_reason) = abort_reason {
-                    let current = PendingCall::Run { id, name, args };
-                    let chunks = abort_step(
-                        &guard, &step_id, abort_reason, usage_run + delegated.total(),
-                        &mut run_msgs, tools_result, std::iter::once(current).chain(pending),
-                    ).await;
-                    for chunk in chunks { yield chunk; }
-                    return;
+                batch.insert(0, first);
+
+                // Phase 1: gates, in the model's order.
+                let mut slots: Vec<Slot> = Vec::with_capacity(batch.len());
+                let mut gating = batch.into_iter();
+                while let Some(call) = gating.next() {
+                    // Only tools in the run's active set can run. A name the
+                    // model was never shown (deferred, or not registered at
+                    // all) gets the same "not found" reply either way. The
+                    // set is read at dispatch time, not when the model was
+                    // prompted.
+                    let call = match call {
+                        PendingCall::Run { id, name, .. }
+                            if !active_snapshot
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .contains(&name) =>
+                        {
+                            let content = unavailable_tool(&name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()));
+                            PendingCall::Rejected { id, content }
+                        }
+                        // Cancelled through `RunControl::cancel_tool` before
+                        // its turn came: like a rejection, no hook fires.
+                        PendingCall::Run { id, .. }
+                            if call_tokens.get(&id).is_some_and(CancellationToken::is_cancelled) =>
+                        {
+                            PendingCall::Rejected { id, content: cancelled_before_run() }
+                        }
+                        call => call,
+                    };
+                    let (id, name, mut args) = match call {
+                        PendingCall::Run { id, name, args } => (id, name, args),
+                        // Nothing runs, so no tool hook fires: the synthesized
+                        // error only goes out as a ToolResult chunk.
+                        PendingCall::Rejected { id, content } => {
+                            slots.push(Slot::Answered { id, content });
+                            continue;
+                        }
+                    };
+                    let token = call_tokens
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| tool_cancellation.child_token());
+                    let call = ToolCallInfo::new(run_id.clone(), step_id.clone(), id.clone(), name.clone());
+
+                    // Input-transform phase: every `_mut` runs before any
+                    // gating decision so a sanitizer can rewrite args before
+                    // an `ApprovalMiddleware` sees them. Mutated `args` flow
+                    // through to the tool invocation below.
+                    let mut abort_reason = None;
+                    for mw in &config.middlewares {
+                        if let Err(reason) = race_abort(
+                            mw.on_before_tool_call_mut(&call, &mut args),
+                            &mut abort_fut,
+                        ).await {
+                            abort_reason = Some(reason);
+                            break;
+                        }
+                    }
+                    let decision = match abort_reason {
+                        Some(reason) => Err(reason),
+                        None => race_abort(
+                            run_tool_chain(&config.middlewares, &call, &args),
+                            &mut abort_fut,
+                        ).await,
+                    };
+                    let content = match decision {
+                        // Cancelled while its `before` hooks ran: the tool is
+                        // not invoked, but the `after` hooks still pair up.
+                        Ok(ToolDecision::Continue) if token.is_cancelled() => Some(cancelled_before_run()),
+                        Ok(ToolDecision::Continue) => None,
+                        Ok(ToolDecision::Skip {reason}) => {
+                            Some(ToolResultContent::error(format!("Tool skipped: {reason}")))
+                        },
+                        Ok(ToolDecision::Terminate {reason}) => {
+                            // No call of the batch runs.
+                            let reason = AbortReason::tool_terminated(name.clone(), id.clone(), reason);
+                            let current = PendingCall::Run { id, name, args };
+                            let unanswered: Vec<PendingCall> = slots.into_iter().map(Slot::into_unanswered)
+                                .chain(std::iter::once(current)).chain(gating).chain(pending).collect();
+                            let chunks = abort_step(
+                                &guard, &step_id, reason, usage_run + delegated.total(),
+                                &mut run_msgs, tools_result, unanswered,
+                            ).await;
+                            for chunk in chunks { yield chunk; }
+                            return;
+                        }
+                        Ok(_) => Some(ToolResultContent::error("unsupported ToolDecision variant")),
+                        Err(reason) => {
+                            let current = PendingCall::Run { id, name, args };
+                            let unanswered: Vec<PendingCall> = slots.into_iter().map(Slot::into_unanswered)
+                                .chain(std::iter::once(current)).chain(gating).chain(pending).collect();
+                            let chunks = abort_step(
+                                &guard, &step_id, reason, usage_run + delegated.total(),
+                                &mut run_msgs, tools_result, unanswered,
+                            ).await;
+                            for chunk in chunks { yield chunk; }
+                            return;
+                        }
+                    };
+                    slots.push(Slot::Gated { id, name, args, call, token, content });
                 }
 
-                let decision = match race_abort(
-                    run_tool_chain(&config.middlewares, &call, &args),
-                    &mut abort_fut,
-                ).await {
-                    Ok(d) => d,
-                    Err(reason) => {
-                        let current = PendingCall::Run { id, name, args };
-                        let chunks = abort_step(
-                            &guard, &step_id, reason, usage_run + delegated.total(),
-                            &mut run_msgs, tools_result, std::iter::once(current).chain(pending),
-                        ).await;
-                        for chunk in chunks { yield chunk; }
-                        return;
-                    }
-                };
-
-                let mut content = match decision {
-                    // Cancelled while its `before` hooks ran: the tool is
-                    // not invoked, but the `after` hooks still pair up.
-                    ToolDecision::Continue if call_token.is_cancelled() => cancelled_before_run(),
-                    ToolDecision::Continue => {
+                // Phase 2: run the calls that passed, together. Each
+                // call's own token stops just that call: its future is
+                // dropped even if the tool ignores the token. A run abort
+                // fires those tokens too, but `race_abort` checks the
+                // run's abort first.
+                let runs = slots.iter().enumerate().filter_map(|(index, slot)| match slot {
+                    Slot::Gated { id, name, args, token, content: None, .. } => {
                         let ctx = ToolContext::new(
                             run_id.clone(),
                             step_id.clone(),
                             id.clone(),
                             ToolActivation::new(catalog.clone(), active_snapshot.clone()),
-                            call_token.clone(),
+                            token.clone(),
                         )
                         .with_usage_sink(delegated.clone());
-                        // The call's own token stops just this call: the
-                        // tool future is dropped even if the tool ignores
-                        // the token. A run abort fires that token too, but
-                        // `race_abort` checks the run's abort first.
-                        let call_result = race_abort(
-                            async {
-                                tokio::select! {
-                                    biased;
-                                    _ = call_token.cancelled() => None,
-                                    result = tools.tool_call_with_ctx(&name, args.clone(), &ctx) => Some(result),
-                                }
-                            },
-                            &mut abort_fut,
+                        Some(async move {
+                            let result = tokio::select! {
+                                biased;
+                                _ = token.cancelled() => None,
+                                result = tools.tool_call_with_ctx(name, args.clone(), &ctx) => Some(result),
+                            };
+                            (index, result)
+                        })
+                    }
+                    _ => None,
+                }).collect::<Vec<_>>();
+                let outputs = race_abort(
+                    futures::stream::iter(runs).buffered(concurrency).collect::<Vec<_>>(),
+                    &mut abort_fut,
+                ).await;
+                let outputs = match outputs {
+                    Ok(outputs) => outputs,
+                    Err(reason) => {
+                        let unanswered: Vec<PendingCall> = slots.into_iter().map(Slot::into_unanswered)
+                            .chain(pending).collect();
+                        let chunks = abort_step(
+                            &guard, &step_id, reason, usage_run + delegated.total(),
+                            &mut run_msgs, tools_result, unanswered,
                         ).await;
-                        match call_result {
-                            Ok(None) => cancelled_while_running(),
-                            Ok(Some(Ok(content))) => content,
-                            // Unreachable while the active set stays a subset
-                            // of the catalog; kept in-band all the same.
-                            Ok(Some(Err(ToolRegistryError::NotFound(_)))) => {
-                                unavailable_tool(&name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()))
-                            },
-                            Ok(Some(Err(other))) => bail_with_hooks!(Err(EngineError::Tool(other)), &guard, usage_run + delegated.total(), run_msgs)?,
-                            Err(reason) => {
-                                let current = PendingCall::Run { id, name, args };
+                        for chunk in chunks { yield chunk; }
+                        return;
+                    }
+                };
+                for (index, output) in outputs {
+                    let Slot::Gated { name, content, .. } = &mut slots[index] else {
+                        continue;
+                    };
+                    *content = Some(match output {
+                        None => cancelled_while_running(),
+                        Some(Ok(content)) => content,
+                        // Unreachable while the active set stays a subset
+                        // of the catalog; kept in-band all the same.
+                        Some(Err(ToolRegistryError::NotFound(_))) => {
+                            unavailable_tool(name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()))
+                        },
+                        Some(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &guard, usage_run + delegated.total(), run_msgs)?,
+                    });
+                }
+
+                // Phase 3: `after` hooks and results, in the model's order.
+                let mut answering = slots.into_iter();
+                while let Some(slot) = answering.next() {
+                    let (id, content) = match slot {
+                        Slot::Answered { id, content } => (id, content),
+                        Slot::Gated { id, args, call, content, .. } => {
+                            let mut content = content.unwrap_or_else(|| {
+                                ToolResultContent::error("Tool not run: no result was recorded")
+                            });
+                            // Output-transform phase: every `_mut` runs before any
+                            // observer, so observers and the engine's emitted
+                            // `ToolResult` chunk all see the same mutated result.
+                            let mut abort_reason = None;
+                            for mw in &config.middlewares {
+                                if let Err(reason) = race_abort(
+                                    mw.on_after_tool_call_mut(&call, &args, &mut content),
+                                    &mut abort_fut,
+                                ).await {
+                                    abort_reason = Some(reason);
+                                    break;
+                                }
+                            }
+                            if abort_reason.is_none() {
+                                for mw in &config.middlewares {
+                                    if let Err(reason) = race_abort(
+                                        mw.on_after_tool_call(&call, &args, &content),
+                                        &mut abort_fut,
+                                    ).await {
+                                        abort_reason = Some(reason);
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(reason) = abort_reason {
+                                // The call that was in its `after` hooks keeps
+                                // its result (whatever the partially-applied
+                                // transforms left it as) so history isn't left
+                                // with a tool_call missing its tool_result.
+                                tools_result.push(UserBlock::tool_result(id, content));
+                                let unanswered: Vec<PendingCall> = answering.map(Slot::into_unanswered)
+                                    .chain(pending).collect();
                                 let chunks = abort_step(
                                     &guard, &step_id, reason, usage_run + delegated.total(),
-                                    &mut run_msgs, tools_result, std::iter::once(current).chain(pending),
+                                    &mut run_msgs, tools_result, unanswered,
                                 ).await;
                                 for chunk in chunks { yield chunk; }
                                 return;
                             }
+                            (id, content)
                         }
-                    },
-                    ToolDecision::Skip {reason} => {
-                        ToolResultContent::error(format!("Tool skipped: {reason}"))
-                    },
-                    ToolDecision::Terminate {reason} => {
-                        let reason = AbortReason::tool_terminated(name.clone(), id.clone(), reason);
-                        let current = PendingCall::Run { id, name, args };
-                        let chunks = abort_step(
-                            &guard, &step_id, reason, usage_run + delegated.total(),
-                            &mut run_msgs, tools_result, std::iter::once(current).chain(pending),
-                        ).await;
-                        for chunk in chunks { yield chunk; }
-                        return;
-                    }
-                    _ => ToolResultContent::error("unsupported ToolDecision variant"),
-                };
+                    };
 
-                // Output-transform phase: every `_mut` runs before any
-                // observer, so observers and the engine's emitted
-                // `ToolResult` chunk all see the same mutated result.
-                for mw in &config.middlewares {
-                    if let Err(reason) = race_abort(
-                        mw.on_after_tool_call_mut(&call, &args, &mut content),
-                        &mut abort_fut,
-                    ).await {
-                        // Same persistence discipline as the observer
-                        // path below: the just-completed tool's result
-                        // (whatever the partially-applied transforms
-                        // left it as) must land in history so the next
-                        // assistant turn isn't missing a tool_result.
-                        tools_result.push(UserBlock::tool_result(id.clone(), content.clone()));
-                        let chunks = abort_step(
-                            &guard, &step_id, reason, usage_run + delegated.total(),
-                            &mut run_msgs, tools_result, pending,
-                        ).await;
-                        for chunk in chunks { yield chunk; }
-                        return;
-                    }
+                    let mut chunk = StreamChunk::tool_result(
+                        run_id.clone(),
+                        step_id.clone(),
+                        id.clone(),
+                        content.clone(),
+                    );
+                    for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
+                    for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                    yield chunk;
+
+                    if let Some(control) = &config.control { control.unregister_call(&id); }
+                    tools_result.push(UserBlock::tool_result(id, content));
                 }
-
-                for mw in &config.middlewares {
-                    if let Err(reason) = race_abort(
-                        mw.on_after_tool_call(&call, &args, &content),
-                        &mut abort_fut,
-                    ).await {
-                        // Preserve the just-completed tool's result so
-                        // history isn't left with a tool_call missing
-                        // its tool_result on the next assistant turn.
-                        tools_result.push(UserBlock::tool_result(id.clone(), content.clone()));
-                        let chunks = abort_step(
-                            &guard, &step_id, reason, usage_run + delegated.total(),
-                            &mut run_msgs, tools_result, pending,
-                        ).await;
-                        for chunk in chunks { yield chunk; }
-                        return;
-                    }
-                }
-
-                let mut chunk = StreamChunk::tool_result(
-                    run_id.clone(),
-                    step_id.clone(),
-                    id.clone(),
-                    content.clone(),
-                );
-                for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
-                for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
-                yield chunk;
-
-                if let Some(control) = &config.control { control.unregister_call(&id); }
-                tools_result.push(UserBlock::tool_result(id, content));
             }
 
             // Messages queued on the run's `RunControl` enter here, once
@@ -1265,6 +1313,39 @@ fn run_engine<'a, M: CompletionModel>(
     };
 
     Box::pin(stream)
+}
+
+/// One call of a batch on its way through the gate, execution and
+/// `after` phases of a step.
+enum Slot {
+    /// Answered before its gates ran (rejected, or cancelled before its
+    /// turn); no tool hook fires for it.
+    Answered {
+        id: String,
+        content: ToolResultContent,
+    },
+    /// Through its `before` hooks. `content` is set up front when the
+    /// tool will not be invoked (skipped, or cancelled during its
+    /// gates), and after execution otherwise.
+    Gated {
+        id: String,
+        name: String,
+        args: Value,
+        call: ToolCallInfo,
+        token: CancellationToken,
+        content: Option<ToolResultContent>,
+    },
+}
+
+impl Slot {
+    /// The call as `abort_step` takes it: an answered call keeps its
+    /// result, a gated one is answered as not run.
+    fn into_unanswered(self) -> PendingCall {
+        match self {
+            Slot::Answered { id, content } => PendingCall::Rejected { id, content },
+            Slot::Gated { id, name, args, .. } => PendingCall::Run { id, name, args },
+        }
+    }
 }
 
 /// A tool call collected from the provider turn, executed after the

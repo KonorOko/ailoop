@@ -487,6 +487,13 @@ fn budget_label(reason: &AbortReason) -> &'static str {
 /// # let _ = Arc::new(tool);
 /// # Ok(()) }
 /// ```
+///
+/// It is not [`concurrency_safe`](ailoop_tools::ToolDyn::concurrency_safe):
+/// the child conversation sits behind a lock, so two calls to the same
+/// sub-agent in one step would run one after the other anyway, and its
+/// history would take them in lock order rather than the model's. With
+/// [`ConversationBuilder::tool_concurrency`](crate::ConversationBuilder::tool_concurrency)
+/// a call to it therefore runs alone.
 pub struct SubAgentTool<M: CompletionModel> {
     name: String,
     description: String,
