@@ -604,3 +604,53 @@ async fn suspended_sub_agent_is_abandoned_and_reports_an_error() {
         Some("child ok")
     );
 }
+
+/// A resumed run that aborts before it gets to the suspended step (a
+/// caller token already cancelled, a `Terminate` in `on_run_started`)
+/// still closes that step: every call gets a result, so the history
+/// has no `tool_use` left without one and the next run can go out.
+#[tokio::test]
+async fn abort_before_the_resumed_step_still_closes_it() {
+    let mut s = setup(
+        vec![
+            calls_turn(&[("t1", "read"), ("t2", "delete"), ("t3", "read")]),
+            text_turn("ok"),
+        ],
+        &["delete"],
+        1,
+    );
+    s.chat.run("clean up").await.expect("runs");
+    assert!(s.chat.suspension().is_some());
+
+    let cancelled = tokio_util::sync::CancellationToken::new();
+    cancelled.cancel();
+    let outcome = s
+        .chat
+        .resume_with_options(
+            [("t2".into(), ResumeDecision::Approve)],
+            RunOptions::new().cancellation(cancelled),
+        )
+        .await
+        .expect("an abort is not an error");
+
+    assert!(matches!(outcome.finish_reason, FinishReason::Aborted(_)));
+    assert!(s.chat.suspension().is_none());
+    assert_eq!(s.delete.calls(), 0, "the approved call never ran");
+    assert_no_orphans(s.chat.messages());
+    assert_eq!(
+        result_text(s.chat.messages(), "t1").as_deref(),
+        Some("t1 ran")
+    );
+    assert!(
+        result_text(s.chat.messages(), "t2")
+            .unwrap()
+            .starts_with("Tool not run")
+    );
+    assert_eq!(s.gate.finished.load(Ordering::SeqCst), 2);
+
+    s.chat
+        .run("what now?")
+        .await
+        .expect("the conversation goes on");
+    assert_no_orphans(s.chat.messages());
+}

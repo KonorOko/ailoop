@@ -313,6 +313,49 @@ async fn abort_step(
     chunks
 }
 
+/// Aborts a run before its first step. A resumed run that never got
+/// to the suspended step still closes it, as [`abort_step`] would: the
+/// calls answered in the suspended run keep their result and every
+/// other one is answered as not run, so the history the run commits has
+/// no `tool_use` without its `tool_result`.
+async fn abort_before_step(
+    guard: &RunGuard,
+    resuming: Option<Resume>,
+    reason: AbortReason,
+    usage: Usage,
+    run_msgs: &mut RunMessages<'_>,
+) -> Vec<StreamChunk> {
+    let Some(Resume { suspension, .. }) = resuming else {
+        let new_messages = run_msgs.finish();
+        return vec![fire_abort_hooks(guard, reason, usage, new_messages).await];
+    };
+    let unanswered: Vec<PendingCall> = suspension
+        .calls
+        .into_iter()
+        .map(|call| match call.state {
+            CallState::Answered { content } => PendingCall::Answered {
+                id: call.call_id,
+                content,
+            },
+            _ => PendingCall::Run {
+                id: call.call_id,
+                name: call.name,
+                args: call.args,
+            },
+        })
+        .collect();
+    abort_step(
+        guard,
+        &suspension.step_id,
+        reason,
+        usage,
+        run_msgs,
+        Vec::new(),
+        unanswered,
+    )
+    .await
+}
+
 /// The result recorded for a deferred call denied on resume.
 fn denied_result(reason: &str) -> ToolResultContent {
     ToolResultContent::error(format!("Tool denied: {reason}"))
@@ -673,20 +716,21 @@ fn run_engine<'a, M: CompletionModel>(
             ).await {
                 Ok(a) => a,
                 Err(reason) => {
-                    let chunk = fire_abort_hooks(
-                        &guard, reason, Usage::default(), vec![],
+                    let chunks = abort_before_step(
+                        &guard, resuming.take(), reason, Usage::default(), &mut run_msgs,
                     ).await;
-                    yield chunk;
+                    for chunk in chunks { yield chunk; }
                     return;
                 }
             };
             match action {
                 HookAction::Continue => {},
                 HookAction::Terminate {reason} => {
-                    let chunk = fire_abort_hooks(
-                        &guard, AbortReason::terminated(reason), Usage::default(), vec![],
+                    let chunks = abort_before_step(
+                        &guard, resuming.take(), AbortReason::terminated(reason),
+                        Usage::default(), &mut run_msgs,
                     ).await;
-                    yield chunk;
+                    for chunk in chunks { yield chunk; }
                     return;
                 }
                 _ => {}
@@ -715,12 +759,14 @@ fn run_engine<'a, M: CompletionModel>(
         loop {
             if iteration >= config.max_iterations {
                 // Every previous iteration pushed its tool results before
-                // looping, so the run's messages have no dangling tool_use.
-                let new_messages = run_msgs.finish();
-                let chunk = fire_abort_hooks(
-                    &guard, AbortReason::MaxIterations(config.max_iterations), usage_run + delegated.total(), new_messages,
+                // looping, so the run's messages have no dangling tool_use;
+                // a resumed run stopped before its first step closes the
+                // suspended one.
+                let chunks = abort_before_step(
+                    &guard, resuming.take(), AbortReason::MaxIterations(config.max_iterations),
+                    usage_run + delegated.total(), &mut run_msgs,
                 ).await;
-                yield chunk;
+                for chunk in chunks { yield chunk; }
                 return;
             }
 

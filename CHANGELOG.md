@@ -160,7 +160,11 @@ and this project adheres to
     closes the step without a model call, answering what has no result
     as "Tool not run: <reason>". Decisions that do not match the
     deferred calls fail with `EngineError::Resume` before anything runs.
-    A resume that fails or is dropped keeps the suspension.
+    A resume that fails or is dropped keeps the suspension. A resume
+    that aborts (timeout, cancellation, `Terminate`), even before it
+    reaches the step, closes it instead: approved and waiting calls
+    without a result are answered as not run, and the suspension is
+    gone.
   - `ConversationSnapshot::suspension` carries it, so a suspended
     conversation survives a restart. The field is omitted when empty
     and defaults to `None`, so existing version-1 snapshots load
