@@ -8,6 +8,22 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- `ToolContext::cancellation` now fires on every abort of the run, not
+  only when the caller cancels its own token: a `RunConfig::timeout`
+  that elapses, a `Terminate` from a middleware or tool, and a dropped
+  run stream all cancel it too. Before, those aborts only dropped the
+  tool future, so work a tool had spawned (`tokio::spawn`,
+  `spawn_blocking`, a child process) kept running after the run was
+  over, and the docs told tools to set up their own timeout. The token
+  is now a child of the caller's: cancelling the caller's token still
+  reaches every tool, but the run cancelling the tools' token never
+  touches the caller's. A run that finishes normally or fails with an
+  error leaves the token alone. Sub-agents get the same guarantee: when
+  a parent run aborts mid-call, the work the child run's tools spawned
+  is cancelled too.
+
 ## [1.0.0-rc.4] — 2026-09-25
 
 This release contains breaking changes. Every entry describes the

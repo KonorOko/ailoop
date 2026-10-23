@@ -132,11 +132,18 @@ impl ToolContext {
 
     /// Cancellation token tied to the enclosing run.
     ///
-    /// Mirrors [`RunConfig::cancellation`][rc]: firing the token the
-    /// caller supplied to the engine triggers `cancelled()` here.
-    /// When the run was started without a token, the engine hands the
-    /// tool a fresh never-cancelled handle so the getter never returns
-    /// `None` — `await`ing `cancelled()` simply pends forever.
+    /// The engine hands every tool of a run the same token: a child of
+    /// [`RunConfig::cancellation`][rc] when the caller supplied one, a
+    /// fresh token otherwise, so the getter never returns `None`. It
+    /// fires whenever the run aborts or goes away before it ends:
+    ///
+    /// - the caller cancels its token;
+    /// - [`RunConfig::timeout`][to] elapses;
+    /// - a middleware or tool ends the run with `Terminate`;
+    /// - the caller drops the run's stream.
+    ///
+    /// The run cancelling it never cancels the caller's token. A run
+    /// that finishes normally (or fails with an error) leaves it alone.
     ///
     /// The engine already wraps each tool call in a `select!` against
     /// the run-wide abort signal, so on cancellation the tool future
@@ -157,12 +164,6 @@ impl ToolContext {
     ///   `token.child_token()` into each spawned task so all of them
     ///   stop when the run cancels, without one child cancelling the
     ///   whole run.
-    ///
-    /// Note: the run-wide abort future also fires on
-    /// [`RunConfig::timeout`][to], but the timeout is not propagated
-    /// into this token. Tools that need to react to a timeout
-    /// cooperatively should wrap the relevant work in
-    /// [`tokio::time::timeout`] themselves.
     ///
     /// The token is cheap to clone (`Arc` internally).
     ///
