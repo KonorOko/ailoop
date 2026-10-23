@@ -464,3 +464,38 @@ async fn drop_during_closing_hooks_puts_delivered_messages_back() {
     let ids: Vec<String> = control.take_pending().into_iter().map(|m| m.id).collect();
     assert_eq!(ids, ["m1"]);
 }
+
+/// Edits made with `retract` and `replace` before the drain are what
+/// the run delivers: the replacement in the original's place, under
+/// its own id, and nothing of the retracted message.
+#[tokio::test]
+async fn run_delivers_the_queue_as_retract_and_replace_left_it() {
+    let control = RunControl::new();
+    control.push(Inbound::text("a", "first"));
+    control.push(Inbound::text("b", "draft"));
+    control.push(Inbound::text("c", "withdrawn"));
+    assert!(control.replace("b", Inbound::text("b2", "edited")).is_ok());
+    assert!(control.retract("c").is_some());
+
+    let model = ScriptedModel::new([text_turn("one"), text_turn("two")]);
+    let log = Arc::new(RequestLog::default());
+    let chunks = run(
+        &model,
+        &ToolRegistry::new(),
+        &control,
+        vec![log.clone()],
+        10,
+    )
+    .await;
+
+    let steps = step_ids(&chunks);
+    assert_eq!(
+        deliveries(&chunks),
+        [(steps[0].clone(), vec!["a".into(), "b2".into()])]
+    );
+    let requests = log.0.lock().unwrap();
+    let blocks = user_blocks(requests[1].last().unwrap());
+    assert_eq!(blocks.len(), 2);
+    assert!(is_text(&blocks[0], "first") && is_text(&blocks[1], "edited"));
+    assert!(control.is_empty());
+}

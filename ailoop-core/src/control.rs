@@ -69,6 +69,13 @@ impl Inbound {
 ///   delivered then. The queue stays with this handle: the run that
 ///   resumes the suspension delivers it only if it is given the same
 ///   handle, when it closes that turn.
+/// - Until it is delivered, a queued message can be withdrawn with
+///   [`Self::retract`] or edited in place with [`Self::replace`], both
+///   by its id. Each takes the queue in one step, so a drain running at
+///   the same time sees either the queue before the edit or the queue
+///   after it, never a gap. Do not edit by [`Self::take_pending`]
+///   followed by [`Self::restore`]: a drain between the two calls finds
+///   the queue empty, and every other message waits one more turn.
 ///
 /// # What is never lost
 ///
@@ -125,11 +132,50 @@ impl RunControl {
 
     /// Put `messages` back at the front of the queue, keeping their
     /// order, ahead of anything queued since. The engine uses this when
-    /// a run's stream is dropped after it took them.
+    /// a run's stream is dropped after it took them. To withdraw or
+    /// edit one queued message, use [`Self::retract`] or
+    /// [`Self::replace`] instead of pairing this with
+    /// [`Self::take_pending`]: see "Delivery" above.
     pub fn restore(&self, messages: Vec<Inbound>) {
         let mut inbox = self.lock();
         for message in messages.into_iter().rev() {
             inbox.push_front(message);
+        }
+    }
+
+    /// Remove the queued message with this `id` and return it, leaving
+    /// the rest of the queue in its order. With several queued under
+    /// the same `id`, only the oldest is removed.
+    ///
+    /// Returns `None`, changing nothing, when no queued message has
+    /// that `id`: it was already delivered (its
+    /// [`crate::StreamChunk::InboundDelivered`] says so), already
+    /// retracted, or never queued. It is atomic with respect to the
+    /// engine draining the queue.
+    pub fn retract(&self, id: &str) -> Option<Inbound> {
+        let mut inbox = self.lock();
+        let index = inbox.iter().position(|m| m.id == id)?;
+        inbox.remove(index)
+    }
+
+    /// Swap the queued message with this `id` for `message`, in the same
+    /// place in the queue. With several queued under the same `id`,
+    /// only the oldest is replaced. `message` may carry a different id;
+    /// its delivery reports that one.
+    ///
+    /// Returns `Err(message)`, changing nothing, when no queued message
+    /// has that `id` (already delivered, retracted, or never queued),
+    /// so the caller can decide what to do with it, such as
+    /// [`Self::push`] it. It is atomic with respect to the engine
+    /// draining the queue.
+    pub fn replace(&self, id: &str, message: Inbound) -> Result<(), Inbound> {
+        let mut inbox = self.lock();
+        match inbox.iter_mut().find(|m| m.id == id) {
+            Some(slot) => {
+                *slot = message;
+                Ok(())
+            }
+            None => Err(message),
         }
     }
 
@@ -195,8 +241,8 @@ impl RunControl {
 
     fn lock(&self) -> MutexGuard<'_, VecDeque<Inbound>> {
         // A panic while holding the lock cannot leave the queue half
-        // updated (every operation is one `VecDeque` call), so a
-        // poisoned lock is safe to keep using.
+        // updated (every operation changes it in one `VecDeque` call or
+        // slot write), so a poisoned lock is safe to keep using.
         self.inbox.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -254,5 +300,106 @@ mod tests {
         control.push(Inbound::text("c", "3"));
         control.restore(vec![Inbound::text("a", "1"), Inbound::text("b", "2")]);
         assert_eq!(ids(&control.take_pending()), ["a", "b", "c"]);
+    }
+
+    fn queue(control: &RunControl, ids: &[&str]) {
+        for id in ids {
+            control.push(Inbound::text(*id, *id));
+        }
+    }
+
+    #[test]
+    fn retract_removes_only_that_message_keeping_order() {
+        let control = RunControl::new();
+        queue(&control, &["a", "b", "c"]);
+        assert_eq!(control.retract("b").unwrap().id, "b");
+        assert_eq!(ids(&control.take_pending()), ["a", "c"]);
+    }
+
+    #[test]
+    fn replace_keeps_the_message_position() {
+        let control = RunControl::new();
+        queue(&control, &["a", "b", "c"]);
+        assert_eq!(control.replace("b", Inbound::text("b2", "edited")), Ok(()));
+        let pending = control.take_pending();
+        assert_eq!(ids(&pending), ["a", "b2", "c"]);
+        assert_eq!(pending[1], Inbound::text("b2", "edited"));
+    }
+
+    #[test]
+    fn retract_and_replace_on_absent_id_change_nothing() {
+        let control = RunControl::new();
+        queue(&control, &["a", "b"]);
+        assert!(control.retract("b").is_some());
+        assert_eq!(control.retract("b"), None);
+        assert_eq!(control.retract("unknown"), None);
+        let message = Inbound::text("x", "kept");
+        assert_eq!(control.replace("b", message.clone()), Err(message));
+        assert_eq!(ids(&control.take_pending()), ["a"]);
+        assert_eq!(control.retract("a"), None, "drained ids are gone too");
+    }
+
+    #[test]
+    fn repeated_ids_act_on_the_oldest() {
+        let control = RunControl::new();
+        control.push(Inbound::text("a", "a"));
+        control.push(Inbound::text("x", "1"));
+        control.push(Inbound::text("x", "2"));
+        control.push(Inbound::text("x", "3"));
+        assert_eq!(control.retract("x"), Some(Inbound::text("x", "1")));
+        assert_eq!(control.replace("x", Inbound::text("y", "new")), Ok(()));
+        assert_eq!(
+            control.take_pending(),
+            [
+                Inbound::text("a", "a"),
+                Inbound::text("y", "new"),
+                Inbound::text("x", "3"),
+            ]
+        );
+    }
+
+    /// The case `take_pending` + `restore` got wrong: a drain racing an
+    /// edit must take every other queued message in that one drain,
+    /// never find the queue empty or partial and leave them a turn
+    /// behind.
+    #[test]
+    fn retract_and_replace_are_atomic_against_a_concurrent_drain() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        for round in 0..5000 {
+            let control = RunControl::new();
+            queue(&control, &["o1", "t", "o2", "o3"]);
+            let barrier = Arc::new(Barrier::new(2));
+            let drainer = {
+                let (control, barrier) = (control.clone(), barrier.clone());
+                thread::spawn(move || {
+                    barrier.wait();
+                    // Aim the drain at the moment the edit touches the
+                    // queue; bounded, since `replace` keeps its length.
+                    let mut spins = 0;
+                    while control.len() == 4 && spins < 10_000 {
+                        spins += 1;
+                        std::hint::spin_loop();
+                    }
+                    control.take_pending()
+                })
+            };
+            barrier.wait();
+            let edited = if round % 2 == 0 {
+                control.retract("t").is_some()
+            } else {
+                control.replace("t", Inbound::text("t2", "t2")).is_ok()
+            };
+            let drained = drainer.join().unwrap();
+
+            let expected: &[&str] = match (edited, round % 2 == 0) {
+                (true, true) => &["o1", "o2", "o3"],
+                (true, false) => &["o1", "t2", "o2", "o3"],
+                (false, _) => &["o1", "t", "o2", "o3"],
+            };
+            assert_eq!(ids(&drained), expected, "round {round}");
+            assert!(control.is_empty(), "round {round}: left behind");
+        }
     }
 }
