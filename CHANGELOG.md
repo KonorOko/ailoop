@@ -8,6 +8,36 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- `RunControl`: a handle for controlling a run from outside while it is
+  in flight, passed through `RunOptions::control` (or
+  `RunConfig::control`). For now it carries an inbox:
+  `control.push(Inbound::text(id, text))` from any task queues a
+  message, and the engine delivers what is queued each time a turn
+  that did not abort closes, after all of that turn's tool calls have
+  finished. The blocks go behind the turn's tool results in the same
+  user message, so they are persisted and compacted like any other
+  message of the run. Before, nothing from outside could reach a run
+  in progress: `on_turn_end` does not fire on a turn that ends in tool
+  calls, and what `on_chat_request` adds to a request is not
+  persisted. This is what lets a user correct an agent while it works.
+  Behaviour:
+  - If the turn did not end in tool calls and something was
+    delivered, the run continues instead of finishing, without asking
+    `on_turn_end` that turn; the continuation counts against
+    `max_iterations`.
+  - `StreamChunk::InboundDelivered { run_id, step_id, ids }` reports
+    which messages entered and at which step. `JsonTracer` logs it as
+    `inbound_delivered` (count; ids in verbose mode) and
+    `TracingMiddleware` as an `ailoop.step` event.
+  - The queue belongs to the caller: what the run did not deliver
+    stays queued (`take_pending` reads it back), and a run whose
+    stream is dropped puts back what it took. A run that fails with an
+    error does not; its delivered messages are in the error's partial
+    messages.
+  - Without a `RunControl`, runs behave as before.
+
 ### Fixed
 
 - `ToolContext::cancellation` now fires on every abort of the run, not

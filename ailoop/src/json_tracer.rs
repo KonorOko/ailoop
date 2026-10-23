@@ -361,6 +361,21 @@ impl ChatMiddleware for JsonTracer {
                 p.insert("strategy".into(), json!(*strategy));
                 self.emit("history_compacted", p).await;
             }
+            StreamChunk::InboundDelivered {
+                run_id,
+                step_id,
+                ids,
+                ..
+            } => {
+                let mut p = serde_json::Map::new();
+                p.insert("run_id".into(), json!(run_id.to_string()));
+                p.insert("step_id".into(), json!(step_id.to_string()));
+                p.insert("count".into(), json!(ids.len()));
+                if self.verbose {
+                    p.insert("ids".into(), json!(ids));
+                }
+                self.emit("inbound_delivered", p).await;
+            }
             // RunStarted / RunFinished have dedicated hooks with richer
             // context (config, messages, usage) — log there, not here.
             // Wildcard covers the `#[non_exhaustive]` future variants.
@@ -821,5 +836,32 @@ mod tests {
                 "abort_kind": "cancelled",
             })
         );
+    }
+
+    /// `inbound_delivered` carries the count by default and the ids
+    /// only in verbose mode.
+    #[tokio::test]
+    async fn inbound_delivered_ids_only_when_verbose() {
+        let dir = tempdir().unwrap();
+        let chunk = StreamChunk::inbound_delivered(
+            RunId::new(),
+            StepId::new(),
+            vec!["a".into(), "b".into()],
+        );
+
+        let path = dir.path().join("plain.ndjson");
+        let tracer = JsonTracer::new(&path).unwrap();
+        tracer.on_chunk(&chunk).await;
+        let plain = close_and_read(tracer, path);
+
+        let verbose_path = dir.path().join("verbose.ndjson");
+        let verbose_tracer = JsonTracer::verbose(&verbose_path).unwrap();
+        verbose_tracer.on_chunk(&chunk).await;
+        let verbose = close_and_read(verbose_tracer, verbose_path);
+
+        assert_eq!(plain[0]["kind"], json!("inbound_delivered"));
+        assert_eq!(plain[0]["count"], json!(2));
+        assert!(plain[0].get("ids").is_none());
+        assert_eq!(verbose[0]["ids"], json!(["a", "b"]));
     }
 }

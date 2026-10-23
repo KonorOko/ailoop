@@ -151,7 +151,10 @@ pub trait ChatMiddleware: Send + Sync {
     /// `turn.reason` is the turn's finish reason ([`FinishReason::EndTurn`],
     /// [`FinishReason::MaxTokens`], [`FinishReason::StopSequence`] or
     /// [`FinishReason::Other`]); a gate usually acts only on `EndTurn`.
-    /// Never fired for [`FinishReason::Aborted`]. `turn.new_messages` is
+    /// Never fired for [`FinishReason::Aborted`], nor for a turn whose
+    /// close delivered messages from the run's [`crate::RunControl`]:
+    /// the run continues to answer them, and the hook fires when the
+    /// model stops again with nothing queued. `turn.new_messages` is
     /// everything the run has added so far, including this turn's
     /// assistant message.
     ///

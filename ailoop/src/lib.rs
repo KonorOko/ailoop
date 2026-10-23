@@ -86,10 +86,10 @@ mod tracing_middleware;
 pub use ailoop_core::{
     AbortReason, AssistantBlock, CacheControl, CancellationToken, CharTokenizer, ChatMiddleware,
     ChatRequest, CompletionClient, CompletionModel, ContinueDecision, DEFAULT_MAX_ITERATIONS,
-    DEFAULT_MAX_TOKENS, FinishReason, HookAction, Message, ProviderError, ReasoningEffort,
-    RetryClassification, RetryConfig, Retryable, RetryingModel, RunConfig, RunErrorInfo,
-    RunFinishedInfo, RunId, RunStartInfo, Source, StepId, StepInfo, StreamChunk, SystemBlock,
-    SystemPrompt, Tokenizer, ToolCallInfo, ToolChoice, ToolDecision, ToolDefinition,
+    DEFAULT_MAX_TOKENS, FinishReason, HookAction, Inbound, Message, ProviderError, ReasoningEffort,
+    RetryClassification, RetryConfig, Retryable, RetryingModel, RunConfig, RunControl,
+    RunErrorInfo, RunFinishedInfo, RunId, RunStartInfo, Source, StepId, StepInfo, StreamChunk,
+    SystemBlock, SystemPrompt, Tokenizer, ToolCallInfo, ToolChoice, ToolDecision, ToolDefinition,
     ToolResultBlock, ToolResultContent, ToolTag, TurnEndInfo, Usage, UserBlock,
 };
 pub use ailoop_derive::{ToolJsonType, ailoop_tool};

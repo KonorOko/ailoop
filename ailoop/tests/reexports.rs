@@ -1,6 +1,7 @@
 use ailoop::{
-    CacheControl, ContinueDecision, FinishReason, RunConfig, RunErrorInfo, RunFinishedInfo, RunId,
-    RunStartInfo, StepId, StepInfo, SystemBlock, SystemPrompt, ToolResultBlock, TurnEndInfo, Usage,
+    CacheControl, ContinueDecision, FinishReason, Inbound, RunConfig, RunControl, RunErrorInfo,
+    RunFinishedInfo, RunId, RunStartInfo, StepId, StepInfo, SystemBlock, SystemPrompt,
+    ToolResultBlock, TurnEndInfo, Usage,
 };
 
 #[test]
@@ -11,6 +12,9 @@ fn reexports_compile() {
     let _ = ToolResultBlock::text("ok");
     let _ = ContinueDecision::continue_with("keep going");
     let _ = ContinueDecision::default();
+    let control = RunControl::new();
+    control.push(Inbound::text("id", "hi"));
+    assert_eq!(control.len(), 1);
     assert_eq!(
         RunConfig::default().max_iterations,
         ailoop::DEFAULT_MAX_ITERATIONS

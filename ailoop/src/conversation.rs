@@ -1,7 +1,7 @@
 use ailoop_core::{
     AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason,
-    Message, ProviderError, ReasoningEffort, RunConfig, RunId, StreamChunk, ToolChoice, ToolTag,
-    Usage,
+    Message, ProviderError, ReasoningEffort, RunConfig, RunControl, RunId, StreamChunk, ToolChoice,
+    ToolTag, Usage,
 };
 use ailoop_history::{ConversationSnapshot, History, HistoryBuilder};
 use ailoop_prompts::{Prompt, PromptSection};
@@ -180,6 +180,13 @@ pub struct RunOptions {
     /// fresh UUID v4. Set this when an outer system needs to correlate
     /// the run with its own trace id.
     pub run_id: Option<RunId>,
+    /// Handle for controlling this run from outside while it is in
+    /// flight: messages pushed on it are delivered between turns and
+    /// end up in the conversation history like any other message of
+    /// the run. Same semantics as [`ailoop_core::RunConfig::control`];
+    /// see [`RunControl`](crate::RunControl). The handle can outlive the
+    /// run: what it did not deliver stays queued for the next one.
+    pub control: Option<RunControl>,
     /// Run-scoped middlewares appended after the builder's chain
     /// (after `ApprovalMiddleware`). Internal: used by
     /// [`crate::SubAgentTool`] to install its wrap-up middleware for a
@@ -231,6 +238,13 @@ impl RunOptions {
     /// semantics.
     pub fn run_id(mut self, id: RunId) -> Self {
         self.run_id = Some(id);
+        self
+    }
+
+    /// Attach a [`RunControl`] to this run. See [`Self::control`] for
+    /// semantics.
+    pub fn control(mut self, control: RunControl) -> Self {
+        self.control = Some(control);
         self
     }
 }
@@ -504,6 +518,7 @@ where
         config.run_id = Some(run_id.clone());
         config.timeout = options.timeout;
         config.cancellation = options.cancellation;
+        config.control = options.control;
         if let Some(n) = options.max_iterations.or(self.max_iterations) {
             config.max_iterations = n;
         }
