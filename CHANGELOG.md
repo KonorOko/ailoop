@@ -8,6 +8,20 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- `RunControl::retract(id)` and `RunControl::replace(id, Inbound)`
+  withdraw or edit a queued message in one step. Before, editing meant
+  `take_pending` followed by `restore`; if the engine drained the queue
+  between the two calls it found it empty, and every other queued
+  message waited one more turn. Both act on the oldest queued message
+  with that id and leave the order of the rest untouched; `replace`
+  keeps the message's place in the queue, and the replacement may carry
+  a new id, which is the one `InboundDelivered` reports. An id that is
+  no longer queued (delivered, retracted, or never queued) changes
+  nothing: `retract` returns `None`, and `replace` returns `Err` with
+  the message handed back so the caller can push it or drop it.
+
 ## [1.0.0-rc.5] — 2026-10-23
 
 This release contains one breaking change: a tool that cancels its own
