@@ -112,11 +112,20 @@ and this project adheres to
     the calls that passed run together, each still cancellable with
     `cancel_tool`. Then the `on_after_tool_call*` hooks and `ToolResult`
     chunks follow in the model's order, once the whole batch is done.
-  - A `Terminate` at any gate of a batch runs no call of it. If the run
-    aborts while a batch runs, every call of that batch is answered as
-    not run, including those that had finished: their `after` hooks
-    have not run, and a result must not skip a transform such as
-    `Sanitize`.
+  - The calls of a batch run concurrently on the run's own task, not
+    in parallel threads: a tool that blocks the thread (CPU-bound work,
+    blocking I/O) holds its siblings up, and should move that work to
+    `spawn_blocking`.
+  - A `Terminate` at any gate of a batch runs no call of it, including
+    the calls whose gates had already passed. So when `MaxToolCalls` or
+    `AntiLoop` stops a run partway through a batch, the calls before
+    the one it stopped do not run either, where one at a time they
+    would have. If the run aborts while the calls of a batch run, every
+    call of that batch is answered as not run, including those that had
+    finished: their `after` hooks have not run, and a result must not
+    skip a transform such as `Sanitize`. An abort during the `after`
+    hooks keeps the results already through them, and the call whose
+    hooks were cut short keeps the result they left.
   - `SubAgentTool` is not concurrency-safe (its child conversation is
     behind a lock), and MCP tools are not either for now. `TimeoutTool`
     is as safe as the tool it wraps.
@@ -163,11 +172,17 @@ and this project adheres to
     closes the step without a model call, answering what has no result
     as "Tool not run: <reason>". Decisions that do not match the
     deferred calls fail with `EngineError::Resume` before anything runs.
-    A resume that fails or is dropped keeps the suspension. A resume
-    that aborts (timeout, cancellation, `Terminate`), even before it
-    reaches the step, closes it instead: approved and waiting calls
-    without a result are answered as not run, and the suspension is
-    gone.
+    A resume that fails or is dropped keeps the suspension, so it can
+    be resumed again; an approved call that had already run then runs a
+    second time, so approved tools should be idempotent (or the caller
+    should record what ran and deny it on the retry). A resume that
+    aborts (timeout, cancellation, `Terminate`), even before it reaches
+    the step, closes it instead: approved and waiting calls without a
+    result are answered as not run, and the suspension is gone.
+  - The resumed run is configured by its own `RunOptions`: per-run
+    state such as `max_iterations` and the budgets of `MaxToolCalls` and
+    `AntiLoop` starts afresh, and a `RunControl` reaches it only if it is
+    passed again.
   - `ConversationSnapshot::suspension` carries it, so a suspended
     conversation survives a restart. The field is omitted when empty
     and defaults to `None`, so existing version-1 snapshots load
