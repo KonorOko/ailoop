@@ -327,7 +327,7 @@ enum GatePolicy {
 /// The callback receives an [`ApprovalRequest`] with the call and the
 /// context the model saw on that step; see its docs for the
 /// model-based verifier pattern. When nobody can answer while the run
-/// waits (an unattended agent, a closed app), the callback can return
+/// waits (an unattended agent, a client that has disconnected), the callback can return
 /// [`ToolDecision::Defer`] instead of blocking: the run suspends and is
 /// resumed later with the decision (`Conversation::resume`). To fill `messages`, the middleware
 /// records each step's request in `on_chat_request`, so it must sit

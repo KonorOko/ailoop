@@ -578,7 +578,8 @@ pub enum ToolDecision {
     },
     /// Neither run nor refuse the call now: suspend the run until
     /// someone decides. For an approval that cannot be given while the
-    /// run waits (nobody present, a scheduled agent, a closed app).
+    /// run waits (nobody present, a scheduled agent, a client that has
+    /// disconnected).
     ///
     /// The run ends with [`crate::FinishReason::Suspended`] and a
     /// [`crate::Suspension`] holding the step's calls; it is resumed
