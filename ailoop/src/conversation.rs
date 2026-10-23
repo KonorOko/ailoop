@@ -189,8 +189,9 @@ pub struct RunOptions {
     /// Handle for controlling this run from outside while it is in
     /// flight: messages pushed on it are delivered between turns and
     /// end up in the conversation history like any other message of
-    /// the run, and `cancel_tool` stops one tool call while the run
-    /// goes on. Same semantics as [`ailoop_core::RunConfig::control`];
+    /// the run (unless the run fails with an error: then they are in
+    /// the error's partial messages, not back in the queue), and
+    /// `cancel_tool` stops one tool call while the run goes on. Same semantics as [`ailoop_core::RunConfig::control`];
     /// see [`RunControl`](crate::RunControl). The handle can outlive the
     /// run: what it did not deliver stays queued for the next one.
     pub control: Option<RunControl>,
@@ -407,7 +408,22 @@ where
     /// and no pre-run compaction runs (the history ends on the suspended
     /// step's tool calls). If the resumed run ends in `Err` or its
     /// stream is dropped, the history is rolled back and the suspension
-    /// is put back, so it can be resumed again.
+    /// is put back, so it can be resumed again. That includes the
+    /// suspended step's results, so resuming again runs an approved call
+    /// a second time if it already ran before the failure (a model error
+    /// on the next turn, for instance): make approved tools idempotent,
+    /// or record what ran in `on_after_tool_call` and deny it on the
+    /// retry. If the resumed run aborts (timeout, cancellation,
+    /// `Terminate`), the step is closed instead: calls without a result
+    /// are answered as not run, and the suspension is gone.
+    ///
+    /// The resumed run is a run like any other, configured by `options`
+    /// alone: per-run state starts afresh, so `max_iterations` and
+    /// per-run middleware budgets (`MaxToolCalls`, `AntiLoop`) count
+    /// from zero, tools activated at runtime during the suspended run
+    /// are inactive again, and a [`RunControl`](crate::RunControl) given
+    /// to the suspended run reaches this one only if it is passed again
+    /// in `options`.
     pub async fn resume_stream(
         &mut self,
         decisions: impl IntoIterator<Item = (String, ResumeDecision)>,
@@ -1246,7 +1262,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     }
 
     /// Let up to `n` tool calls of one step run at the same time
-    /// (default 1: one at a time). Only calls to tools that report
+    /// (default 1: one at a time; `0` counts as `1`). Only calls to tools that report
     /// [`ToolDyn::concurrency_safe`](ailoop_tools::ToolDyn::concurrency_safe)
     /// (`#[ailoop_tool(concurrency_safe)]`) run together; any other call
     /// runs alone, in order. Approvals and every `on_before_tool_call*`

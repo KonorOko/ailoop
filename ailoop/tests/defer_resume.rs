@@ -546,13 +546,23 @@ async fn dropped_resume_keeps_the_suspension() {
         1,
     );
     s.chat.run("clean up").await.expect("runs");
-    let stream = s
+    let suspended = s.chat.messages().to_vec();
+    let mut stream = s
         .chat
         .resume_stream([("t1".into(), ResumeDecision::Approve)], RunOptions::new())
         .await
         .expect("starts");
+    // Drop it mid-run, once the resumed step has closed.
+    while let Some(chunk) = stream.next().await {
+        if matches!(chunk.expect("no error"), StreamChunk::StepFinished { .. }) {
+            break;
+        }
+    }
     drop(stream);
+
+    assert_eq!(s.delete.calls(), 1);
     assert!(s.chat.suspension().is_some());
+    assert_eq!(s.chat.messages(), suspended.as_slice());
 }
 
 /// A sub-agent whose run suspends reports an error to the parent and
@@ -603,4 +613,256 @@ async fn suspended_sub_agent_is_abandoned_and_reports_an_error() {
         result_text(parent.messages(), "p2").as_deref(),
         Some("child ok")
     );
+}
+
+/// A resumed run that aborts before it gets to the suspended step (a
+/// caller token already cancelled, a `Terminate` in `on_run_started`)
+/// still closes that step: every call gets a result, so the history
+/// has no `tool_use` left without one and the next run can go out.
+#[tokio::test]
+async fn abort_before_the_resumed_step_still_closes_it() {
+    let mut s = setup(
+        vec![
+            calls_turn(&[("t1", "read"), ("t2", "delete"), ("t3", "read")]),
+            text_turn("ok"),
+        ],
+        &["delete"],
+        1,
+    );
+    s.chat.run("clean up").await.expect("runs");
+    assert!(s.chat.suspension().is_some());
+
+    let cancelled = tokio_util::sync::CancellationToken::new();
+    cancelled.cancel();
+    let outcome = s
+        .chat
+        .resume_with_options(
+            [("t2".into(), ResumeDecision::Approve)],
+            RunOptions::new().cancellation(cancelled),
+        )
+        .await
+        .expect("an abort is not an error");
+
+    assert!(matches!(outcome.finish_reason, FinishReason::Aborted(_)));
+    assert!(s.chat.suspension().is_none());
+    assert_eq!(s.delete.calls(), 0, "the approved call never ran");
+    assert_no_orphans(s.chat.messages());
+    assert_eq!(
+        result_text(s.chat.messages(), "t1").as_deref(),
+        Some("t1 ran")
+    );
+    assert!(
+        result_text(s.chat.messages(), "t2")
+            .unwrap()
+            .starts_with("Tool not run")
+    );
+    assert_eq!(s.gate.finished.load(Ordering::SeqCst), 2);
+
+    s.chat
+        .run("what now?")
+        .await
+        .expect("the conversation goes on");
+    assert_no_orphans(s.chat.messages());
+}
+
+/// A call with malformed arguments after the deferred one is answered
+/// with its error in the suspension, not left waiting: resuming must
+/// not run the tool with the empty arguments that stand in for the
+/// ones the model failed to produce.
+#[tokio::test]
+async fn a_malformed_call_after_a_deferral_is_answered_not_run() {
+    let mut turn = calls_turn(&[("t1", "delete")]);
+    turn.insert(
+        2,
+        StreamChunk::ToolCallMalformed {
+            call_id: "t2".into(),
+            name: "read".into(),
+            raw: "{not json".into(),
+            error: "expected value".into(),
+        },
+    );
+    let mut s = setup(vec![turn, text_turn("done")], &["delete"], 1);
+    let mut stream = s.chat.stream("clean up").await.expect("starts");
+    let mut results = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        if let StreamChunk::ToolResult { call_id, .. } = chunk.expect("no error") {
+            results.push(call_id);
+        }
+    }
+    drop(stream);
+    assert_eq!(
+        results,
+        ["t2"],
+        "the rejection goes out as the run suspends"
+    );
+    assert_eq!(
+        states(&s.chat),
+        [("t1".into(), "deferred"), ("t2".into(), "answered")]
+    );
+
+    s.chat
+        .resume([("t1".into(), ResumeDecision::Approve)])
+        .await
+        .expect("resumes");
+    assert_eq!((s.delete.calls(), s.read.calls()), (1, 0));
+    assert_no_orphans(s.chat.messages());
+    assert!(
+        result_text(s.chat.messages(), "t2")
+            .unwrap()
+            .contains("{not json")
+    );
+}
+
+/// Cancels the run from inside a call's `after` hook and then hangs, so
+/// the abort lands while the batch is in phase 3.
+struct CancelInAfter {
+    token: tokio_util::sync::CancellationToken,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for CancelInAfter {
+    async fn on_after_tool_call(&self, _: &ToolCallInfo, _: &Value, _: &ToolResultContent) {
+        self.token.cancel();
+        std::future::pending::<()>().await;
+    }
+}
+
+/// An abort while a batch runs its `after` hooks still answers the
+/// batch's deferred call, so the step has a result for every call.
+#[tokio::test]
+async fn abort_in_after_hooks_answers_a_deferred_call_of_the_batch() {
+    let token = tokio_util::sync::CancellationToken::new();
+    let gate = Gate::deferring(&["delete"]);
+    let mut chat = Conversation::builder(ScriptedModel::new(vec![calls_turn(&[
+        ("t1", "delete"),
+        ("t2", "read"),
+    ])]))
+    .tool_dyn(Probe::with_safety("read", true))
+    .tool_dyn(Probe::with_safety("delete", true))
+    .middleware(gate)
+    .middleware(Arc::new(CancelInAfter {
+        token: token.clone(),
+    }))
+    .tool_concurrency(2)
+    .build()
+    .expect("build");
+
+    let outcome = chat
+        .run_with_options("clean up", RunOptions::new().cancellation(token))
+        .await
+        .expect("an abort is not an error");
+
+    assert!(matches!(outcome.finish_reason, FinishReason::Aborted(_)));
+    assert!(chat.suspension().is_none());
+    assert_no_orphans(chat.messages());
+    assert!(
+        result_text(chat.messages(), "t1")
+            .unwrap()
+            .starts_with("Tool not run")
+    );
+}
+
+/// Cancels `target` through the run's control from the `before` hook of
+/// `on`.
+struct CancelAtGate {
+    control: ailoop::RunControl,
+    on: &'static str,
+    target: &'static str,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for CancelAtGate {
+    async fn on_before_tool_call(&self, call: &ToolCallInfo, _args: &Value) -> ToolDecision {
+        if call.call_id == self.on {
+            assert!(self.control.cancel_tool(self.target));
+        }
+        ToolDecision::Continue
+    }
+}
+
+/// A waiting call cancelled before the run suspends stays cancelled:
+/// the suspension answers it, and the resume does not run it.
+#[tokio::test]
+async fn a_waiting_call_cancelled_before_the_suspension_never_runs() {
+    let control = ailoop::RunControl::new();
+    let gate = Gate::deferring(&["delete"]);
+    let read = Probe::new("read");
+    let delete = Probe::new("delete");
+    let mut chat = Conversation::builder(ScriptedModel::new(vec![
+        calls_turn(&[("t1", "delete"), ("t2", "read")]),
+        text_turn("done"),
+    ]))
+    .tool_dyn(read.clone())
+    .tool_dyn(delete.clone())
+    .middleware(Arc::new(CancelAtGate {
+        control: control.clone(),
+        on: "t1",
+        target: "t2",
+    }))
+    .middleware(gate)
+    .build()
+    .expect("build");
+
+    chat.run_with_options("clean up", RunOptions::new().control(control))
+        .await
+        .expect("runs");
+    assert_eq!(
+        states(&chat),
+        [("t1".into(), "deferred"), ("t2".into(), "answered")]
+    );
+
+    chat.resume([("t1".into(), ResumeDecision::Approve)])
+        .await
+        .expect("resumes");
+    assert_eq!((delete.calls(), read.calls()), (1, 0));
+    assert_eq!(
+        result_text(chat.messages(), "t2").as_deref(),
+        Some("Tool not run: cancelled by the caller")
+    );
+    assert_no_orphans(chat.messages());
+}
+
+/// Signals when `on_run_finished` starts, then never returns.
+#[derive(Default)]
+struct HangOnFinish {
+    entered: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for HangOnFinish {
+    async fn on_run_finished(&self, _run: &ailoop::RunFinishedInfo<'_>) {
+        self.entered.notify_one();
+        std::future::pending::<()>().await;
+    }
+}
+
+/// A suspending run dropped while its closing hooks run is rolled back
+/// as a whole: the history does not end on tool calls without results
+/// while the conversation has no suspension to resume.
+#[tokio::test]
+async fn drop_during_closing_hooks_rolls_the_suspension_back_too() {
+    let hang = Arc::new(HangOnFinish::default());
+    let mut chat = Conversation::builder(ScriptedModel::new(vec![
+        calls_turn(&[("t1", "delete")]),
+        text_turn("done"),
+    ]))
+    .tool_dyn(Probe::new("delete"))
+    .middleware(Gate::deferring(&["delete"]))
+    .middleware(hang.clone())
+    .build()
+    .expect("build");
+    let mut stream = chat.stream("clean up").await.expect("starts");
+    loop {
+        tokio::select! {
+            biased;
+            _ = hang.entered.notified() => break,
+            chunk = stream.next() => {
+                chunk.expect("the run reaches its closing hooks").expect("no error");
+            }
+        }
+    }
+    drop(stream);
+
+    assert!(chat.suspension().is_none());
+    assert_no_orphans(chat.messages());
 }

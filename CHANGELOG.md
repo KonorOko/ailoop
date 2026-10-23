@@ -28,8 +28,9 @@ and this project adheres to
   show a spinner. Updates go out while the call runs and always before
   its `ToolResult`, and they never enter the history. Delivery is
   best-effort: reporting never blocks the tool, a run buffers 64
-  updates and drops the rest, and an update sent after its call has its
-  result (from a task left running) is dropped. `JsonTracer` logs
+  updates and drops the rest, and an update sent once its call is over
+  (from a task left running, or after `cancel_tool`) is dropped, even
+  while other calls of its batch still run. `JsonTracer` logs
   `tool_progress` (the message only in verbose mode), and
   `TracingMiddleware` logs a debug `ailoop.tool` event.
 - `ailoop-mcp` forwards MCP progress: every `tools/call` carries a
@@ -65,17 +66,24 @@ and this project adheres to
   - Without a `RunControl`, runs behave as before.
 
 - `RunControl::cancel_tool(call_id)`: stop one tool call and let the run
-  go on, with the `call_id` from its `ToolCallStarted` chunk. Before,
+  go on, with the `call_id` from its `ToolCallStarted` chunk, from the
+  moment that chunk goes out (the model may still be streaming the
+  turn). Before,
   the only way to stop a tool was to cancel the whole run. Every call
   of the step in flight can be cancelled, including one still waiting
-  its turn; `cancel_tool` returns `false` for any other id. The call
+  its turn; `cancel_tool` returns `false` for any other id, including
+  a call whose result is already decided (its `ToolResult` chunk is
+  about to go out, or has) and every call of a step that aborted or
+  suspended. The call
   gets an `is_error` result and the run continues:
   - cancelled before its turn: the tool is not invoked and no tool hook
     fires; the result reads "Tool not run: cancelled by the caller";
   - cancelled while its `before` hooks run (an approval being asked):
     those hooks are not interrupted, and if they let the call through
     the tool is not invoked; the `after` hooks fire with the same
-    result. A `Skip` or `Terminate` from the hooks still wins;
+    result. A `Skip` or `Terminate` from the hooks still wins. The same
+    holds for a call of a batch cancelled after its hooks, before the
+    batch got to run it;
   - cancelled while running: the call's token fires and the engine
     drops the tool future, so it stops even if the tool ignores the
     token. The result reads "Tool cancelled by the caller while
@@ -104,13 +112,23 @@ and this project adheres to
     the calls that passed run together, each still cancellable with
     `cancel_tool`. Then the `on_after_tool_call*` hooks and `ToolResult`
     chunks follow in the model's order, once the whole batch is done.
-  - A `Terminate` at any gate of a batch runs no call of it. If the run
-    aborts while a batch runs, every call of that batch is answered as
-    not run, including those that had finished: their `after` hooks
-    have not run, and a result must not skip a transform such as
-    `Sanitize`.
+  - The calls of a batch run concurrently on the run's own task, not
+    in parallel threads: a tool that blocks the thread (CPU-bound work,
+    blocking I/O) holds its siblings up, and should move that work to
+    `spawn_blocking`.
+  - A `Terminate` at any gate of a batch runs no call of it, including
+    the calls whose gates had already passed. So when `MaxToolCalls` or
+    `AntiLoop` stops a run partway through a batch, the calls before
+    the one it stopped do not run either, where one at a time they
+    would have. If the run aborts while the calls of a batch run, every
+    call of that batch is answered as not run, including those that had
+    finished: their `after` hooks have not run, and a result must not
+    skip a transform such as `Sanitize`. An abort during the `after`
+    hooks keeps the results already through them, and the call whose
+    hooks were cut short keeps the result they left.
   - `SubAgentTool` is not concurrency-safe (its child conversation is
-    behind a lock), and MCP tools are not either for now.
+    behind a lock), and MCP tools are not either for now. `TimeoutTool`
+    is as safe as the tool it wraps.
 
   The middleware contract in "Tool calls within a step" now describes
   this order instead of reserving it for a later release.
@@ -128,7 +146,10 @@ and this project adheres to
   made and forces a fresh run.
   - With calls running one at a time, the step stops at the deferred
     call and the calls after it wait without running their gates, so
-    none of them runs before the deferred one. In a batch of
+    none of them runs before the deferred one. A call after it whose
+    arguments were malformed is answered with its error right away,
+    since it can never run, and so is one stopped with
+    `RunControl::cancel_tool` before the run suspended. In a batch of
     concurrency-safe calls the rest of the batch still goes through its
     gates and runs, so one suspension can hold several deferred calls.
   - The suspension records every call of the step in the model's
@@ -151,7 +172,17 @@ and this project adheres to
     closes the step without a model call, answering what has no result
     as "Tool not run: <reason>". Decisions that do not match the
     deferred calls fail with `EngineError::Resume` before anything runs.
-    A resume that fails or is dropped keeps the suspension.
+    A resume that fails or is dropped keeps the suspension, so it can
+    be resumed again; an approved call that had already run then runs a
+    second time, so approved tools should be idempotent (or the caller
+    should record what ran and deny it on the retry). A resume that
+    aborts (timeout, cancellation, `Terminate`), even before it reaches
+    the step, closes it instead: approved and waiting calls without a
+    result are answered as not run, and the suspension is gone.
+  - The resumed run is configured by its own `RunOptions`: per-run
+    state such as `max_iterations` and the budgets of `MaxToolCalls` and
+    `AntiLoop` starts afresh, and a `RunControl` reaches it only if it is
+    passed again.
   - `ConversationSnapshot::suspension` carries it, so a suspended
     conversation survives a restart. The field is omitted when empty
     and defaults to `None`, so existing version-1 snapshots load
@@ -165,8 +196,31 @@ and this project adheres to
     suspension and returns an error result to the parent.
   - `RunId` and `StepId` now implement `Serialize` / `Deserialize`.
 
+### Changed (BREAKING)
+
+- A tool cancelling its own `ToolContext::cancellation` token now
+  stops only its own call, not the run. Before, the token was a clone
+  of the caller's `RunConfig::cancellation`, so `ctx.cancellation()
+  .cancel()` aborted the whole run (and cancelled the caller's token);
+  now each call gets a child token (see `RunControl::cancel_tool`), so
+  the same line drops the tool's own future and answers the call as
+  cancelled by the caller, and the run goes on. Code that used it to
+  stop the run must end the run another way; see Migration.
+
 ### Fixed
 
+- A `Conversation` run is now committed when its `RunFinished` reaches
+  the consumer, as the `RunStream` docs say, and not earlier. Before,
+  the history was committed when the run started its closing hooks
+  (`on_run_finished`, and the `on_chunk*` hooks of the final chunks),
+  while the suspension slot was only updated with `RunFinished`. A
+  stream dropped during those hooks (a caller-side timeout around a
+  slow tracer or store) kept the run's messages but not its
+  suspension: a suspending run left the history ending on tool calls
+  with no suspension to resume, and a resumed run left the old
+  suspension next to the step it had closed. Now such a drop rolls the
+  whole run back, like any other drop, and the messages the run took
+  from its `RunControl` go back in the queue.
 - `ToolContext::cancellation` now fires on every abort of the run, not
   only when the caller cancels its own token: a `RunConfig::timeout`
   that elapses, a `Terminate` from a middleware or tool, and a dropped
@@ -180,6 +234,22 @@ and this project adheres to
   error leaves the token alone. Sub-agents get the same guarantee: when
   a parent run aborts mid-call, the work the child run's tools spawned
   is cancelled too.
+
+### Migration
+
+- A tool that stopped the run by cancelling its own token:
+
+  ```rust
+  // Before: cancelled the caller's token, aborting the run.
+  ctx.cancellation().cancel();
+
+  // After: return a Terminate from a middleware's
+  // on_before_tool_call / on_after_tool_call (the run ends with
+  // FinishReason::Aborted(ToolTerminated)), or keep a clone of the
+  // CancellationToken passed in RunOptions::cancellation and cancel
+  // that one (FinishReason::Aborted(Cancelled)).
+  caller_token.cancel();
+  ```
 
 ## [1.0.0-rc.4] — 2026-09-25
 

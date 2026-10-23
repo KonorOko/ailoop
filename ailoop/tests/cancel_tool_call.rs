@@ -87,6 +87,7 @@ impl ToolDyn for Hang {
 #[derive(Default)]
 struct Quick {
     name: &'static str,
+    safe: bool,
     calls: AtomicUsize,
     token: Mutex<Option<CancellationToken>>,
     cancel: Option<(RunControl, &'static str)>,
@@ -111,6 +112,9 @@ impl ToolDyn for Quick {
     }
     fn tool_definition(&self) -> ToolDefinition {
         definition(self.name)
+    }
+    fn concurrency_safe(&self) -> bool {
+        self.safe
     }
     async fn call(&self, _: Value, ctx: &ToolContext) -> ToolResultContent {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -354,4 +358,127 @@ async fn caller_cancellation_still_aborts_the_run() {
         FinishReason::Aborted(AbortReason::Cancelled)
     );
     assert!(!control.cancel_tool("t1"));
+}
+
+/// Cancels `target` from the `before` hook of `on`.
+struct CancelAtGate {
+    control: RunControl,
+    on: &'static str,
+    target: &'static str,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for CancelAtGate {
+    async fn on_before_tool_call(&self, call: &ToolCallInfo, _args: &Value) -> ToolDecision {
+        if call.call_id == self.on {
+            assert!(self.control.cancel_tool(self.target));
+        }
+        ToolDecision::Continue
+    }
+}
+
+/// A call of a batch cancelled after its gates passed, but before the
+/// batch started running, never ran: the model is told so rather than
+/// that it may have partly completed.
+#[tokio::test]
+async fn a_batch_call_cancelled_before_it_starts_is_not_run() {
+    let control = RunControl::new();
+    let quick = Arc::new(Quick {
+        safe: true,
+        ..Quick::named("quick")
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register(quick.clone()).unwrap();
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "quick"), ("t2", "quick")]),
+        text_turn("done"),
+    ]);
+    let gate = Arc::new(CancelAtGate {
+        control: control.clone(),
+        on: "t2",
+        target: "t1",
+    });
+    let mut config = config(&control, vec![gate]);
+    config.tool_concurrency = 2;
+    let chunks = collect(&model, &registry, config).await;
+
+    assert_error(result_of(&chunks, "t1"), NOT_RUN);
+    assert_eq!(result_of(&chunks, "t2").as_text(), Some("ok"));
+    assert_eq!(quick.calls(), 1);
+}
+
+/// A call can be cancelled as soon as its `ToolCallStarted` chunk goes
+/// out, while the model is still streaming the turn: it is not
+/// invoked once the turn ends.
+#[tokio::test]
+async fn cancel_from_tool_call_started_works_mid_turn() {
+    let control = RunControl::new();
+    let quick = Arc::new(Quick::named("quick"));
+    let mut registry = ToolRegistry::new();
+    registry.register(quick.clone()).unwrap();
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "quick"), ("t2", "quick")]),
+        text_turn("done"),
+    ]);
+    let mut stream = run_chat(
+        &model,
+        vec![Message::user("hi")],
+        &registry,
+        config(&control, vec![]),
+    )
+    .await
+    .expect("run starts");
+    let mut chunks = Vec::new();
+    let mut accepted = None;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.expect("no error");
+        if let StreamChunk::ToolCallStarted { call_id, .. } = &chunk
+            && call_id == "t1"
+        {
+            accepted = Some(control.cancel_tool("t1"));
+        }
+        chunks.push(chunk);
+    }
+
+    assert_eq!(accepted, Some(true));
+    assert_error(result_of(&chunks, "t1"), NOT_RUN);
+    assert_eq!(result_of(&chunks, "t2").as_text(), Some("ok"));
+    assert_eq!(quick.calls(), 1);
+}
+
+/// Tries to cancel each call when its `ToolResult` chunk goes by.
+#[derive(Default)]
+struct CancelOnResult {
+    control: RunControl,
+    accepted: Mutex<Vec<bool>>,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for CancelOnResult {
+    async fn on_chunk(&self, chunk: &StreamChunk) {
+        if let StreamChunk::ToolResult { call_id, .. } = chunk {
+            let accepted = self.control.cancel_tool(call_id);
+            self.accepted.lock().unwrap().push(accepted);
+        }
+    }
+}
+
+/// Once a call's result is out, `cancel_tool` says it was too late.
+#[tokio::test]
+async fn cancel_tool_is_false_once_the_result_is_out() {
+    let control = RunControl::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(Quick::named("quick"))).unwrap();
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "quick"), ("t2", "quick")]),
+        text_turn("done"),
+    ]);
+    let observer = Arc::new(CancelOnResult {
+        control: control.clone(),
+        ..CancelOnResult::default()
+    });
+    let chunks = collect(&model, &registry, config(&control, vec![observer.clone()])).await;
+
+    assert_eq!(result_of(&chunks, "t1").as_text(), Some("ok"));
+    assert_eq!(*observer.accepted.lock().unwrap(), [false, false]);
 }

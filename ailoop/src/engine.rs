@@ -104,6 +104,13 @@ struct RunGuard {
     /// run's messages, which a dropped run never commits, so a drop
     /// puts them back in the queue.
     taken: std::sync::Mutex<Vec<Inbound>>,
+    /// Set once `RunFinished` reached the consumer: from then on the
+    /// run is committed, whatever happens to the stream.
+    handed_over: Arc<AtomicBool>,
+    /// Set when the run fails with an error, whose delivered messages
+    /// travel in its partial messages instead of going back in the
+    /// queue.
+    errored: AtomicBool,
 }
 
 impl RunGuard {
@@ -112,6 +119,7 @@ impl RunGuard {
         run_id: RunId,
         tool_cancellation: CancellationToken,
         control: Option<RunControl>,
+        handed_over: Arc<AtomicBool>,
     ) -> Self {
         Self {
             middlewares,
@@ -121,6 +129,8 @@ impl RunGuard {
             ended: AtomicBool::new(false),
             control,
             taken: std::sync::Mutex::default(),
+            handed_over,
+            errored: AtomicBool::new(false),
         }
     }
 
@@ -138,6 +148,14 @@ impl RunGuard {
                 .extend(messages.iter().cloned());
         }
         messages
+    }
+
+    /// Unregisters every call from the run's [`RunControl`]: none of
+    /// them can be cancelled any more.
+    fn clear_calls(&self) {
+        if let Some(control) = &self.control {
+            control.clear_calls();
+        }
     }
 
     fn middlewares(&self) -> &[Arc<dyn ChatMiddleware>] {
@@ -175,6 +193,7 @@ impl RunGuard {
         partial_messages: &[Message],
     ) {
         self.ended.store(true, Ordering::Relaxed);
+        self.errored.store(true, Ordering::Relaxed);
         for mw in self.pending() {
             mw.on_run_error(&RunErrorInfo::new(
                 &self.run_id,
@@ -190,15 +209,18 @@ impl RunGuard {
 impl Drop for RunGuard {
     fn drop(&mut self) {
         // However the run ended, none of its calls can be cancelled now.
-        if let Some(control) = &self.control {
-            control.clear_calls();
-        }
+        self.clear_calls();
         if !self.ended.load(Ordering::Relaxed) {
             self.tool_cancellation.cancel();
-            if let Some(control) = &self.control {
-                let taken = std::mem::take(self.taken.get_mut().unwrap_or_else(|e| e.into_inner()));
-                control.restore(taken);
-            }
+        }
+        // A run dropped before it handed `RunFinished` over is rolled
+        // back, even if its closing hooks had started.
+        if !self.handed_over.load(Ordering::SeqCst)
+            && !self.errored.load(Ordering::Relaxed)
+            && let Some(control) = &self.control
+        {
+            let taken = std::mem::take(self.taken.get_mut().unwrap_or_else(|e| e.into_inner()));
+            control.restore(taken);
         }
         for mw in self.pending() {
             mw.on_run_dropped(&self.run_id);
@@ -271,6 +293,8 @@ async fn abort_step(
 ) -> Vec<StreamChunk> {
     let middlewares = guard.middlewares();
     let run_id = &guard.run_id;
+    // No call of an aborted step can be cancelled any more.
+    guard.clear_calls();
     let mut chunks = Vec::new();
     for call in unanswered {
         let (id, content) = match call {
@@ -296,6 +320,31 @@ async fn abort_step(
         tools_result.push(UserBlock::tool_result(id, content));
     }
     if !tools_result.is_empty() {
+        // Results in the order of the step's calls, which the paths
+        // above do not always produce (a deferred call answered after
+        // the batch's other calls).
+        let order: Vec<&str> = run_msgs
+            .context()
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::Assistant { blocks } => Some(
+                    blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            AssistantBlock::ToolCall { call_id, .. } => Some(call_id.as_str()),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let position = |block: &UserBlock| match block {
+            UserBlock::ToolResult { call_id, .. } => order.iter().position(|id| id == call_id),
+            _ => None,
+        };
+        tools_result.sort_by_key(|block| position(block).unwrap_or(usize::MAX));
         run_msgs.push(Message::User {
             blocks: tools_result,
         });
@@ -303,6 +352,49 @@ async fn abort_step(
     let new_messages = run_msgs.finish();
     chunks.push(fire_abort_hooks(guard, reason, usage, new_messages).await);
     chunks
+}
+
+/// Aborts a run before its first step. A resumed run that never got
+/// to the suspended step still closes it, as [`abort_step`] would: the
+/// calls answered in the suspended run keep their result and every
+/// other one is answered as not run, so the history the run commits has
+/// no `tool_use` without its `tool_result`.
+async fn abort_before_step(
+    guard: &RunGuard,
+    resuming: Option<Resume>,
+    reason: AbortReason,
+    usage: Usage,
+    run_msgs: &mut RunMessages<'_>,
+) -> Vec<StreamChunk> {
+    let Some(Resume { suspension, .. }) = resuming else {
+        let new_messages = run_msgs.finish();
+        return vec![fire_abort_hooks(guard, reason, usage, new_messages).await];
+    };
+    let unanswered: Vec<PendingCall> = suspension
+        .calls
+        .into_iter()
+        .map(|call| match call.state {
+            CallState::Answered { content } => PendingCall::Answered {
+                id: call.call_id,
+                content,
+            },
+            _ => PendingCall::Run {
+                id: call.call_id,
+                name: call.name,
+                args: call.args,
+            },
+        })
+        .collect();
+    abort_step(
+        guard,
+        &suspension.step_id,
+        reason,
+        usage,
+        run_msgs,
+        Vec::new(),
+        unanswered,
+    )
+    .await
 }
 
 /// The result recorded for a deferred call denied on resume.
@@ -360,26 +452,26 @@ pub(crate) struct ContextOptions {
 }
 
 /// A [`History`] the engine appends to in place for the duration of a
-/// run, with rollback: until [`Self::commit`] runs, dropping this value
-/// restores the messages and pin mask captured at construction. That
-/// keeps the pre-existing contract that a run ending in `Err` (or a
-/// stream dropped mid-run) leaves the history exactly as it was when
-/// the run started, even when the run compacted it along the way. The
-/// steps completed before an `Err` travel in [`RunError`] instead.
+/// run, with rollback: unless the run handed its `RunFinished` over to
+/// the consumer, dropping this value restores the messages and pin
+/// mask captured at construction. That keeps the contract that a run
+/// ending in `Err` (or a stream dropped mid-run, closing hooks
+/// included) leaves the history exactly as it was when the run
+/// started, even when the run compacted it along the way. The steps
+/// completed before an `Err` travel in [`RunError`] instead.
 struct ManagedHistory<'a> {
     history: &'a mut History,
     rollback: Option<(Vec<Message>, Vec<bool>)>,
     options: ContextOptions,
-}
-
-impl ManagedHistory<'_> {
-    fn commit(&mut self) {
-        self.rollback = None;
-    }
+    /// The run's [`RunGuard::handed_over`], set by [`run_engine`].
+    handed_over: Arc<AtomicBool>,
 }
 
 impl Drop for ManagedHistory<'_> {
     fn drop(&mut self) {
+        if self.handed_over.load(Ordering::SeqCst) {
+            return;
+        }
         if let Some((messages, pinned)) = self.rollback.take() {
             self.history
                 .replace_messages(messages, pinned)
@@ -443,9 +535,6 @@ impl<'a> RunMessages<'a> {
     /// the run's messages. Called exactly once, right before the
     /// terminal `RunFinished` is built.
     fn finish(&mut self) -> Vec<Message> {
-        if let RunContext::Managed(managed) = &mut self.context {
-            managed.commit();
-        }
         std::mem::take(&mut self.new_messages)
     }
 
@@ -576,6 +665,7 @@ pub(crate) fn run_with_history<'a, M: CompletionModel>(
         history,
         rollback,
         options,
+        handed_over: Arc::default(),
     };
     run_engine(
         model,
@@ -589,7 +679,7 @@ pub(crate) fn run_with_history<'a, M: CompletionModel>(
 
 fn run_engine<'a, M: CompletionModel>(
     model: &'a M,
-    context: RunContext<'a>,
+    mut context: RunContext<'a>,
     tools: &'a ToolRegistry,
     mut config: RunConfig,
     is_overflow: fn(&M::Error) -> bool,
@@ -597,6 +687,15 @@ fn run_engine<'a, M: CompletionModel>(
 ) -> EngineStream<'a, M::Error> {
     // A resumed run starts by finishing the suspended step instead of
     // asking the model; `resumed_from` lets observers correlate it.
+    // The run is committed once its `RunFinished` reaches the consumer,
+    // atomically with that delivery: a stream dropped any earlier, its
+    // closing hooks included, rolls the history back and puts the
+    // messages it took from its `RunControl` back in the queue.
+    let handed_over = Arc::new(AtomicBool::new(false));
+    if let RunContext::Managed(managed) = &mut context {
+        managed.handed_over = handed_over.clone();
+    }
+    let committed = handed_over.clone();
     let mut resuming = config.resume.take();
     if let Some(resume) = &resuming {
         config.resumed_from = Some(resume.suspension.run_id.clone());
@@ -650,6 +749,7 @@ fn run_engine<'a, M: CompletionModel>(
             run_id.clone(),
             tool_cancellation.clone(),
             config.control.clone(),
+            handed_over.clone(),
         );
         // Progress tools report while they run, `(call_id, update)`.
         // Bounded and fed with `try_send`, so a chatty tool never blocks
@@ -665,20 +765,21 @@ fn run_engine<'a, M: CompletionModel>(
             ).await {
                 Ok(a) => a,
                 Err(reason) => {
-                    let chunk = fire_abort_hooks(
-                        &guard, reason, Usage::default(), vec![],
+                    let chunks = abort_before_step(
+                        &guard, resuming.take(), reason, Usage::default(), &mut run_msgs,
                     ).await;
-                    yield chunk;
+                    for chunk in chunks { yield chunk; }
                     return;
                 }
             };
             match action {
                 HookAction::Continue => {},
                 HookAction::Terminate {reason} => {
-                    let chunk = fire_abort_hooks(
-                        &guard, AbortReason::terminated(reason), Usage::default(), vec![],
+                    let chunks = abort_before_step(
+                        &guard, resuming.take(), AbortReason::terminated(reason),
+                        Usage::default(), &mut run_msgs,
                     ).await;
-                    yield chunk;
+                    for chunk in chunks { yield chunk; }
                     return;
                 }
                 _ => {}
@@ -707,12 +808,14 @@ fn run_engine<'a, M: CompletionModel>(
         loop {
             if iteration >= config.max_iterations {
                 // Every previous iteration pushed its tool results before
-                // looping, so the run's messages have no dangling tool_use.
-                let new_messages = run_msgs.finish();
-                let chunk = fire_abort_hooks(
-                    &guard, AbortReason::MaxIterations(config.max_iterations), usage_run + delegated.total(), new_messages,
+                // looping, so the run's messages have no dangling tool_use;
+                // a resumed run stopped before its first step closes the
+                // suspended one.
+                let chunks = abort_before_step(
+                    &guard, resuming.take(), AbortReason::MaxIterations(config.max_iterations),
+                    usage_run + delegated.total(), &mut run_msgs,
                 ).await;
-                yield chunk;
+                for chunk in chunks { yield chunk; }
                 return;
             }
 
@@ -760,6 +863,11 @@ fn run_engine<'a, M: CompletionModel>(
             // Every call of the step in the model's order, with its
             // original arguments: what a suspension records.
             let mut step_calls: Vec<(String, String, Value)> = Vec::new();
+            // Each call's own token, a child of the run's, so
+            // `RunControl::cancel_tool` stops one call without touching
+            // its siblings. A call is registered from its
+            // `ToolCallStarted` on, while the turn still streams.
+            let mut call_tokens: HashMap<String, CancellationToken> = HashMap::new();
 
             if let Some(resume) = resuming.take() {
                 // Finishing a suspended step: its assistant message is
@@ -917,6 +1025,13 @@ fn run_engine<'a, M: CompletionModel>(
                 for mw in &config.middlewares {
                     mw.on_chunk_mut(&mut chunk).await;
                 }
+                if let StreamChunk::ToolCallStarted { call_id, .. } = &chunk {
+                    let token = tool_cancellation.child_token();
+                    if let Some(control) = &config.control {
+                        control.register_call(call_id.clone(), token.clone());
+                    }
+                    call_tokens.insert(call_id.clone(), token);
+                }
                 for mw in &config.middlewares {
                     mw.on_chunk(&chunk).await;
                 }
@@ -1019,25 +1134,35 @@ fn run_engine<'a, M: CompletionModel>(
             // through its `after` hooks counts as not run, so no result
             // skips a transform like `Sanitize`.
             //
-            // Each call gets its own token, a child of the run's, so
-            // `RunControl::cancel_tool` stops one call without touching
-            // its siblings. Every call of the step is registered up
-            // front, so one still waiting its turn can be cancelled too;
-            // each is unregistered once it has its result, and the
+            // Every call of the step that can still run stays registered
+            // (and one the turn did not announce, such as a call of a
+            // resumed step, is registered now), so a call still waiting
+            // its turn can be cancelled too. A call that cannot run
+            // (malformed, or started but never finished) is dropped.
+            // Each is unregistered once it has its result, and the
             // `RunGuard` clears what is left when the run ends.
-            let call_tokens: HashMap<String, CancellationToken> = tool_calls
+            let runnable: HashSet<String> = tool_calls
                 .iter()
                 .filter_map(|call| match call {
-                    PendingCall::Run { id, .. } | PendingCall::Decided { id, .. } => {
-                        Some((id.clone(), tool_cancellation.child_token()))
-                    }
+                    PendingCall::Run { id, .. } | PendingCall::Decided { id, .. } => Some(id.clone()),
                     PendingCall::Rejected { .. } | PendingCall::Answered { .. } => None,
                 })
                 .collect();
-            if let Some(control) = &config.control {
-                for (id, token) in &call_tokens {
-                    control.register_call(id.clone(), token.clone());
+            call_tokens.retain(|id, _| {
+                let keep = runnable.contains(id);
+                if !keep && let Some(control) = &config.control {
+                    control.unregister_call(id);
                 }
+                keep
+            });
+            for id in runnable {
+                call_tokens.entry(id.clone()).or_insert_with(|| {
+                    let token = tool_cancellation.child_token();
+                    if let Some(control) = &config.control {
+                        control.register_call(id, token.clone());
+                    }
+                    token
+                });
             }
             let concurrency = config.tool_concurrency.max(1);
             let batchable = |call: &PendingCall| match call {
@@ -1052,10 +1177,10 @@ fn run_engine<'a, M: CompletionModel>(
             let mut deferred: HashMap<String, (Value, String)> = HashMap::new();
             let mut tools_result = Vec::new();
             let mut pending = tool_calls.into_iter().peekable();
-            while let Some(first) = pending.next() {
-                if !deferred.is_empty() {
+            while deferred.is_empty() {
+                let Some(first) = pending.next() else {
                     break;
-                }
+                };
                 let mut batch = Vec::new();
                 if batchable(&first) {
                     while let Some(next) = pending.next_if(|c| batchable(c)) {
@@ -1200,6 +1325,7 @@ fn run_engine<'a, M: CompletionModel>(
                 // run's abort first.
                 let runs = slots.iter().enumerate().filter_map(|(index, slot)| match slot {
                     Slot::Gated { id, name, args, token, content: None, .. } => {
+                        let progress = ProgressSink::new(id.clone(), progress_tx.clone());
                         let ctx = ToolContext::new(
                             run_id.clone(),
                             step_id.clone(),
@@ -1208,14 +1334,24 @@ fn run_engine<'a, M: CompletionModel>(
                             token.clone(),
                         )
                         .with_usage_sink(delegated.clone())
-                        .with_progress_sink(ProgressSink::new(id.clone(), progress_tx.clone()));
+                        .with_progress_sink(progress.clone());
                         Some(async move {
-                            let result = tokio::select! {
+                            // Updates sent once the call is over (it
+                            // returned, or its future was dropped) are
+                            // stale, even while the batch still runs.
+                            let _close = CloseOnDrop(progress);
+                            // Cancelled after its gates but before its turn
+                            // to run came (a sibling's gate, a full batch):
+                            // the tool was never invoked.
+                            if token.is_cancelled() {
+                                return (index, CallOutput::NotStarted);
+                            }
+                            let output = tokio::select! {
                                 biased;
-                                _ = token.cancelled() => None,
-                                result = tools.tool_call_with_ctx(name, args.clone(), &ctx) => Some(result),
+                                _ = token.cancelled() => CallOutput::Cancelled,
+                                result = tools.tool_call_with_ctx(name, args.clone(), &ctx) => CallOutput::Finished(result),
                             };
-                            (index, result)
+                            (index, output)
                         })
                     }
                     _ => None,
@@ -1231,9 +1367,12 @@ fn run_engine<'a, M: CompletionModel>(
                     })
                     .collect();
                 while progress_rx.try_recv().is_ok() {}
+                // Unordered, so a call that finishes frees its slot for
+                // the next one even while an earlier call still runs;
+                // each output carries its slot index.
                 let outputs = {
                     let mut batch = std::pin::pin!(race_abort(
-                        futures::stream::iter(runs).buffered(concurrency).collect::<Vec<_>>(),
+                        futures::stream::iter(runs).buffer_unordered(concurrency).collect::<Vec<_>>(),
                         &mut abort_fut,
                     ));
                     loop {
@@ -1289,24 +1428,30 @@ fn run_engine<'a, M: CompletionModel>(
                         continue;
                     };
                     *content = Some(match output {
-                        None => cancelled_while_running(),
-                        Some(Ok(content)) => content,
+                        CallOutput::NotStarted => cancelled_before_run(),
+                        CallOutput::Cancelled => cancelled_while_running(),
+                        CallOutput::Finished(Ok(content)) => content,
                         // Unreachable while the active set stays a subset
                         // of the catalog; kept in-band all the same.
-                        Some(Err(ToolRegistryError::NotFound(_))) => {
+                        CallOutput::Finished(Err(ToolRegistryError::NotFound(_))) => {
                             unavailable_tool(name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()))
                         },
-                        Some(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &guard, usage_run + delegated.total(), run_msgs)?,
+                        CallOutput::Finished(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &guard, usage_run + delegated.total(), run_msgs)?,
                     });
                 }
 
                 // Phase 3: `after` hooks and results, in the model's order.
+                // A deferred call has no result yet: it waits in the
+                // suspension, unless the run aborts first.
+                let mut held = Vec::new();
                 let mut answering = slots.into_iter();
                 while let Some(slot) = answering.next() {
                     let (id, content, emit) = match slot {
                         Slot::Answered { id, content, emit } => (id, content, emit),
-                        // No result yet: it waits in the suspension.
-                        Slot::Deferred { .. } => continue,
+                        slot @ Slot::Deferred { .. } => {
+                            held.push(slot.into_unanswered());
+                            continue;
+                        }
                         Slot::Gated { id, args, call, content, .. } => {
                             let mut content = content.unwrap_or_else(|| {
                                 ToolResultContent::error("Tool not run: no result was recorded")
@@ -1341,7 +1486,8 @@ fn run_engine<'a, M: CompletionModel>(
                                 // transforms left it as) so history isn't left
                                 // with a tool_call missing its tool_result.
                                 tools_result.push(UserBlock::tool_result(id, content));
-                                let unanswered: Vec<PendingCall> = answering.map(Slot::into_unanswered)
+                                let unanswered: Vec<PendingCall> = held.into_iter()
+                                    .chain(answering.map(Slot::into_unanswered))
                                     .chain(pending).collect();
                                 let chunks = abort_step(
                                     &guard, &step_id, reason, usage_run + delegated.total(),
@@ -1354,6 +1500,9 @@ fn run_engine<'a, M: CompletionModel>(
                         }
                     };
 
+                    // Too late to cancel once the result is decided, before
+                    // anyone sees it.
+                    if let Some(control) = &config.control { control.unregister_call(&id); }
                     if emit {
                         let mut chunk = StreamChunk::tool_result(
                             run_id.clone(),
@@ -1366,7 +1515,6 @@ fn run_engine<'a, M: CompletionModel>(
                         yield chunk;
                     }
 
-                    if let Some(control) = &config.control { control.unregister_call(&id); }
                     tools_result.push(UserBlock::tool_result(id, content));
                 }
             }
@@ -1377,6 +1525,34 @@ fn run_engine<'a, M: CompletionModel>(
             // all in the one user message after it), and the inbox is not
             // drained: the resumed run closes the step.
             if !deferred.is_empty() {
+                // The calls after the deferring batch never reached their
+                // gates and wait for the resume, except a call the run
+                // already rejected (malformed arguments), which a resume
+                // would run with the empty arguments that stand in for
+                // the ones the model failed to produce, and a call
+                // `cancel_tool` stopped, which the resumed run (with
+                // tokens of its own) would not know about. Both are
+                // answered now.
+                for call in pending {
+                    let answer = match call {
+                        PendingCall::Rejected { id, content } => Some((id, content)),
+                        PendingCall::Run { id, .. }
+                            if call_tokens.get(&id).is_some_and(CancellationToken::is_cancelled) =>
+                        {
+                            Some((id, cancelled_before_run()))
+                        }
+                        _ => None,
+                    };
+                    if let Some((id, content)) = answer {
+                        let mut chunk = StreamChunk::tool_result(
+                            run_id.clone(), step_id.clone(), id.clone(), content.clone(),
+                        );
+                        for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
+                        for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                        yield chunk;
+                        tools_result.push(UserBlock::tool_result(id, content));
+                    }
+                }
                 let mut answered: HashMap<String, ToolResultContent> = tools_result
                     .into_iter()
                     .filter_map(|block| match block {
@@ -1396,6 +1572,9 @@ fn run_engine<'a, M: CompletionModel>(
                         }
                     })
                     .collect();
+                // The suspended calls run, if at all, in the resumed run,
+                // with tokens of their own.
+                guard.clear_calls();
                 let suspension = Suspension::new(run_id.clone(), step_id.clone(), calls);
                 let new_messages = run_msgs.finish();
                 let usage_total = usage_run + delegated.total();
@@ -1515,11 +1694,34 @@ fn run_engine<'a, M: CompletionModel>(
         yield chunk;
     };
 
-    Box::pin(stream)
+    Box::pin(stream.inspect(move |item| {
+        if let Ok(StreamChunk::RunFinished { .. }) = item {
+            committed.store(true, Ordering::SeqCst);
+        }
+    }))
+}
+
+/// Closes a call's [`ProgressSink`] when the call's future ends.
+struct CloseOnDrop(ProgressSink);
+
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        self.0.close();
+    }
 }
 
 /// How many progress updates a run buffers before dropping new ones.
 const PROGRESS_BUFFER: usize = 64;
+
+/// How a call of a batch ended.
+enum CallOutput {
+    /// `RunControl::cancel_tool` stopped it before the tool was invoked.
+    NotStarted,
+    /// `RunControl::cancel_tool` stopped it while the tool ran.
+    Cancelled,
+    /// The tool returned.
+    Finished(Result<ToolResultContent, ToolRegistryError>),
+}
 
 /// What a batch in flight produced next: its results, or a progress
 /// update from one of its calls.
@@ -2438,9 +2640,10 @@ mod tests {
     }
 
     /// Keeps the `ToolContext::cancellation` token of its last call,
-    /// then takes `delay` to answer.
+    /// signals that it started, then takes `delay` to answer.
     struct TokenKeeper {
         token: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+        started: Arc<tokio::sync::Notify>,
         delay: std::time::Duration,
     }
 
@@ -2448,6 +2651,7 @@ mod tests {
         fn new(delay: std::time::Duration) -> Self {
             Self {
                 token: Arc::default(),
+                started: Arc::default(),
                 delay,
             }
         }
@@ -2471,6 +2675,7 @@ mod tests {
         }
         async fn call(&self, _: serde_json::Value, ctx: &ToolContext) -> ToolResultContent {
             *self.token.lock().unwrap() = Some(ctx.cancellation().clone());
+            self.started.notify_one();
             tokio::time::sleep(self.delay).await;
             ToolResultContent::text("sunny")
         }
@@ -2478,8 +2683,9 @@ mod tests {
 
     /// A run timeout cancels the token tools see, so work a tool
     /// spawned (which outlives the dropped tool future) stops too. The
-    /// caller's own token is left alone.
-    #[tokio::test]
+    /// caller's own token is left alone. Paused time: the timeout
+    /// elapses only once the tool is waiting, however slow the machine.
+    #[tokio::test(start_paused = true)]
     async fn run_timeout_cancels_tool_token() {
         let model = ScriptedModel::new([weather_call_turn(tokens(1, 1)), end_turn(tokens(1, 1))]);
         let tool = Arc::new(TokenKeeper::new(std::time::Duration::from_secs(60)));
@@ -2504,9 +2710,9 @@ mod tests {
         let caller = CancellationToken::new();
         let mut config = RunConfig::default();
         config.cancellation = Some(caller.clone());
-        let canceller = caller.clone();
+        let (canceller, started) = (caller.clone(), tool.started.clone());
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            started.notified().await;
             canceller.cancel();
         });
         let (reason, _) = run_finished(&model, tool.clone(), config).await;
@@ -2581,12 +2787,15 @@ mod tests {
         .await
         .expect("run_chat should start");
         // Poll until the tool has started, then drop the stream.
-        let poll = async {
-            while let Some(chunk) = stream.next().await {
-                chunk.expect("no error before the tool runs");
+        loop {
+            tokio::select! {
+                biased;
+                _ = tool.started.notified() => break,
+                chunk = stream.next() => {
+                    chunk.expect("the tool starts before the run ends").expect("no error");
+                }
             }
-        };
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), poll).await;
+        }
         drop(stream);
         assert!(tool.token().is_cancelled());
     }

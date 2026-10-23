@@ -30,3 +30,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
+# An in-process server for the progress round-trip test.
+rmcp = { version = "1.6", default-features = false, features = [
+    "client",
+    "server",
+] }

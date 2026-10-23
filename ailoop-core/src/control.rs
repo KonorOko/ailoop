@@ -64,6 +64,11 @@ impl Inbound {
 /// - Each delivery emits [`crate::StreamChunk::InboundDelivered`]. An
 ///   [`Inbound`] with no blocks is reported there but does not, by
 ///   itself, keep the run going.
+/// - A turn that suspends on a deferred tool call
+///   ([`crate::FinishReason::Suspended`]) is not closed, so nothing is
+///   delivered then. The queue stays with this handle: the run that
+///   resumes the suspension delivers it only if it is given the same
+///   handle, when it closes that turn.
 ///
 /// # What is never lost
 ///

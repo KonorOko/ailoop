@@ -369,14 +369,20 @@ async fn cancel_tool_in_a_batch_stops_only_that_call() {
         trace: trace.clone(),
         cancel: Some((control.clone(), "t1")),
     });
-    let chunks = run(
-        &[("t1", "hang"), ("t2", "cancel")],
-        vec![hang, canceller],
-        2,
-        vec![],
-        Some(control),
+    // Bounded, so a cancel that no longer lands fails instead of
+    // hanging for the tool's full minute.
+    let chunks = tokio::time::timeout(
+        Duration::from_secs(5),
+        run(
+            &[("t1", "hang"), ("t2", "cancel")],
+            vec![hang, canceller],
+            2,
+            vec![],
+            Some(control),
+        ),
     )
-    .await;
+    .await
+    .expect("the cancelled call stops");
 
     assert_eq!(
         result_text(&chunks, "t1").as_deref(),
@@ -402,4 +408,53 @@ async fn conversation_builder_sets_tool_concurrency() {
         .await
         .expect("run");
     assert_eq!(trace.max_in_flight(), 2);
+}
+
+/// `t1` waits until `t3` has started.
+struct WaitsForThird {
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl ToolDyn for WaitsForThird {
+    fn name(&self) -> &str {
+        "read"
+    }
+    fn tool_definition(&self) -> ToolDefinition {
+        ToolDefinition::new("read", "probe", json!({"type": "object"}), vec![])
+    }
+    fn concurrency_safe(&self) -> bool {
+        true
+    }
+    async fn call(&self, _: Value, ctx: &ToolContext) -> ToolResultContent {
+        match ctx.call_id() {
+            "t1" => self.started.notified().await,
+            "t3" => self.started.notify_one(),
+            _ => {}
+        }
+        ToolResultContent::text(ctx.call_id())
+    }
+}
+
+/// A finished call frees its slot for the next one even while an
+/// earlier call of the batch is still running: with a limit of 2, `t3`
+/// starts once `t2` is done, without waiting for `t1`.
+#[tokio::test]
+async fn a_slow_call_does_not_hold_back_the_rest_of_the_batch() {
+    let tool = Arc::new(WaitsForThird {
+        started: Arc::new(tokio::sync::Notify::new()),
+    });
+    let chunks = tokio::time::timeout(
+        Duration::from_secs(5),
+        run(
+            &[("t1", "read"), ("t2", "read"), ("t3", "read")],
+            vec![tool],
+            2,
+            vec![],
+            None,
+        ),
+    )
+    .await
+    .expect("t3 should start while t1 waits for it");
+    assert_eq!(result_ids(&chunks), ["t1", "t2", "t3"]);
 }
