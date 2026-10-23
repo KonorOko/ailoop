@@ -369,14 +369,20 @@ async fn cancel_tool_in_a_batch_stops_only_that_call() {
         trace: trace.clone(),
         cancel: Some((control.clone(), "t1")),
     });
-    let chunks = run(
-        &[("t1", "hang"), ("t2", "cancel")],
-        vec![hang, canceller],
-        2,
-        vec![],
-        Some(control),
+    // Bounded, so a cancel that no longer lands fails instead of
+    // hanging for the tool's full minute.
+    let chunks = tokio::time::timeout(
+        Duration::from_secs(5),
+        run(
+            &[("t1", "hang"), ("t2", "cancel")],
+            vec![hang, canceller],
+            2,
+            vec![],
+            Some(control),
+        ),
     )
-    .await;
+    .await
+    .expect("the cancelled call stops");
 
     assert_eq!(
         result_text(&chunks, "t1").as_deref(),
