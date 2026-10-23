@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ailoop"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "ailoop-core",
  "ailoop-derive",
@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-anthropic"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "ailoop-core",
  "async-stream",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-azure-openai"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "ailoop-core",
  "async-stream",
@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-core"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-derive"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "convert_case",
  "proc-macro-crate",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-history"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "ailoop-core",
  "async-trait",
@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-mcp"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "ailoop-core",
  "ailoop-tools",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-prompts"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "ailoop-core",
  "async-trait",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "ailoop-tools"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "ailoop-core",
  "async-trait",
