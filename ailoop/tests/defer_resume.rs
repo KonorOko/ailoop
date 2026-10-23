@@ -702,3 +702,52 @@ async fn a_malformed_call_after_a_deferral_is_answered_not_run() {
             .contains("{not json")
     );
 }
+
+/// Cancels the run from inside a call's `after` hook and then hangs, so
+/// the abort lands while the batch is in phase 3.
+struct CancelInAfter {
+    token: tokio_util::sync::CancellationToken,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for CancelInAfter {
+    async fn on_after_tool_call(&self, _: &ToolCallInfo, _: &Value, _: &ToolResultContent) {
+        self.token.cancel();
+        std::future::pending::<()>().await;
+    }
+}
+
+/// An abort while a batch runs its `after` hooks still answers the
+/// batch's deferred call, so the step has a result for every call.
+#[tokio::test]
+async fn abort_in_after_hooks_answers_a_deferred_call_of_the_batch() {
+    let token = tokio_util::sync::CancellationToken::new();
+    let gate = Gate::deferring(&["delete"]);
+    let mut chat = Conversation::builder(ScriptedModel::new(vec![calls_turn(&[
+        ("t1", "delete"),
+        ("t2", "read"),
+    ])]))
+    .tool_dyn(Probe::with_safety("read", true))
+    .tool_dyn(Probe::with_safety("delete", true))
+    .middleware(gate)
+    .middleware(Arc::new(CancelInAfter {
+        token: token.clone(),
+    }))
+    .tool_concurrency(2)
+    .build()
+    .expect("build");
+
+    let outcome = chat
+        .run_with_options("clean up", RunOptions::new().cancellation(token))
+        .await
+        .expect("an abort is not an error");
+
+    assert!(matches!(outcome.finish_reason, FinishReason::Aborted(_)));
+    assert!(chat.suspension().is_none());
+    assert_no_orphans(chat.messages());
+    assert!(
+        result_text(chat.messages(), "t1")
+            .unwrap()
+            .starts_with("Tool not run")
+    );
+}

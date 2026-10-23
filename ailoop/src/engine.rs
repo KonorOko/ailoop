@@ -304,6 +304,31 @@ async fn abort_step(
         tools_result.push(UserBlock::tool_result(id, content));
     }
     if !tools_result.is_empty() {
+        // Results in the order of the step's calls, which the paths
+        // above do not always produce (a deferred call answered after
+        // the batch's other calls).
+        let order: Vec<&str> = run_msgs
+            .context()
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::Assistant { blocks } => Some(
+                    blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            AssistantBlock::ToolCall { call_id, .. } => Some(call_id.as_str()),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let position = |block: &UserBlock| match block {
+            UserBlock::ToolResult { call_id, .. } => order.iter().position(|id| id == call_id),
+            _ => None,
+        };
+        tools_result.sort_by_key(|block| position(block).unwrap_or(usize::MAX));
         run_msgs.push(Message::User {
             blocks: tools_result,
         });
@@ -1392,12 +1417,17 @@ fn run_engine<'a, M: CompletionModel>(
                 }
 
                 // Phase 3: `after` hooks and results, in the model's order.
+                // A deferred call has no result yet: it waits in the
+                // suspension, unless the run aborts first.
+                let mut held = Vec::new();
                 let mut answering = slots.into_iter();
                 while let Some(slot) = answering.next() {
                     let (id, content, emit) = match slot {
                         Slot::Answered { id, content, emit } => (id, content, emit),
-                        // No result yet: it waits in the suspension.
-                        Slot::Deferred { .. } => continue,
+                        slot @ Slot::Deferred { .. } => {
+                            held.push(slot.into_unanswered());
+                            continue;
+                        }
                         Slot::Gated { id, args, call, content, .. } => {
                             let mut content = content.unwrap_or_else(|| {
                                 ToolResultContent::error("Tool not run: no result was recorded")
@@ -1432,7 +1462,8 @@ fn run_engine<'a, M: CompletionModel>(
                                 // transforms left it as) so history isn't left
                                 // with a tool_call missing its tool_result.
                                 tools_result.push(UserBlock::tool_result(id, content));
-                                let unanswered: Vec<PendingCall> = answering.map(Slot::into_unanswered)
+                                let unanswered: Vec<PendingCall> = held.into_iter()
+                                    .chain(answering.map(Slot::into_unanswered))
                                     .chain(pending).collect();
                                 let chunks = abort_step(
                                     &guard, &step_id, reason, usage_run + delegated.total(),
