@@ -1231,9 +1231,12 @@ fn run_engine<'a, M: CompletionModel>(
                     })
                     .collect();
                 while progress_rx.try_recv().is_ok() {}
+                // Unordered, so a call that finishes frees its slot for
+                // the next one even while an earlier call still runs;
+                // each output carries its slot index.
                 let outputs = {
                     let mut batch = std::pin::pin!(race_abort(
-                        futures::stream::iter(runs).buffered(concurrency).collect::<Vec<_>>(),
+                        futures::stream::iter(runs).buffer_unordered(concurrency).collect::<Vec<_>>(),
                         &mut abort_fut,
                     ));
                     loop {
