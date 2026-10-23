@@ -177,3 +177,28 @@ fn prompt_error_is_reexported() {
         other => panic!("unexpected error: {other}"),
     }
 }
+
+/// The types of the run-control, suspension and progress APIs are
+/// nameable from the facade.
+#[test]
+fn run_control_and_suspension_types_are_reexported() {
+    use ailoop::{
+        CallState, ProgressSink, Resume, ResumeDecision, ResumeError, SuspendedCall, Suspension,
+        ToolProgress,
+    };
+
+    let call = SuspendedCall::new(
+        "t1",
+        "delete",
+        serde_json::json!({}),
+        CallState::Deferred {
+            reason: "needs approval".into(),
+        },
+    );
+    let suspension = Suspension::new(RunId::new(), StepId::new(), vec![call]);
+    assert_eq!(suspension.pending().count(), 1);
+    let resume: Result<Resume, ResumeError> =
+        Resume::new(suspension, [("t1".to_string(), ResumeDecision::Approve)]);
+    assert!(resume.is_ok());
+    ProgressSink::default().report(ToolProgress::message("noop"));
+}
