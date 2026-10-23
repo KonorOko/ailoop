@@ -375,6 +375,24 @@ impl ChatMiddleware for JsonTracer {
                 }
                 self.emit("run_suspended", p).await;
             }
+            StreamChunk::ToolProgress {
+                run_id,
+                step_id,
+                call_id,
+                progress,
+                ..
+            } => {
+                let mut p = serde_json::Map::new();
+                p.insert("run_id".into(), json!(run_id.to_string()));
+                p.insert("step_id".into(), json!(step_id.to_string()));
+                p.insert("call_id".into(), json!(call_id));
+                p.insert("progress".into(), json!(progress.progress));
+                p.insert("total".into(), json!(progress.total));
+                if self.verbose {
+                    p.insert("message".into(), json!(progress.message));
+                }
+                self.emit("tool_progress", p).await;
+            }
             StreamChunk::InboundDelivered {
                 run_id,
                 step_id,

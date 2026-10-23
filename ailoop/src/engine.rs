@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,10 +11,12 @@ use ailoop_core::{
     CompletionModel, ContinueDecision, FinishReason, HookAction, Inbound, Message, Resume,
     ResumeDecision, RunConfig, RunControl, RunErrorInfo, RunFinishedInfo, RunId, RunStartInfo,
     StepId, StepInfo, StreamChunk, SuspendedCall, Suspension, ToolCallInfo, ToolDecision,
-    ToolResultContent, TurnEndInfo, Usage, UserBlock,
+    ToolProgress, ToolResultContent, TurnEndInfo, Usage, UserBlock,
 };
 use ailoop_history::{CompactionError, CompactionStats, History};
-use ailoop_tools::{ToolActivation, ToolContext, ToolRegistry, ToolRegistryError, UsageSink};
+use ailoop_tools::{
+    ProgressSink, ToolActivation, ToolContext, ToolRegistry, ToolRegistryError, UsageSink,
+};
 use async_stream::try_stream;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
@@ -649,6 +651,12 @@ fn run_engine<'a, M: CompletionModel>(
             tool_cancellation.clone(),
             config.control.clone(),
         );
+        // Progress tools report while they run, `(call_id, update)`.
+        // Bounded and fed with `try_send`, so a chatty tool never blocks
+        // and never grows memory: past `PROGRESS_BUFFER` updates are
+        // dropped. Drained into `ToolProgress` chunks while a batch runs.
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::channel::<(String, ToolProgress)>(PROGRESS_BUFFER);
 
         for mw in &config.middlewares {
             let action = match race_abort(
@@ -1198,7 +1206,8 @@ fn run_engine<'a, M: CompletionModel>(
                             ToolActivation::new(catalog.clone(), active_snapshot.clone()),
                             token.clone(),
                         )
-                        .with_usage_sink(delegated.clone());
+                        .with_usage_sink(delegated.clone())
+                        .with_progress_sink(ProgressSink::new(id.clone(), progress_tx.clone()));
                         Some(async move {
                             let result = tokio::select! {
                                 biased;
@@ -1210,10 +1219,57 @@ fn run_engine<'a, M: CompletionModel>(
                     }
                     _ => None,
                 }).collect::<Vec<_>>();
-                let outputs = race_abort(
-                    futures::stream::iter(runs).buffered(concurrency).collect::<Vec<_>>(),
-                    &mut abort_fut,
-                ).await;
+                // Only this batch's calls may report: progress from a call
+                // that already has its result (a task it left running) is
+                // stale and dropped, here and below.
+                let running: HashSet<String> = slots
+                    .iter()
+                    .filter_map(|slot| match slot {
+                        Slot::Gated { id, content: None, .. } => Some(id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                while progress_rx.try_recv().is_ok() {}
+                let outputs = {
+                    let mut batch = std::pin::pin!(race_abort(
+                        futures::stream::iter(runs).buffered(concurrency).collect::<Vec<_>>(),
+                        &mut abort_fut,
+                    ));
+                    loop {
+                        // `yield` stays outside `select!`: the stream macro
+                        // does not rewrite it inside another macro.
+                        let event = tokio::select! {
+                            biased;
+                            outputs = &mut batch => BatchEvent::Done(outputs),
+                            Some(update) = progress_rx.recv() => BatchEvent::Progress(update),
+                        };
+                        match event {
+                            BatchEvent::Done(outputs) => break outputs,
+                            BatchEvent::Progress((call_id, _)) if !running.contains(&call_id) => {}
+                            BatchEvent::Progress((call_id, progress)) => {
+                                let mut chunk = StreamChunk::tool_progress(
+                                    run_id.clone(), step_id.clone(), call_id, progress,
+                                );
+                                for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
+                                for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                                yield chunk;
+                            }
+                        }
+                    }
+                };
+                // What arrived as the batch finished still goes out before
+                // the results.
+                while let Ok((call_id, progress)) = progress_rx.try_recv() {
+                    if !running.contains(&call_id) {
+                        continue;
+                    }
+                    let mut chunk = StreamChunk::tool_progress(
+                        run_id.clone(), step_id.clone(), call_id, progress,
+                    );
+                    for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
+                    for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                    yield chunk;
+                }
                 let outputs = match outputs {
                     Ok(outputs) => outputs,
                     Err(reason) => {
@@ -1459,6 +1515,16 @@ fn run_engine<'a, M: CompletionModel>(
     };
 
     Box::pin(stream)
+}
+
+/// How many progress updates a run buffers before dropping new ones.
+const PROGRESS_BUFFER: usize = 64;
+
+/// What a batch in flight produced next: its results, or a progress
+/// update from one of its calls.
+enum BatchEvent<T> {
+    Done(T),
+    Progress((String, ToolProgress)),
 }
 
 /// One call of a batch on its way through the gate, execution and

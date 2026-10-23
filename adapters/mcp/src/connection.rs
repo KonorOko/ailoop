@@ -8,6 +8,7 @@ use tokio::process::Command;
 
 use crate::errors::McpError;
 use crate::naming;
+use crate::progress::ProgressRouter;
 use crate::tool::McpTool;
 
 /// Live connection to an MCP server over stdio.
@@ -17,7 +18,8 @@ use crate::tool::McpTool;
 /// the last reference closes the underlying child process.
 pub struct McpConnection {
     server_label: String,
-    inner: Arc<RunningService<RoleClient, ()>>,
+    inner: Arc<RunningService<RoleClient, ProgressRouter>>,
+    progress: ProgressRouter,
 }
 
 impl McpConnection {
@@ -87,6 +89,7 @@ impl McpConnection {
                 );
                 Arc::new(McpTool {
                     client: self.inner.clone(),
+                    progress: self.progress.clone(),
                     name_for_engine,
                     name_at_server,
                     definition,
@@ -152,11 +155,17 @@ impl McpConnectionBuilder {
         let transport = TokioChildProcess::new(command)
             .map_err(|e| McpError::TransportCreation(e.to_string()))?;
 
-        let inner = ().serve(transport).await.map_err(|e| McpError::Service(e.to_string()))?;
+        let progress = ProgressRouter::default();
+        let inner = progress
+            .clone()
+            .serve(transport)
+            .await
+            .map_err(|e| McpError::Service(e.to_string()))?;
 
         Ok(McpConnection {
             server_label: self.server_label,
             inner: Arc::new(inner),
+            progress,
         })
     }
 }

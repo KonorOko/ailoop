@@ -43,6 +43,7 @@
 mod connection;
 mod errors;
 mod naming;
+mod progress;
 mod tool;
 
 pub use connection::{McpConnection, McpConnectionBuilder};

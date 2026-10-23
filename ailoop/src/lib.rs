@@ -91,7 +91,7 @@ pub use ailoop_core::{
     RetryConfig, Retryable, RetryingModel, RunConfig, RunControl, RunErrorInfo, RunFinishedInfo,
     RunId, RunStartInfo, Source, StepId, StepInfo, StreamChunk, SuspendedCall, Suspension,
     SystemBlock, SystemPrompt, Tokenizer, ToolCallInfo, ToolChoice, ToolDecision, ToolDefinition,
-    ToolResultBlock, ToolResultContent, ToolTag, TurnEndInfo, Usage, UserBlock,
+    ToolProgress, ToolResultBlock, ToolResultContent, ToolTag, TurnEndInfo, Usage, UserBlock,
 };
 pub use ailoop_derive::{ToolJsonType, ailoop_tool};
 pub use ailoop_history::{
@@ -113,8 +113,8 @@ pub use async_trait::async_trait;
 // namespaces (one is a trait, one is a macro), so both can be brought
 // into scope by `use ailoop::*;` without conflict.
 pub use ailoop_tools::{
-    TimeoutTool, Tool, ToolActivation, ToolActivationError, ToolContext, ToolDyn, ToolJsonType,
-    ToolRegistry, ToolRegistryError, UsageSink,
+    ProgressSink, TimeoutTool, Tool, ToolActivation, ToolActivationError, ToolContext, ToolDyn,
+    ToolJsonType, ToolRegistry, ToolRegistryError, UsageSink,
 };
 pub use anti_loop::{AntiLoop, TextPredicate};
 pub use conversation::{

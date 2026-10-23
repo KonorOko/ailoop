@@ -17,7 +17,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use ailoop_core::{RunId, StepId, ToolDefinition, Usage};
+use ailoop_core::{RunId, StepId, ToolDefinition, ToolProgress, Usage};
 use indexmap::{IndexMap, IndexSet};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -54,6 +54,7 @@ pub struct ToolContext {
     activation: ToolActivation,
     cancellation: CancellationToken,
     usage: UsageSink,
+    progress: ProgressSink,
 }
 
 impl ToolContext {
@@ -78,7 +79,18 @@ impl ToolContext {
             activation,
             cancellation,
             usage: UsageSink::new(),
+            progress: ProgressSink::default(),
         }
+    }
+
+    /// Replace the [`ProgressSink`] that [`Self::progress`] writes to.
+    ///
+    /// Engine plumbing, hidden from the docs and not covered by semver:
+    /// its signature may change in any release.
+    #[doc(hidden)]
+    pub fn with_progress_sink(mut self, sink: ProgressSink) -> Self {
+        self.progress = sink;
+        self
     }
 
     /// Replace the [`UsageSink`] that [`Self::report_usage`] writes to.
@@ -104,6 +116,7 @@ impl ToolContext {
             activation: ToolActivation::detached(),
             cancellation: CancellationToken::new(),
             usage: UsageSink::new(),
+            progress: ProgressSink::default(),
         }
     }
 
@@ -210,6 +223,69 @@ impl ToolContext {
     /// or a spawned task that needs to report on the tool's behalf.
     pub fn usage_sink(&self) -> &UsageSink {
         &self.usage
+    }
+
+    /// Report progress on this call. The engine forwards it as a
+    /// `StreamChunk::ToolProgress` carrying this call's id, while the
+    /// call runs and before its result. Never blocks and never fails:
+    /// delivery is best-effort, so keep updates coarse (a few per
+    /// second at most). A no-op on a [`Self::detached`] context.
+    pub fn progress(&self, progress: ToolProgress) {
+        self.progress.report(progress);
+    }
+
+    /// Sink behind [`Self::progress`]. Hand a clone to a spawned task
+    /// that reports on the tool's behalf.
+    pub fn progress_sink(&self) -> &ProgressSink {
+        &self.progress
+    }
+}
+
+/// Where a tool call's progress updates go: see
+/// [`ToolContext::progress`]. Cheap to clone. The default sink drops
+/// every update.
+#[derive(Clone, Default)]
+pub struct ProgressSink {
+    inner: Option<Arc<ProgressSinkInner>>,
+}
+
+struct ProgressSinkInner {
+    call_id: String,
+    sender: tokio::sync::mpsc::Sender<(String, ToolProgress)>,
+}
+
+impl ProgressSink {
+    /// A sink that sends `call_id`'s updates to `sender`.
+    ///
+    /// Engine plumbing, hidden from the docs and not covered by semver:
+    /// its signature may change in any release.
+    #[doc(hidden)]
+    pub fn new(
+        call_id: impl Into<String>,
+        sender: tokio::sync::mpsc::Sender<(String, ToolProgress)>,
+    ) -> Self {
+        Self {
+            inner: Some(Arc::new(ProgressSinkInner {
+                call_id: call_id.into(),
+                sender,
+            })),
+        }
+    }
+
+    /// Send `progress`. Dropped when nobody listens or the run's buffer
+    /// is full; never blocks.
+    pub fn report(&self, progress: ToolProgress) {
+        if let Some(inner) = &self.inner {
+            let _ = inner.sender.try_send((inner.call_id.clone(), progress));
+        }
+    }
+}
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProgressSink")
+            .field("call_id", &self.inner.as_ref().map(|i| i.call_id.as_str()))
+            .finish()
     }
 }
 

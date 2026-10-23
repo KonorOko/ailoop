@@ -10,6 +10,23 @@ and this project adheres to
 
 ### Added
 
+- Progress from running tools. `ToolContext::progress(ToolProgress)`
+  (or a clone of `ToolContext::progress_sink()` for a task the tool
+  spawns) reports progress, a total and a message, all optional, and
+  the run's stream carries each update as
+  `StreamChunk::ToolProgress { run_id, step_id, call_id, progress }`.
+  Before, a long tool was silent until it returned, so a UI could only
+  show a spinner. Updates go out while the call runs and always before
+  its `ToolResult`, and they never enter the history. Delivery is
+  best-effort: reporting never blocks the tool, a run buffers 64
+  updates and drops the rest, and an update sent after its call has its
+  result (from a task left running) is dropped. `JsonTracer` logs
+  `tool_progress` (the message only in verbose mode), and
+  `TracingMiddleware` logs a debug `ailoop.tool` event.
+- `ailoop-mcp` forwards MCP progress: every `tools/call` carries a
+  `progressToken`, and the server's `notifications/progress` for it
+  arrive as `ToolProgress` chunks of that call.
+
 - `RunControl`: a handle for controlling a run from outside while it is
   in flight, passed through `RunOptions::control` (or
   `RunConfig::control`). For now it carries an inbox:
