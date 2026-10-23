@@ -3,9 +3,10 @@ use std::sync::Arc;
 use ailoop_core::{ToolDefinition, ToolResultContent};
 use ailoop_tools::{ToolContext, ToolDyn};
 use rmcp::model::{
-    CallToolRequestParams, Content, Meta, NumberOrString, ProgressToken, RawContent,
+    CallToolRequest, CallToolRequestParams, ClientRequest, Content, Meta, NumberOrString,
+    ProgressToken, RawContent, ServerResult,
 };
-use rmcp::service::{RoleClient, RunningService};
+use rmcp::service::{PeerRequestOptions, RoleClient, RunningService, ServiceError};
 
 use crate::progress::ProgressRouter;
 
@@ -65,11 +66,28 @@ impl ToolDyn for McpTool {
         // Unique across runs sharing this connection: call ids come from
         // the provider and only need to be unique within a run.
         let token = format!("{}:{}", ctx.run_id(), ctx.call_id());
-        req.meta = Some(Meta::with_progress_token(ProgressToken(
-            NumberOrString::String(token.clone().into()),
+        let _routed = self
+            .progress
+            .register(token.clone(), ctx.progress_sink().clone());
+        // rmcp stamps every request with a progress token of its own,
+        // which overrides one set in the params' `_meta`; `options.meta`
+        // is applied after it, so ours is the one the server sees.
+        let mut options = PeerRequestOptions::no_options();
+        options.meta = Some(Meta::with_progress_token(ProgressToken(
+            NumberOrString::String(token.into()),
         )));
-        let _routed = self.progress.register(token, ctx.progress_sink().clone());
-        let result = self.client.call_tool(req).await;
+        let request = ClientRequest::CallToolRequest(CallToolRequest::new(req));
+        let result = async {
+            let handle = self
+                .client
+                .send_request_with_option(request, options)
+                .await?;
+            match handle.await_response().await? {
+                ServerResult::CallToolResult(result) => Ok(result),
+                _ => Err(ServiceError::UnexpectedResponse),
+            }
+        }
+        .await;
 
         match result {
             Err(e) => ToolResultContent::error(format!("MCP transport error: {e}")),
@@ -156,5 +174,77 @@ mod tests {
     #[test]
     fn stringify_handles_empty_content() {
         assert_eq!(stringify_content(&[]), "");
+    }
+
+    /// Reports progress on the token the request carries, then holds
+    /// the call open until the test has seen the update.
+    struct ReportingServer {
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl rmcp::ServerHandler for ReportingServer {
+        async fn call_tool(
+            &self,
+            _request: CallToolRequestParams,
+            context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+            let token = context.meta.get_progress_token().expect("a progress token");
+            let mut update = rmcp::model::ProgressNotificationParam::new(token, 1.0);
+            update.total = Some(2.0);
+            context.peer.notify_progress(update).await.expect("notify");
+            self.release.notified().await;
+            Ok(rmcp::model::CallToolResult::success(vec![Content::text(
+                "done",
+            )]))
+        }
+    }
+
+    #[tokio::test]
+    async fn server_progress_reaches_the_call() {
+        use rmcp::ServiceExt;
+
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let server = ReportingServer {
+            release: release.clone(),
+        };
+        tokio::spawn(async move {
+            let running = server.serve(server_io).await.expect("server handshake");
+            let _ = running.waiting().await;
+        });
+        let progress = ProgressRouter::default();
+        let client = progress
+            .clone()
+            .serve(client_io)
+            .await
+            .expect("client handshake");
+        let tool = McpTool {
+            client: Arc::new(client),
+            progress,
+            name_for_engine: "mcp__test__work".into(),
+            name_at_server: "work".into(),
+            definition: ToolDefinition::new("mcp__test__work", "", serde_json::json!({}), vec![]),
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let ctx = ToolContext::detached()
+            .with_progress_sink(ailoop_tools::ProgressSink::new("call_1", tx));
+        let call = tokio::spawn(async move { tool.call(serde_json::json!({}), &ctx).await });
+
+        let (call_id, update) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the server's progress should reach the call")
+            .expect("sink open");
+        assert_eq!(call_id, "call_1");
+        assert_eq!(
+            update,
+            ailoop_core::ToolProgress::new()
+                .with_progress(1.0)
+                .with_total(2.0)
+        );
+
+        release.notify_one();
+        let result = call.await.expect("call task");
+        assert!(!result.is_error);
     }
 }
