@@ -1128,10 +1128,10 @@ fn run_engine<'a, M: CompletionModel>(
             let mut deferred: HashMap<String, (Value, String)> = HashMap::new();
             let mut tools_result = Vec::new();
             let mut pending = tool_calls.into_iter().peekable();
-            while let Some(first) = pending.next() {
-                if !deferred.is_empty() {
+            while deferred.is_empty() {
+                let Some(first) = pending.next() else {
                     break;
-                }
+                };
                 let mut batch = Vec::new();
                 if batchable(&first) {
                     while let Some(next) = pending.next_if(|c| batchable(c)) {
@@ -1470,6 +1470,23 @@ fn run_engine<'a, M: CompletionModel>(
             // all in the one user message after it), and the inbox is not
             // drained: the resumed run closes the step.
             if !deferred.is_empty() {
+                // The calls after the deferring batch never reached their
+                // gates and wait for the resume, except a call the run
+                // already rejected (malformed arguments): it is answered
+                // now, since a resume would run it with the empty
+                // arguments that stand in for the ones the model failed
+                // to produce.
+                for call in pending {
+                    if let PendingCall::Rejected { id, content } = call {
+                        let mut chunk = StreamChunk::tool_result(
+                            run_id.clone(), step_id.clone(), id.clone(), content.clone(),
+                        );
+                        for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
+                        for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                        yield chunk;
+                        tools_result.push(UserBlock::tool_result(id, content));
+                    }
+                }
                 let mut answered: HashMap<String, ToolResultContent> = tools_result
                     .into_iter()
                     .filter_map(|block| match block {

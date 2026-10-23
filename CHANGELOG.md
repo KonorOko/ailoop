@@ -137,7 +137,9 @@ and this project adheres to
   made and forces a fresh run.
   - With calls running one at a time, the step stops at the deferred
     call and the calls after it wait without running their gates, so
-    none of them runs before the deferred one. In a batch of
+    none of them runs before the deferred one. A call after it whose
+    arguments were malformed is answered with its error right away,
+    since it can never run. In a batch of
     concurrency-safe calls the rest of the batch still goes through its
     gates and runs, so one suspension can hold several deferred calls.
   - The suspension records every call of the step in the model's

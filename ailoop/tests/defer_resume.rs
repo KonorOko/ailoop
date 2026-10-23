@@ -654,3 +654,51 @@ async fn abort_before_the_resumed_step_still_closes_it() {
         .expect("the conversation goes on");
     assert_no_orphans(s.chat.messages());
 }
+
+/// A call with malformed arguments after the deferred one is answered
+/// with its error in the suspension, not left waiting: resuming must
+/// not run the tool with the empty arguments that stand in for the
+/// ones the model failed to produce.
+#[tokio::test]
+async fn a_malformed_call_after_a_deferral_is_answered_not_run() {
+    let mut turn = calls_turn(&[("t1", "delete")]);
+    turn.insert(
+        2,
+        StreamChunk::ToolCallMalformed {
+            call_id: "t2".into(),
+            name: "read".into(),
+            raw: "{not json".into(),
+            error: "expected value".into(),
+        },
+    );
+    let mut s = setup(vec![turn, text_turn("done")], &["delete"], 1);
+    let mut stream = s.chat.stream("clean up").await.expect("starts");
+    let mut results = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        if let StreamChunk::ToolResult { call_id, .. } = chunk.expect("no error") {
+            results.push(call_id);
+        }
+    }
+    drop(stream);
+    assert_eq!(
+        results,
+        ["t2"],
+        "the rejection goes out as the run suspends"
+    );
+    assert_eq!(
+        states(&s.chat),
+        [("t1".into(), "deferred"), ("t2".into(), "answered")]
+    );
+
+    s.chat
+        .resume([("t1".into(), ResumeDecision::Approve)])
+        .await
+        .expect("resumes");
+    assert_eq!((s.delete.calls(), s.read.calls()), (1, 0));
+    assert_no_orphans(s.chat.messages());
+    assert!(
+        result_text(s.chat.messages(), "t2")
+            .unwrap()
+            .contains("{not json")
+    );
+}
