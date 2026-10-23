@@ -9,6 +9,7 @@ use crate::control::RunControl;
 use crate::ids::RunId;
 use crate::message::SystemPrompt;
 use crate::middleware::ChatMiddleware;
+use crate::suspension::Resume;
 
 /// Default for [`RunConfig::max_iterations`]: the number of provider
 /// turns a run may take before the engine aborts it with
@@ -108,6 +109,21 @@ pub struct RunConfig {
     /// Unrelated to `ChatRequest::disable_parallel_tool_use`, which
     /// controls whether the model may ask for several calls per turn.
     pub tool_concurrency: usize,
+    /// Resume a suspended run instead of starting from a model call:
+    /// the first step finishes the suspended one (deferred calls run or
+    /// are denied per their decision, waiting calls go through their
+    /// gates, answered ones keep their result), then the run goes on as
+    /// usual. `messages` must be the history the suspended run left,
+    /// ending on the suspended step's assistant message. That first
+    /// step makes no request, so `on_chat_request` does not fire for
+    /// it, and the `before` hooks of the deferred calls do not run
+    /// again (they ran in the suspended run); their `after` hooks do.
+    /// It counts as one iteration. See [`crate::Suspension`].
+    pub resume: Option<Resume>,
+    /// The run this one resumes, when [`Self::resume`] is set (the
+    /// engine fills it from the suspension). For correlation: a resumed
+    /// run has its own [`RunId`].
+    pub resumed_from: Option<RunId>,
 }
 
 impl Default for RunConfig {
@@ -122,6 +138,8 @@ impl Default for RunConfig {
             cancellation: None,
             control: None,
             tool_concurrency: 1,
+            resume: None,
+            resumed_from: None,
         }
     }
 }
@@ -139,6 +157,8 @@ impl std::fmt::Debug for RunConfig {
             .field("cancellation", &self.cancellation)
             .field("control", &self.control)
             .field("tool_concurrency", &self.tool_concurrency)
+            .field("resume", &self.resume)
+            .field("resumed_from", &self.resumed_from)
             .finish()
     }
 }

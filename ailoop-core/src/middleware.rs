@@ -261,9 +261,10 @@ pub trait ChatMiddleware: Send + Sync {
     // tools
     /// Fired before the engine invokes a tool. Return
     /// [`ToolDecision::Skip`] to feed a synthesized error result back
-    /// to the model without running the tool, or
-    /// [`ToolDecision::Terminate`] to abort the run. This is the
-    /// gating hook; for input rewriting, use
+    /// to the model without running the tool,
+    /// [`ToolDecision::Terminate`] to abort the run, or
+    /// [`ToolDecision::Defer`] to suspend the run until someone decides.
+    /// This is the gating hook; for input rewriting, use
     /// [`Self::on_before_tool_call_mut`].
     ///
     /// Calls of the same step may reach this hook in any order, or
@@ -558,6 +559,25 @@ pub enum ToolDecision {
     Terminate {
         /// Human-readable reason; threaded through
         /// [`crate::AbortReason::ToolTerminated`].
+        reason: String,
+    },
+    /// Neither run nor refuse the call now: suspend the run until
+    /// someone decides. For an approval that cannot be given while the
+    /// run waits (nobody present, a scheduled agent, a closed app).
+    ///
+    /// The run ends with [`crate::FinishReason::Suspended`] and a
+    /// [`crate::Suspension`] holding the step's calls; it is resumed
+    /// later, possibly in another process, with a decision per deferred
+    /// call (`Conversation::resume`, or [`crate::RunConfig::resume`]).
+    /// With calls running one at a time the step stops at this call, and
+    /// the calls after it wait, gates not yet run, so none of them runs
+    /// before the deferred one. Within a batch of concurrency-safe calls
+    /// the rest of the batch still goes through its gates and the calls
+    /// not deferred run, so one suspension can carry several deferred
+    /// calls.
+    Defer {
+        /// Why the call waits; kept in the suspension for whoever
+        /// decides.
         reason: String,
     },
 }

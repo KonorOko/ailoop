@@ -42,6 +42,7 @@ mod provider_error;
 mod request;
 mod retry;
 mod stream;
+mod suspension;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 mod tokenizer;
@@ -62,6 +63,7 @@ pub use provider_error::ProviderError;
 pub use request::{ChatRequest, ReasoningEffort, ToolChoice, ToolDefinition, ToolTag};
 pub use retry::{RetryClassification, RetryConfig, Retryable, RetryingModel};
 pub use stream::{AbortReason, FinishReason, StreamChunk, Usage};
+pub use suspension::{CallState, Resume, ResumeDecision, ResumeError, SuspendedCall, Suspension};
 pub use tokenizer::{CharTokenizer, Tokenizer};
 pub use traits::{CompletionClient, CompletionModel};
 

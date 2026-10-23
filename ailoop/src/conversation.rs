@@ -1,7 +1,8 @@
 use ailoop_core::{
-    AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, FinishReason,
-    Message, ProviderError, ReasoningEffort, RunConfig, RunControl, RunId, StreamChunk, ToolChoice,
-    ToolTag, Usage,
+    AssistantBlock, CallState, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
+    FinishReason, Message, ProviderError, ReasoningEffort, Resume, ResumeDecision, ResumeError,
+    RunConfig, RunControl, RunId, StreamChunk, Suspension, ToolChoice, ToolResultContent, ToolTag,
+    Usage, UserBlock,
 };
 use ailoop_history::{ConversationSnapshot, History, HistoryBuilder};
 use ailoop_prompts::{Prompt, PromptSection};
@@ -80,6 +81,9 @@ pub struct Conversation<M: CompletionModel> {
     max_iterations: Option<usize>,
     tool_concurrency: usize,
     context_options: ContextOptions,
+    /// The suspended run, while there is one: the history ends on its
+    /// step's tool calls.
+    suspension: Option<Suspension>,
 }
 
 /// Summary of a completed (or aborted) run, returned by
@@ -278,6 +282,10 @@ where
     /// need to overflow the compaction budget before issuing a real
     /// turn). Compaction is **not** triggered here — that happens on
     /// the next [`Conversation::run`] / [`Conversation::stream`] call.
+    ///
+    /// Do not use it while [`Self::suspension`] is set: the history then
+    /// ends on tool calls whose results only a resume (or
+    /// [`Self::abandon_suspension`]) may add.
     pub fn push_message(&mut self, message: Message) {
         self.history.add_message(message);
     }
@@ -317,6 +325,100 @@ where
             self.history.pinned().to_vec(),
         )
         .expect("history maintains messages.len() == pinned.len() invariant")
+        .with_suspension(self.suspension.clone())
+    }
+
+    /// The suspended run, if a gate deferred a tool call
+    /// ([`ToolDecision::Defer`](ailoop_core::ToolDecision::Defer)) and the
+    /// run has not been resumed or abandoned yet. Its
+    /// [`pending`](Suspension::pending) calls are the ones waiting for
+    /// a decision. While it is set the history ends on that step's tool
+    /// calls, and starting a new run fails with
+    /// [`EngineError::Suspended`]. A snapshot carries it.
+    pub fn suspension(&self) -> Option<&Suspension> {
+        self.suspension.as_ref()
+    }
+
+    /// Close the suspended step without running anything: every call
+    /// that has no result yet (deferred or waiting) gets an error result
+    /// reading `"Tool not run: <reason>"`, the step's results are
+    /// appended to the history as one user message, and the suspension
+    /// is cleared. No model call is made; the next run starts as usual.
+    pub fn abandon_suspension(&mut self, reason: &str) -> Result<(), ResumeError> {
+        let suspension = self.suspension.take().ok_or(ResumeError::NotSuspended)?;
+        let blocks = suspension
+            .calls
+            .into_iter()
+            .map(|call| {
+                let content = match call.state {
+                    CallState::Answered { content } => content,
+                    _ => ToolResultContent::error(format!("Tool not run: {reason}")),
+                };
+                UserBlock::tool_result(call.call_id, content)
+            })
+            .collect();
+        self.history.add_message(Message::User { blocks });
+        Ok(())
+    }
+
+    /// Resume the suspended run with a decision for each deferred call,
+    /// by `call_id`, and drive it to the end. See [`Self::resume_stream`].
+    pub async fn resume(
+        &mut self,
+        decisions: impl IntoIterator<Item = (String, ResumeDecision)>,
+    ) -> Result<RunOutcome, RunError<M::Error>> {
+        self.resume_with_options(decisions, RunOptions::default())
+            .await
+    }
+
+    /// Same as [`Self::resume`] with per-run [`RunOptions`].
+    pub async fn resume_with_options(
+        &mut self,
+        decisions: impl IntoIterator<Item = (String, ResumeDecision)>,
+        options: RunOptions,
+    ) -> Result<RunOutcome, RunError<M::Error>> {
+        let stream = self.resume_stream(decisions, options).await?;
+        Self::outcome_of(stream).await
+    }
+
+    /// Resume the suspended run as a stream.
+    ///
+    /// `decisions` must name every deferred call of the suspension and
+    /// nothing else; otherwise this fails with [`EngineError::Resume`]
+    /// before anything runs, and the suspension is kept. The resumed run
+    /// is a new run (its own [`RunId`]; `RunConfig::resumed_from` names
+    /// the suspended one). It first finishes the suspended step, with no
+    /// model call:
+    ///
+    /// - an approved call runs with the arguments stored in the
+    ///   suspension, without its `before` hooks (they ran in the
+    ///   suspended run), then its `after` hooks;
+    /// - a denied call gets an error result reading `"Tool denied:
+    ///   <reason>"` and goes through its `after` hooks;
+    /// - a call that was waiting goes through its gates as usual, and
+    ///   may be deferred again, which suspends the new run (since that
+    ///   step makes no request, an [`ApprovalRequest`](crate::ApprovalRequest)
+    ///   for it carries no `messages`);
+    /// - a call that already had its result keeps it and never runs
+    ///   again.
+    ///
+    /// Then the step's results go to the model in one user message and
+    /// the run goes on as usual. That first step counts as an iteration,
+    /// and no pre-run compaction runs (the history ends on the suspended
+    /// step's tool calls). If the resumed run ends in `Err` or its
+    /// stream is dropped, the history is rolled back and the suspension
+    /// is put back, so it can be resumed again.
+    pub async fn resume_stream(
+        &mut self,
+        decisions: impl IntoIterator<Item = (String, ResumeDecision)>,
+        options: RunOptions,
+    ) -> Result<RunStream<'_, M>, RunError<M::Error>> {
+        let suspension = self
+            .suspension
+            .clone()
+            .ok_or(EngineError::Resume(ResumeError::NotSuspended))?;
+        let resume = Resume::new(suspension, decisions).map_err(EngineError::Resume)?;
+        self.start_run(None, options, Some(resume)).await
     }
 
     /// Names of every tool currently active for this conversation.
@@ -384,8 +486,12 @@ where
         input: impl Into<Message>,
         options: RunOptions,
     ) -> Result<RunOutcome, RunError<M::Error>> {
-        let mut stream = self.stream_with_options(input, options).await?;
+        let stream = self.stream_with_options(input, options).await?;
+        Self::outcome_of(stream).await
+    }
 
+    /// Drive `stream` to its end and summarize the run.
+    async fn outcome_of(mut stream: RunStream<'_, M>) -> Result<RunOutcome, RunError<M::Error>> {
         let mut finished: Option<(RunId, FinishReason, Usage, Vec<Message>)> = None;
         while let Some(chunk) = stream.next().await {
             if let StreamChunk::RunFinished {
@@ -501,17 +607,35 @@ where
         input: impl Into<Message>,
         options: RunOptions,
     ) -> Result<RunStream<'_, M>, RunError<M::Error>> {
+        if self.suspension.is_some() {
+            return Err(EngineError::Suspended.into());
+        }
         let msg: Message = input.into();
         debug_assert!(
             matches!(msg, Message::User { .. }),
             "Conversation kickoff must be a Message::User; got {msg:?}"
         );
-        self.history.add_message(msg);
-        let report = self
-            .history
-            .compact_if_needed()
-            .await
-            .map_err(EngineError::Context)?;
+        self.start_run(Some(msg), options, None).await
+    }
+
+    /// Start a run: from `kickoff` (added to the history, then the
+    /// pre-run compaction), or resuming the suspension in `resume`.
+    async fn start_run(
+        &mut self,
+        kickoff: Option<Message>,
+        options: RunOptions,
+        resume: Option<Resume>,
+    ) -> Result<RunStream<'_, M>, RunError<M::Error>> {
+        let report = match kickoff {
+            Some(msg) => {
+                self.history.add_message(msg);
+                self.history
+                    .compact_if_needed()
+                    .await
+                    .map_err(EngineError::Context)?
+            }
+            None => None,
+        };
 
         let run_id = options.run_id.unwrap_or_default();
 
@@ -523,6 +647,11 @@ where
         config.cancellation = options.cancellation;
         config.control = options.control;
         config.tool_concurrency = self.tool_concurrency;
+        // A resumed run takes the suspension; the stream puts it back if
+        // the run fails or is dropped, since the history is rolled back.
+        let restore = resume.as_ref().map(|r| r.suspension.clone());
+        config.resume = resume;
+        self.suspension = None;
         if let Some(n) = options.max_iterations.or(self.max_iterations) {
             config.max_iterations = n;
         }
@@ -560,6 +689,10 @@ where
 
         Ok(RunStream {
             inner: Box::pin(prelude.chain(inner)),
+            suspension: &mut self.suspension,
+            restore,
+            pending: None,
+            done: false,
         })
     }
 }
@@ -592,6 +725,7 @@ pub struct ConversationBuilder<M: CompletionModel> {
     prompt: Prompt,
     history: HistoryBuilder,
     seeded_history: Option<(Vec<Message>, Vec<bool>)>,
+    seeded_suspension: Option<Suspension>,
     tools: ToolRegistry,
     tool_prompts: Vec<ToolPromptGroup>,
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
@@ -622,6 +756,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             tool_prompts,
             history,
             seeded_history: None,
+            seeded_suspension: None,
             tools,
             middlewares: vec![],
             capabilities: None,
@@ -656,6 +791,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     pub fn from_snapshot(model: M, snapshot: ConversationSnapshot) -> Self {
         let mut builder = Self::new(model);
         builder.seeded_history = Some((snapshot.messages, snapshot.pinned));
+        builder.seeded_suspension = snapshot.suspension;
         builder
     }
 
@@ -1277,6 +1413,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             max_iterations: self.max_iterations,
             tool_concurrency: self.tool_concurrency,
             context_options: self.context_options,
+            suspension: self.seeded_suspension,
         })
     }
 }
@@ -1297,6 +1434,13 @@ impl<M: CompletionModel> ConversationBuilder<M> {
 /// that keeps a copy of the steps completed before the failure.
 pub struct RunStream<'a, M: CompletionModel> {
     inner: BoxStream<'a, Result<StreamChunk, RunError<M::Error>>>,
+    /// The conversation's suspension slot, committed together with the
+    /// history: set from `RunSuspended` when the run finishes, put back
+    /// to `restore` when it fails or is dropped.
+    suspension: &'a mut Option<Suspension>,
+    restore: Option<Suspension>,
+    pending: Option<Suspension>,
+    done: bool,
 }
 
 impl<'a, M: CompletionModel> Stream for RunStream<'a, M> {
@@ -1306,7 +1450,32 @@ impl<'a, M: CompletionModel> Stream for RunStream<'a, M> {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        self.get_mut().inner.poll_next_unpin(cx)
+        let this = self.get_mut();
+        let item = std::task::ready!(this.inner.poll_next_unpin(cx));
+        match &item {
+            Some(Ok(StreamChunk::RunSuspended { suspension, .. })) => {
+                this.pending = Some(suspension.clone());
+            }
+            Some(Ok(StreamChunk::RunFinished { .. })) => {
+                *this.suspension = this.pending.take();
+                this.restore = None;
+                this.done = true;
+            }
+            Some(Err(_)) => {
+                *this.suspension = this.restore.take();
+                this.done = true;
+            }
+            _ => {}
+        }
+        std::task::Poll::Ready(item)
+    }
+}
+
+impl<M: CompletionModel> Drop for RunStream<'_, M> {
+    fn drop(&mut self) {
+        if !self.done {
+            *self.suspension = self.restore.take();
+        }
     }
 }
 

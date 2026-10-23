@@ -137,6 +137,17 @@ impl ChatMiddleware for TracingMiddleware {
                     "history compacted",
                 );
             }
+            StreamChunk::RunSuspended {
+                run_id, suspension, ..
+            } => {
+                tracing::info!(
+                    target: "ailoop.run",
+                    run_id = %run_id,
+                    step_id = %suspension.step_id,
+                    pending = suspension.pending().count(),
+                    "run suspended on deferred tool calls",
+                );
+            }
             StreamChunk::InboundDelivered {
                 run_id,
                 step_id,

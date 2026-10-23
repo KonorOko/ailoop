@@ -142,6 +142,7 @@ fn finish_reason_str(r: &FinishReason) -> &'static str {
         FinishReason::MaxTokens => "max_tokens",
         FinishReason::StopSequence => "stop_sequence",
         FinishReason::Aborted(_) => "aborted",
+        FinishReason::Suspended => "suspended",
         FinishReason::Other(_) => "other",
         _ => "unknown",
     }
@@ -360,6 +361,19 @@ impl ChatMiddleware for JsonTracer {
                 p.insert("after".into(), json!(*after_count));
                 p.insert("strategy".into(), json!(*strategy));
                 self.emit("history_compacted", p).await;
+            }
+            StreamChunk::RunSuspended {
+                run_id, suspension, ..
+            } => {
+                let mut p = serde_json::Map::new();
+                p.insert("run_id".into(), json!(run_id.to_string()));
+                p.insert("step_id".into(), json!(suspension.step_id.to_string()));
+                p.insert("pending".into(), json!(suspension.pending().count()));
+                if self.verbose {
+                    let ids: Vec<&str> = suspension.pending().map(|c| c.call_id.as_str()).collect();
+                    p.insert("pending_ids".into(), json!(ids));
+                }
+                self.emit("run_suspended", p).await;
             }
             StreamChunk::InboundDelivered {
                 run_id,

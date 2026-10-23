@@ -1,7 +1,7 @@
 //! [`ConversationSnapshot`] — versioned wire format used by
 //! [`HistoryStore`](crate::HistoryStore) backends.
 
-use ailoop_core::Message;
+use ailoop_core::{Message, Suspension};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::FromMessagesError;
@@ -33,6 +33,13 @@ pub struct ConversationSnapshot {
     /// `#[serde(try_from)]` arm rejects payloads where the two
     /// vectors disagree, so post-deserialize the invariant holds.
     pub pinned: Vec<bool>,
+    /// The conversation's suspended run, if it has one: the history
+    /// then ends on the suspended step's tool calls, and this holds
+    /// what resuming needs. Omitted from the serialized form when
+    /// `None`, and read as `None` from payloads written before it
+    /// existed, so the format stays at version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspension: Option<Suspension>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +47,8 @@ struct RawConversationSnapshot {
     version: u32,
     messages: Vec<Message>,
     pinned: Vec<bool>,
+    #[serde(default)]
+    suspension: Option<Suspension>,
 }
 
 impl ConversationSnapshot {
@@ -64,7 +73,15 @@ impl ConversationSnapshot {
             version: Self::VERSION,
             messages,
             pinned,
+            suspension: None,
         })
+    }
+
+    /// Attach the conversation's suspended run. See
+    /// [`Self::suspension`].
+    pub fn with_suspension(mut self, suspension: Option<Suspension>) -> Self {
+        self.suspension = suspension;
+        self
     }
 }
 
@@ -90,6 +107,7 @@ impl TryFrom<RawConversationSnapshot> for ConversationSnapshot {
             version: raw.version,
             messages: raw.messages,
             pinned: raw.pinned,
+            suspension: raw.suspension,
         })
     }
 }
@@ -116,6 +134,18 @@ mod tests {
         let s = serde_json::to_string(&snap).unwrap();
         let back: ConversationSnapshot = serde_json::from_str(&s).unwrap();
         assert_eq!(back, snap);
+    }
+
+    /// A snapshot without a suspension serializes without the field, so
+    /// payloads from before it existed and after it are the same shape.
+    #[test]
+    fn no_suspension_keeps_the_v1_shape() {
+        let snap = ConversationSnapshot::new(vec![Message::user("hi")], vec![false]).unwrap();
+        let value = serde_json::to_value(&snap).unwrap();
+        assert!(value.get("suspension").is_none());
+        let old = json!({"version": 1, "messages": value["messages"], "pinned": [false]});
+        let back: ConversationSnapshot = serde_json::from_value(old).unwrap();
+        assert_eq!(back.suspension, None);
     }
 
     #[test]

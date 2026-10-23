@@ -89,6 +89,56 @@ and this project adheres to
   The middleware contract in "Tool calls within a step" now describes
   this order instead of reserving it for a later release.
 
+- Suspend and resume a run on a deferred tool call. A gate (an
+  `on_before_tool_call` hook, typically the approval callback) can
+  return `ToolDecision::Defer { reason }` instead of answering now. The
+  run then ends with `FinishReason::Suspended`, which is neither an
+  abort nor an error, and a `Suspension` that the conversation keeps
+  (`Conversation::suspension`). Later, possibly in another process, the
+  run continues with `Conversation::resume(decisions)`, giving a
+  `ResumeDecision::Approve` or `Deny { reason }` for each deferred
+  call. Before, an approval nobody could answer left two options: wait
+  on a timeout, or `Terminate`, which shows the model a refusal nobody
+  made and forces a fresh run.
+  - With calls running one at a time, the step stops at the deferred
+    call and the calls after it wait without running their gates, so
+    none of them runs before the deferred one. In a batch of
+    concurrency-safe calls the rest of the batch still goes through its
+    gates and runs, so one suspension can hold several deferred calls.
+  - The suspension records every call of the step in the model's
+    order: answered (with its result), deferred (with the arguments its
+    gate saw, after the `before_mut` hooks) or waiting. Resuming runs
+    approved calls with those stored arguments, without their `before`
+    hooks again but with their `after` hooks; answers denied ones with
+    "Tool denied: <reason>"; takes waiting calls through their gates
+    (they may defer again); and never reruns a call that already has a
+    result. The step's results then go to the model in one user
+    message.
+  - A resumed run is a new run with its own `RunId`;
+    `RunConfig::resumed_from` names the suspended one, so
+    `on_run_finished` still fires exactly once per run. Its first step
+    makes no model request and counts as an iteration.
+  - While suspended, the history ends on the step's tool calls. This is
+    the one exception to "every `tool_use` has its `tool_result`" in
+    `new_messages`. Starting a new run fails with
+    `EngineError::Suspended`; `Conversation::abandon_suspension(reason)`
+    closes the step without a model call, answering what has no result
+    as "Tool not run: <reason>". Decisions that do not match the
+    deferred calls fail with `EngineError::Resume` before anything runs.
+    A resume that fails or is dropped keeps the suspension.
+  - `ConversationSnapshot::suspension` carries it, so a suspended
+    conversation survives a restart. The field is omitted when empty
+    and defaults to `None`, so existing version-1 snapshots load
+    unchanged.
+  - `StreamChunk::RunSuspended { run_id, suspension }` precedes the
+    `RunFinished` of a suspending run, for callers of
+    `advanced::run_chat`, which resume through `RunConfig::resume`
+    (`Resume::new` checks the decisions). `JsonTracer` logs it as
+    `run_suspended` and `TracingMiddleware` as an `ailoop.run` event.
+  - A sub-agent cannot suspend: `SubAgentTool` abandons the child's
+    suspension and returns an error result to the parent.
+  - `RunId` and `StepId` now implement `Serialize` / `Deserialize`.
+
 ### Fixed
 
 - `ToolContext::cancellation` now fires on every abort of the run, not
