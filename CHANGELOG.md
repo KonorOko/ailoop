@@ -243,12 +243,13 @@ and this project adheres to
   // Before: cancelled the caller's token, aborting the run.
   ctx.cancellation().cancel();
 
-  // After: return a Terminate from a middleware's
-  // on_before_tool_call / on_after_tool_call (the run ends with
-  // FinishReason::Aborted(ToolTerminated)), or keep a clone of the
-  // CancellationToken passed in RunOptions::cancellation and cancel
-  // that one (FinishReason::Aborted(Cancelled)).
+  // After: keep a clone of the CancellationToken passed in
+  // RunOptions::cancellation (or RunConfig::cancellation) and cancel
+  // that one; the run ends with FinishReason::Aborted(Cancelled).
   caller_token.cancel();
+  // Or, to stop before a given call runs, return
+  // ToolDecision::Terminate from a middleware's on_before_tool_call;
+  // the run ends with FinishReason::Aborted(ToolTerminated).
   ```
 
 ## [1.0.0-rc.4] — 2026-09-25
