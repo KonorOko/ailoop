@@ -139,7 +139,8 @@ and this project adheres to
     call and the calls after it wait without running their gates, so
     none of them runs before the deferred one. A call after it whose
     arguments were malformed is answered with its error right away,
-    since it can never run. In a batch of
+    since it can never run, and so is one stopped with
+    `RunControl::cancel_tool` before the run suspended. In a batch of
     concurrency-safe calls the rest of the batch still goes through its
     gates and runs, so one suspension can hold several deferred calls.
   - The suspension records every call of the step in the model's

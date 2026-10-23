@@ -751,3 +751,63 @@ async fn abort_in_after_hooks_answers_a_deferred_call_of_the_batch() {
             .starts_with("Tool not run")
     );
 }
+
+/// Cancels `target` through the run's control from the `before` hook of
+/// `on`.
+struct CancelAtGate {
+    control: ailoop::RunControl,
+    on: &'static str,
+    target: &'static str,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for CancelAtGate {
+    async fn on_before_tool_call(&self, call: &ToolCallInfo, _args: &Value) -> ToolDecision {
+        if call.call_id == self.on {
+            assert!(self.control.cancel_tool(self.target));
+        }
+        ToolDecision::Continue
+    }
+}
+
+/// A waiting call cancelled before the run suspends stays cancelled:
+/// the suspension answers it, and the resume does not run it.
+#[tokio::test]
+async fn a_waiting_call_cancelled_before_the_suspension_never_runs() {
+    let control = ailoop::RunControl::new();
+    let gate = Gate::deferring(&["delete"]);
+    let read = Probe::new("read");
+    let delete = Probe::new("delete");
+    let mut chat = Conversation::builder(ScriptedModel::new(vec![
+        calls_turn(&[("t1", "delete"), ("t2", "read")]),
+        text_turn("done"),
+    ]))
+    .tool_dyn(read.clone())
+    .tool_dyn(delete.clone())
+    .middleware(Arc::new(CancelAtGate {
+        control: control.clone(),
+        on: "t1",
+        target: "t2",
+    }))
+    .middleware(gate)
+    .build()
+    .expect("build");
+
+    chat.run_with_options("clean up", RunOptions::new().control(control))
+        .await
+        .expect("runs");
+    assert_eq!(
+        states(&chat),
+        [("t1".into(), "deferred"), ("t2".into(), "answered")]
+    );
+
+    chat.resume([("t1".into(), ResumeDecision::Approve)])
+        .await
+        .expect("resumes");
+    assert_eq!((delete.calls(), read.calls()), (1, 0));
+    assert_eq!(
+        result_text(chat.messages(), "t2").as_deref(),
+        Some("Tool not run: cancelled by the caller")
+    );
+    assert_no_orphans(chat.messages());
+}

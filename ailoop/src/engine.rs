@@ -1503,12 +1503,23 @@ fn run_engine<'a, M: CompletionModel>(
             if !deferred.is_empty() {
                 // The calls after the deferring batch never reached their
                 // gates and wait for the resume, except a call the run
-                // already rejected (malformed arguments): it is answered
-                // now, since a resume would run it with the empty
-                // arguments that stand in for the ones the model failed
-                // to produce.
+                // already rejected (malformed arguments), which a resume
+                // would run with the empty arguments that stand in for
+                // the ones the model failed to produce, and a call
+                // `cancel_tool` stopped, which the resumed run (with
+                // tokens of its own) would not know about. Both are
+                // answered now.
                 for call in pending {
-                    if let PendingCall::Rejected { id, content } = call {
+                    let answer = match call {
+                        PendingCall::Rejected { id, content } => Some((id, content)),
+                        PendingCall::Run { id, .. }
+                            if call_tokens.get(&id).is_some_and(CancellationToken::is_cancelled) =>
+                        {
+                            Some((id, cancelled_before_run()))
+                        }
+                        _ => None,
+                    };
+                    if let Some((id, content)) = answer {
                         let mut chunk = StreamChunk::tool_result(
                             run_id.clone(), step_id.clone(), id.clone(), content.clone(),
                         );
