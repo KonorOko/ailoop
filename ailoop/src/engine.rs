@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::errors::{EngineError, RunError};
@@ -86,14 +86,27 @@ struct RunGuard {
     /// called. Counted before the hook is awaited: one interrupted at
     /// an `.await` has already been told the run is over.
     closed: AtomicUsize,
+    /// The token tools see as [`ToolContext::cancellation`]. Cancelled
+    /// when the run aborts or is dropped before it ends, so work a tool
+    /// spawned stops even though only the tool future is dropped.
+    tool_cancellation: CancellationToken,
+    /// Set once the run reached its closing hooks (finished, aborted or
+    /// failed); a drop before that cancels `tool_cancellation`.
+    ended: AtomicBool,
 }
 
 impl RunGuard {
-    fn new(middlewares: Vec<Arc<dyn ChatMiddleware>>, run_id: RunId) -> Self {
+    fn new(
+        middlewares: Vec<Arc<dyn ChatMiddleware>>,
+        run_id: RunId,
+        tool_cancellation: CancellationToken,
+    ) -> Self {
         Self {
             middlewares,
             run_id,
             closed: AtomicUsize::new(0),
+            tool_cancellation,
+            ended: AtomicBool::new(false),
         }
     }
 
@@ -113,6 +126,7 @@ impl RunGuard {
     }
 
     async fn finished(&self, reason: &FinishReason, usage: &Usage, new_messages: &[Message]) {
+        self.ended.store(true, Ordering::Relaxed);
         for mw in self.pending() {
             mw.on_run_finished(&RunFinishedInfo::new(
                 &self.run_id,
@@ -130,6 +144,7 @@ impl RunGuard {
         usage: &Usage,
         partial_messages: &[Message],
     ) {
+        self.ended.store(true, Ordering::Relaxed);
         for mw in self.pending() {
             mw.on_run_error(&RunErrorInfo::new(
                 &self.run_id,
@@ -144,6 +159,9 @@ impl RunGuard {
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
+        if !self.ended.load(Ordering::Relaxed) {
+            self.tool_cancellation.cancel();
+        }
         for mw in self.pending() {
             mw.on_run_dropped(&self.run_id);
         }
@@ -163,6 +181,8 @@ async fn fire_abort_hooks(
     let middlewares = guard.middlewares();
     let run_id = &guard.run_id;
     let finish_reason = FinishReason::Aborted(reason);
+    // Tools see the abort before any closing hook runs.
+    guard.tool_cancellation.cancel();
     guard.finished(&finish_reason, &usage, &new_messages).await;
     run_finished_chunk(middlewares, run_id, finish_reason, usage, new_messages).await
 }
@@ -515,13 +535,17 @@ fn run_engine<'a, M: CompletionModel>(
     // touching the underlying `ToolRegistry`.
     let catalog = tools.catalog_arc();
     let active_snapshot = tools.snapshot_active();
-    // Mirror `RunConfig.cancellation` into a token we hand to every
-    // per-dispatch `ToolContext`. When the caller did not supply one,
-    // a fresh never-cancelled token is the right neutral value — tools
-    // that `select!` on `ctx.cancellation().cancelled()` simply pend
-    // forever. Built once outside the loop and cloned per dispatch so
-    // every tool sees the same handle.
-    let tool_cancellation = config.cancellation.clone().unwrap_or_default();
+    // The token every per-dispatch `ToolContext` gets: a child of
+    // `RunConfig.cancellation` (or a fresh token when there is none),
+    // so the caller cancelling reaches the tools, and the run can
+    // cancel it on any abort (timeout, `Terminate`, a dropped stream)
+    // without touching the caller's token. Built once outside the
+    // loop and cloned per dispatch so every tool sees the same handle.
+    let tool_cancellation = config
+        .cancellation
+        .as_ref()
+        .map(CancellationToken::child_token)
+        .unwrap_or_default();
     // Usage tools report through `ToolContext::report_usage` (e.g. a
     // sub-agent's child run). Reports land here the moment they are
     // made, so an abort that drops a tool mid-call still counts what
@@ -542,7 +566,11 @@ fn run_engine<'a, M: CompletionModel>(
         );
         // Fires `on_run_dropped` if the caller drops the stream before
         // every middleware got its closing hook.
-        let guard = RunGuard::new(config.middlewares.clone(), run_id.clone());
+        let guard = RunGuard::new(
+            config.middlewares.clone(),
+            run_id.clone(),
+            tool_cancellation.clone(),
+        );
 
         for mw in &config.middlewares {
             let action = match race_abort(
@@ -1961,5 +1989,159 @@ mod tests {
             "expected timeout abort, got {reason:?}"
         );
         assert_eq!((usage.input_tokens, usage.output_tokens), (110, 41));
+    }
+
+    /// Keeps the `ToolContext::cancellation` token of its last call,
+    /// then takes `delay` to answer.
+    struct TokenKeeper {
+        token: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+        delay: std::time::Duration,
+    }
+
+    impl TokenKeeper {
+        fn new(delay: std::time::Duration) -> Self {
+            Self {
+                token: Arc::default(),
+                delay,
+            }
+        }
+
+        fn token(&self) -> CancellationToken {
+            self.token
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("the tool should have run")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolDyn for TokenKeeper {
+        fn name(&self) -> &str {
+            "get_weather"
+        }
+        fn tool_definition(&self) -> ToolDefinition {
+            GetWeather.tool_definition()
+        }
+        async fn call(&self, _: serde_json::Value, ctx: &ToolContext) -> ToolResultContent {
+            *self.token.lock().unwrap() = Some(ctx.cancellation().clone());
+            tokio::time::sleep(self.delay).await;
+            ToolResultContent::text("sunny")
+        }
+    }
+
+    /// A run timeout cancels the token tools see, so work a tool
+    /// spawned (which outlives the dropped tool future) stops too. The
+    /// caller's own token is left alone.
+    #[tokio::test]
+    async fn run_timeout_cancels_tool_token() {
+        let model = ScriptedModel::new([weather_call_turn(tokens(1, 1)), end_turn(tokens(1, 1))]);
+        let tool = Arc::new(TokenKeeper::new(std::time::Duration::from_secs(60)));
+        let caller = CancellationToken::new();
+        let mut config = RunConfig::default();
+        config.timeout = Some(std::time::Duration::from_millis(50));
+        config.cancellation = Some(caller.clone());
+        let (reason, _) = run_finished(&model, tool.clone(), config).await;
+        assert!(
+            matches!(reason, FinishReason::Aborted(AbortReason::Timeout(_))),
+            "expected timeout abort, got {reason:?}"
+        );
+        assert!(tool.token().is_cancelled(), "tools must see the timeout");
+        assert!(!caller.is_cancelled(), "the caller's token is not touched");
+    }
+
+    /// Cancelling the caller's token still reaches the tools.
+    #[tokio::test]
+    async fn caller_cancellation_reaches_tool_token() {
+        let model = ScriptedModel::new([weather_call_turn(tokens(1, 1)), end_turn(tokens(1, 1))]);
+        let tool = Arc::new(TokenKeeper::new(std::time::Duration::from_secs(60)));
+        let caller = CancellationToken::new();
+        let mut config = RunConfig::default();
+        config.cancellation = Some(caller.clone());
+        let canceller = caller.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+        let (reason, _) = run_finished(&model, tool.clone(), config).await;
+        assert!(
+            matches!(reason, FinishReason::Aborted(AbortReason::Cancelled)),
+            "expected cancel abort, got {reason:?}"
+        );
+        assert!(tool.token().is_cancelled());
+    }
+
+    /// A tool's `Terminate` ends the run, and work an earlier call
+    /// spawned is told so.
+    #[tokio::test]
+    async fn tool_terminate_cancels_tool_token() {
+        struct TerminateSecondCall(AtomicUsize);
+
+        #[async_trait::async_trait]
+        impl ChatMiddleware for TerminateSecondCall {
+            async fn on_before_tool_call(&self, _: &ToolCallInfo, _: &Value) -> ToolDecision {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ToolDecision::Continue
+                } else {
+                    ToolDecision::Terminate {
+                        reason: "policy".into(),
+                    }
+                }
+            }
+        }
+
+        let model = ScriptedModel::new([
+            weather_call_turn(tokens(1, 1)),
+            weather_call_turn(tokens(1, 1)),
+        ]);
+        let tool = Arc::new(TokenKeeper::new(std::time::Duration::ZERO));
+        let mut config = RunConfig::default();
+        config.middlewares = vec![Arc::new(TerminateSecondCall(AtomicUsize::new(0)))];
+        let (reason, _) = run_finished(&model, tool.clone(), config).await;
+        assert!(
+            matches!(
+                reason,
+                FinishReason::Aborted(AbortReason::ToolTerminated { .. })
+            ),
+            "expected tool terminate, got {reason:?}"
+        );
+        assert!(tool.token().is_cancelled());
+    }
+
+    /// A run that finishes normally leaves the token alone.
+    #[tokio::test]
+    async fn finished_run_leaves_tool_token_alone() {
+        let model = ScriptedModel::new([weather_call_turn(tokens(1, 1)), end_turn(tokens(1, 1))]);
+        let tool = Arc::new(TokenKeeper::new(std::time::Duration::ZERO));
+        let (reason, _) = run_finished(&model, tool.clone(), RunConfig::default()).await;
+        assert!(matches!(reason, FinishReason::EndTurn));
+        assert!(!tool.token().is_cancelled());
+    }
+
+    /// Dropping the stream while a tool runs drops the tool future;
+    /// the token tells whatever it spawned.
+    #[tokio::test]
+    async fn dropping_the_stream_cancels_tool_token() {
+        let model = ScriptedModel::new([weather_call_turn(tokens(1, 1)), end_turn(tokens(1, 1))]);
+        let tool = Arc::new(TokenKeeper::new(std::time::Duration::from_secs(60)));
+        let mut registry = ToolRegistry::new();
+        registry.register(tool.clone()).unwrap();
+        let mut stream = run_chat(
+            &model,
+            vec![Message::user("hi")],
+            &registry,
+            RunConfig::default(),
+        )
+        .await
+        .expect("run_chat should start");
+        // Poll until the tool has started, then drop the stream.
+        let poll = async {
+            while let Some(chunk) = stream.next().await {
+                chunk.expect("no error before the tool runs");
+            }
+        };
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), poll).await;
+        drop(stream);
+        assert!(tool.token().is_cancelled());
     }
 }
