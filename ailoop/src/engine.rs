@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -185,6 +186,10 @@ impl RunGuard {
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
+        // However the run ended, none of its calls can be cancelled now.
+        if let Some(control) = &self.control {
+            control.clear_calls();
+        }
         if !self.ended.load(Ordering::Relaxed) {
             self.tool_cancellation.cancel();
             if let Some(control) = &self.control {
@@ -288,6 +293,21 @@ async fn abort_step(
     let new_messages = run_msgs.finish();
     chunks.push(fire_abort_hooks(guard, reason, usage, new_messages).await);
     chunks
+}
+
+/// The result recorded for a call `RunControl::cancel_tool` stopped
+/// before the tool was invoked.
+fn cancelled_before_run() -> ToolResultContent {
+    ToolResultContent::error("Tool not run: cancelled by the caller")
+}
+
+/// The result recorded for a call `RunControl::cancel_tool` stopped
+/// while the tool ran. It may have had its effect already, so the text
+/// does not claim otherwise.
+fn cancelled_while_running() -> ToolResultContent {
+    ToolResultContent::error(
+        "Tool cancelled by the caller while running; it may have partly completed",
+    )
 }
 
 /// The result recorded for a call the run was aborted before running.
@@ -918,6 +938,25 @@ fn run_engine<'a, M: CompletionModel>(
             // the model's order, and on abort every call answered:
             // completed calls keep their result, the rest get an error
             // from `abort_step`.
+            //
+            // Each call gets its own token, a child of the run's, so
+            // `RunControl::cancel_tool` stops one call without touching
+            // its siblings. Every call of the step is registered up
+            // front, so one still waiting its turn can be cancelled too;
+            // each is unregistered once it has its result, and the
+            // `RunGuard` clears what is left when the run ends.
+            let call_tokens: HashMap<String, CancellationToken> = tool_calls
+                .iter()
+                .filter_map(|call| match call {
+                    PendingCall::Run { id, .. } => Some((id.clone(), tool_cancellation.child_token())),
+                    PendingCall::Rejected { .. } => None,
+                })
+                .collect();
+            if let Some(control) = &config.control {
+                for (id, token) in &call_tokens {
+                    control.register_call(id.clone(), token.clone());
+                }
+            }
             let mut tools_result = Vec::new();
             let mut pending = tool_calls.into_iter();
             while let Some(call) = pending.next() {
@@ -936,6 +975,13 @@ fn run_engine<'a, M: CompletionModel>(
                         let content = unavailable_tool(&name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()));
                         PendingCall::Rejected { id, content }
                     }
+                    // Cancelled through `RunControl::cancel_tool` before
+                    // its turn came: like a rejection, no hook fires.
+                    PendingCall::Run { id, .. }
+                        if call_tokens.get(&id).is_some_and(CancellationToken::is_cancelled) =>
+                    {
+                        PendingCall::Rejected { id, content: cancelled_before_run() }
+                    }
                     call => call,
                 };
                 let (id, name, mut args) = match call {
@@ -952,10 +998,15 @@ fn run_engine<'a, M: CompletionModel>(
                         for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
                         for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
                         yield chunk;
+                        if let Some(control) = &config.control { control.unregister_call(&id); }
                         tools_result.push(UserBlock::tool_result(id, content));
                         continue;
                     }
                 };
+                let call_token = call_tokens
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| tool_cancellation.child_token());
                 let call = ToolCallInfo::new(run_id.clone(), step_id.clone(), id.clone(), name.clone());
 
                 // Input-transform phase: every `_mut` runs before any
@@ -999,27 +1050,41 @@ fn run_engine<'a, M: CompletionModel>(
                 };
 
                 let mut content = match decision {
+                    // Cancelled while its `before` hooks ran: the tool is
+                    // not invoked, but the `after` hooks still pair up.
+                    ToolDecision::Continue if call_token.is_cancelled() => cancelled_before_run(),
                     ToolDecision::Continue => {
                         let ctx = ToolContext::new(
                             run_id.clone(),
                             step_id.clone(),
                             id.clone(),
                             ToolActivation::new(catalog.clone(), active_snapshot.clone()),
-                            tool_cancellation.clone(),
+                            call_token.clone(),
                         )
                         .with_usage_sink(delegated.clone());
+                        // The call's own token stops just this call: the
+                        // tool future is dropped even if the tool ignores
+                        // the token. A run abort fires that token too, but
+                        // `race_abort` checks the run's abort first.
                         let call_result = race_abort(
-                            tools.tool_call_with_ctx(&name, args.clone(), &ctx),
+                            async {
+                                tokio::select! {
+                                    biased;
+                                    _ = call_token.cancelled() => None,
+                                    result = tools.tool_call_with_ctx(&name, args.clone(), &ctx) => Some(result),
+                                }
+                            },
                             &mut abort_fut,
                         ).await;
                         match call_result {
-                            Ok(Ok(content)) => content,
+                            Ok(None) => cancelled_while_running(),
+                            Ok(Some(Ok(content))) => content,
                             // Unreachable while the active set stays a subset
                             // of the catalog; kept in-band all the same.
-                            Ok(Err(ToolRegistryError::NotFound(_))) => {
+                            Ok(Some(Err(ToolRegistryError::NotFound(_)))) => {
                                 unavailable_tool(&name, &ToolActivation::new(catalog.clone(), active_snapshot.clone()))
                             },
-                            Ok(Err(other)) => bail_with_hooks!(Err(EngineError::Tool(other)), &guard, usage_run + delegated.total(), run_msgs)?,
+                            Ok(Some(Err(other))) => bail_with_hooks!(Err(EngineError::Tool(other)), &guard, usage_run + delegated.total(), run_msgs)?,
                             Err(reason) => {
                                 let current = PendingCall::Run { id, name, args };
                                 let chunks = abort_step(
@@ -1098,6 +1163,7 @@ fn run_engine<'a, M: CompletionModel>(
                 for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
                 yield chunk;
 
+                if let Some(control) = &config.control { control.unregister_call(&id); }
                 tools_result.push(UserBlock::tool_result(id, content));
             }
 
