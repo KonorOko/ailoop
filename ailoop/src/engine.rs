@@ -2640,9 +2640,10 @@ mod tests {
     }
 
     /// Keeps the `ToolContext::cancellation` token of its last call,
-    /// then takes `delay` to answer.
+    /// signals that it started, then takes `delay` to answer.
     struct TokenKeeper {
         token: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+        started: Arc<tokio::sync::Notify>,
         delay: std::time::Duration,
     }
 
@@ -2650,6 +2651,7 @@ mod tests {
         fn new(delay: std::time::Duration) -> Self {
             Self {
                 token: Arc::default(),
+                started: Arc::default(),
                 delay,
             }
         }
@@ -2673,6 +2675,7 @@ mod tests {
         }
         async fn call(&self, _: serde_json::Value, ctx: &ToolContext) -> ToolResultContent {
             *self.token.lock().unwrap() = Some(ctx.cancellation().clone());
+            self.started.notify_one();
             tokio::time::sleep(self.delay).await;
             ToolResultContent::text("sunny")
         }
@@ -2680,8 +2683,9 @@ mod tests {
 
     /// A run timeout cancels the token tools see, so work a tool
     /// spawned (which outlives the dropped tool future) stops too. The
-    /// caller's own token is left alone.
-    #[tokio::test]
+    /// caller's own token is left alone. Paused time: the timeout
+    /// elapses only once the tool is waiting, however slow the machine.
+    #[tokio::test(start_paused = true)]
     async fn run_timeout_cancels_tool_token() {
         let model = ScriptedModel::new([weather_call_turn(tokens(1, 1)), end_turn(tokens(1, 1))]);
         let tool = Arc::new(TokenKeeper::new(std::time::Duration::from_secs(60)));
@@ -2706,9 +2710,9 @@ mod tests {
         let caller = CancellationToken::new();
         let mut config = RunConfig::default();
         config.cancellation = Some(caller.clone());
-        let canceller = caller.clone();
+        let (canceller, started) = (caller.clone(), tool.started.clone());
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            started.notified().await;
             canceller.cancel();
         });
         let (reason, _) = run_finished(&model, tool.clone(), config).await;
@@ -2783,12 +2787,15 @@ mod tests {
         .await
         .expect("run_chat should start");
         // Poll until the tool has started, then drop the stream.
-        let poll = async {
-            while let Some(chunk) = stream.next().await {
-                chunk.expect("no error before the tool runs");
+        loop {
+            tokio::select! {
+                biased;
+                _ = tool.started.notified() => break,
+                chunk = stream.next() => {
+                    chunk.expect("the tool starts before the run ends").expect("no error");
+                }
             }
-        };
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), poll).await;
+        }
         drop(stream);
         assert!(tool.token().is_cancelled());
     }
