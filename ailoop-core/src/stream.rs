@@ -17,7 +17,7 @@ use crate::{Message, RunId, StepId, ToolResultContent};
 /// 2. **Engine lifecycle events**, synthesized by the engine itself
 ///    around the provider stream — `RunStarted`, `StepStarted`,
 ///    `StepFinished`, `ToolResult`, `RunFinished`, `HistoryCompacted`,
-///    `InboundDelivered`.
+///    `InboundDelivered`, `RunSuspended`.
 ///
 /// Every chunk reaches every [`crate::ChatMiddleware::on_chunk`]; the
 /// engine also drives its own assistant-history reconstruction off
@@ -255,6 +255,18 @@ pub enum StreamChunk {
         /// `"summarize"`.
         strategy: &'static str,
     },
+    /// The run is suspending on deferred tool calls
+    /// ([`crate::ToolDecision::Defer`]). Emitted once, right before the
+    /// `RunFinished` that carries [`FinishReason::Suspended`]. Keep
+    /// `suspension` with the run's `new_messages`: together they are
+    /// what a resumed run continues from.
+    #[non_exhaustive]
+    RunSuspended {
+        /// Run that is suspending.
+        run_id: RunId,
+        /// The step it stopped in and its calls.
+        suspension: crate::Suspension,
+    },
     /// Messages queued on the run's [`crate::RunControl`] entered the
     /// run when a turn closed. Emitted after that turn's `ToolResult`
     /// chunks and before its `StepFinished`, once the blocks are part
@@ -316,6 +328,11 @@ impl StreamChunk {
             call_id: call_id.into(),
             content,
         }
+    }
+
+    /// Build a [`StreamChunk::RunSuspended`].
+    pub fn run_suspended(run_id: RunId, suspension: crate::Suspension) -> Self {
+        Self::RunSuspended { run_id, suspension }
     }
 
     /// Build a [`StreamChunk::InboundDelivered`].
@@ -426,6 +443,12 @@ pub enum FinishReason {
     /// the *only* finish reason ever surfaced for caller-initiated
     /// stops — `Err` results are reserved for transport errors.
     Aborted(AbortReason),
+    /// A gate returned [`crate::ToolDecision::Defer`]: the run stopped
+    /// in the middle of a step, waiting for decisions on the deferred
+    /// calls. Not an abort and not an error. The stream carries the
+    /// state needed to resume in a [`StreamChunk::RunSuspended`] right
+    /// before `RunFinished`; see [`crate::Suspension`].
+    Suspended,
     /// Provider reported a finish reason the adapter did not map to
     /// one of the typed variants. Treat as terminal.
     Other(String),

@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Unique identifier for a single run of the engine.
@@ -13,7 +14,8 @@ use uuid::Uuid;
 /// [`Uuid::new_v4`] when [`crate::RunConfig::run_id`] is `None`; callers
 /// pass an existing `RunId` when an outer system already has its own
 /// trace identifier to bind to.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct RunId(Uuid);
 
 impl RunId {
@@ -62,7 +64,8 @@ impl fmt::Display for RunId {
 /// [`crate::StreamChunk::StepStarted`] / [`crate::StreamChunk::StepFinished`]
 /// so middlewares can scope per-step state (e.g. token counts, retries)
 /// without tracking iteration numbers themselves.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct StepId(Uuid);
 
 impl StepId {

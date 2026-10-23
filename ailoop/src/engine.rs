@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use crate::errors::{EngineError, RunError};
 use ailoop_core::{
-    AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
-    ContinueDecision, FinishReason, HookAction, Inbound, Message, RunConfig, RunControl,
-    RunErrorInfo, RunFinishedInfo, RunId, RunStartInfo, StepId, StepInfo, StreamChunk,
-    ToolCallInfo, ToolDecision, ToolResultContent, TurnEndInfo, Usage, UserBlock,
+    AbortReason, AssistantBlock, CallState, CancellationToken, ChatMiddleware, ChatRequest,
+    CompletionModel, ContinueDecision, FinishReason, HookAction, Inbound, Message, Resume,
+    ResumeDecision, RunConfig, RunControl, RunErrorInfo, RunFinishedInfo, RunId, RunStartInfo,
+    StepId, StepInfo, StreamChunk, SuspendedCall, Suspension, ToolCallInfo, ToolDecision,
+    ToolResultContent, TurnEndInfo, Usage, UserBlock,
 };
 use ailoop_history::{CompactionError, CompactionStats, History};
 use ailoop_tools::{ToolActivation, ToolContext, ToolRegistry, ToolRegistryError, UsageSink};
@@ -271,8 +272,15 @@ async fn abort_step(
     let mut chunks = Vec::new();
     for call in unanswered {
         let (id, content) = match call {
-            PendingCall::Run { id, .. } => (id, not_run_result(&reason)),
+            PendingCall::Run { id, .. } | PendingCall::Decided { id, .. } => {
+                (id, not_run_result(&reason))
+            }
             PendingCall::Rejected { id, content } => (id, content),
+            // Its chunk went out in the suspended run.
+            PendingCall::Answered { id, content } => {
+                tools_result.push(UserBlock::tool_result(id, content));
+                continue;
+            }
         };
         let mut chunk =
             StreamChunk::tool_result(run_id.clone(), step_id.clone(), id.clone(), content.clone());
@@ -293,6 +301,11 @@ async fn abort_step(
     let new_messages = run_msgs.finish();
     chunks.push(fire_abort_hooks(guard, reason, usage, new_messages).await);
     chunks
+}
+
+/// The result recorded for a deferred call denied on resume.
+fn denied_result(reason: &str) -> ToolResultContent {
+    ToolResultContent::error(format!("Tool denied: {reason}"))
 }
 
 /// The result recorded for a call `RunControl::cancel_tool` stopped
@@ -511,6 +524,14 @@ async fn history_compacted_chunk(
 /// of the model's calls. See
 /// [Tool calls within a step](ChatMiddleware#tool-calls-within-a-step).
 ///
+/// Every `tool_use` in `RunFinished.new_messages` has its `tool_result`,
+/// with one exception: a run that suspends on a deferred call
+/// ([`FinishReason::Suspended`]) ends on its step's assistant message,
+/// and the step's results travel in the [`StreamChunk::RunSuspended`]
+/// chunk before `RunFinished`. Keep the two together; resume by passing
+/// the history and a [`Resume`](ailoop_core::Resume) in
+/// `RunConfig::resume`.
+///
 /// [`Conversation::run`]: crate::Conversation::run
 /// [`Conversation::stream`]: crate::Conversation::stream
 /// [`ConversationBuilder::compact_between_iterations`]: crate::ConversationBuilder::compact_between_iterations
@@ -568,10 +589,16 @@ fn run_engine<'a, M: CompletionModel>(
     model: &'a M,
     context: RunContext<'a>,
     tools: &'a ToolRegistry,
-    config: RunConfig,
+    mut config: RunConfig,
     is_overflow: fn(&M::Error) -> bool,
     usage_parent: Option<UsageSink>,
 ) -> EngineStream<'a, M::Error> {
+    // A resumed run starts by finishing the suspended step instead of
+    // asking the model; `resumed_from` lets observers correlate it.
+    let mut resuming = config.resume.take();
+    if let Some(resume) = &resuming {
+        config.resumed_from = Some(resume.suspension.run_id.clone());
+    }
     let mut run_msgs = RunMessages {
         context,
         new_messages: Vec::new(),
@@ -722,6 +749,34 @@ fn run_engine<'a, M: CompletionModel>(
             let mut reasoning_buf = String::new();
 
             let mut tool_calls = Vec::new();
+            // Every call of the step in the model's order, with its
+            // original arguments: what a suspension records.
+            let mut step_calls: Vec<(String, String, Value)> = Vec::new();
+
+            if let Some(resume) = resuming.take() {
+                // Finishing a suspended step: its assistant message is
+                // already in the history, so there is no request. Its
+                // calls go through the dispatch below as recorded:
+                // answered ones keep their result, deferred ones carry
+                // their decision, waiting ones take their gates.
+                finish_reason = FinishReason::ToolUse;
+                let Resume { suspension, mut decisions, .. } = resume;
+                for call in suspension.calls {
+                    step_calls.push((call.call_id.clone(), call.name.clone(), call.args.clone()));
+                    let SuspendedCall { call_id: id, name, args, state, .. } = call;
+                    tool_calls.push(match state {
+                        CallState::Answered { content } => PendingCall::Answered { id, content },
+                        CallState::Deferred { .. } => {
+                            // `Resume::new` checked every deferred call has one.
+                            let decision = decisions
+                                .remove(&id)
+                                .unwrap_or_else(|| ResumeDecision::deny("no decision was given"));
+                            PendingCall::Decided { id, name, args, decision }
+                        }
+                        _ => PendingCall::Run { id, name, args },
+                    });
+                }
+            } else {
 
             // At most one overflow recovery per iteration: the request
             // is rebuilt from the compacted context and every
@@ -871,6 +926,7 @@ fn run_engine<'a, M: CompletionModel>(
                     },
                     StreamChunk::ToolCallFinished { call_id: id, name, args } => {
                         assistant_blocks.push(AssistantBlock::tool_call(id.clone(), name.clone(), args.clone()));
+                        step_calls.push((id.clone(), name.clone(), args.clone()));
                         tool_calls.push(PendingCall::Run { id: id.clone(), name: name.clone(), args: args.clone() })
                     },
                     StreamChunk::ToolCallMalformed { call_id: id, name, raw, error } => {
@@ -879,6 +935,7 @@ fn run_engine<'a, M: CompletionModel>(
                         assistant_blocks.push(AssistantBlock::tool_call(
                             id.clone(), name.clone(), Value::Object(Default::default()),
                         ));
+                        step_calls.push((id.clone(), name.clone(), Value::Object(Default::default())));
                         tool_calls.push(PendingCall::Rejected {
                             id: id.clone(),
                             content: malformed_args_result(name, raw, error),
@@ -929,6 +986,7 @@ fn run_engine<'a, M: CompletionModel>(
             if !assistant_blocks.is_empty() {
                 run_msgs.push(Message::Assistant { blocks: assistant_blocks });
             }
+            }
 
             // Calls go through in batches, in the model's order. With
             // `tool_concurrency` above 1, a run of consecutive calls to
@@ -961,8 +1019,10 @@ fn run_engine<'a, M: CompletionModel>(
             let call_tokens: HashMap<String, CancellationToken> = tool_calls
                 .iter()
                 .filter_map(|call| match call {
-                    PendingCall::Run { id, .. } => Some((id.clone(), tool_cancellation.child_token())),
-                    PendingCall::Rejected { .. } => None,
+                    PendingCall::Run { id, .. } | PendingCall::Decided { id, .. } => {
+                        Some((id.clone(), tool_cancellation.child_token()))
+                    }
+                    PendingCall::Rejected { .. } | PendingCall::Answered { .. } => None,
                 })
                 .collect();
             if let Some(control) = &config.control {
@@ -975,11 +1035,18 @@ fn run_engine<'a, M: CompletionModel>(
                 PendingCall::Run { name, .. } => {
                     concurrency > 1 && catalog.get(name).is_some_and(|tool| tool.concurrency_safe())
                 }
-                PendingCall::Rejected { .. } => false,
+                _ => false,
             };
+            // Deferred calls of the step, by id: the arguments their gate
+            // saw and the reason it gave. Once a batch defers a call, the
+            // step stops after that batch and the run suspends.
+            let mut deferred: HashMap<String, (Value, String)> = HashMap::new();
             let mut tools_result = Vec::new();
             let mut pending = tool_calls.into_iter().peekable();
             while let Some(first) = pending.next() {
+                if !deferred.is_empty() {
+                    break;
+                }
                 let mut batch = Vec::new();
                 if batchable(&first) {
                     while let Some(next) = pending.next_if(|c| batchable(c)) {
@@ -1021,7 +1088,30 @@ fn run_engine<'a, M: CompletionModel>(
                         // Nothing runs, so no tool hook fires: the synthesized
                         // error only goes out as a ToolResult chunk.
                         PendingCall::Rejected { id, content } => {
-                            slots.push(Slot::Answered { id, content });
+                            slots.push(Slot::Answered { id, content, emit: true });
+                            continue;
+                        }
+                        // Answered in the suspended run, which already
+                        // emitted its result.
+                        PendingCall::Answered { id, content } => {
+                            slots.push(Slot::Answered { id, content, emit: false });
+                            continue;
+                        }
+                        // Decided on resume: its gates ran in the suspended
+                        // run, so they do not run again.
+                        PendingCall::Decided { id, name, args, decision } => {
+                            let token = call_tokens
+                                .get(&id)
+                                .cloned()
+                                .unwrap_or_else(|| tool_cancellation.child_token());
+                            let call = ToolCallInfo::new(run_id.clone(), step_id.clone(), id.clone(), name.clone());
+                            let content = match decision {
+                                ResumeDecision::Approve if token.is_cancelled() => Some(cancelled_before_run()),
+                                ResumeDecision::Approve => None,
+                                ResumeDecision::Deny { reason } => Some(denied_result(&reason)),
+                                _ => Some(ToolResultContent::error("unsupported ResumeDecision variant")),
+                            };
+                            slots.push(Slot::Gated { id, name, args, call, token, content });
                             continue;
                         }
                     };
@@ -1072,6 +1162,11 @@ fn run_engine<'a, M: CompletionModel>(
                             ).await;
                             for chunk in chunks { yield chunk; }
                             return;
+                        }
+                        Ok(ToolDecision::Defer {reason}) => {
+                            deferred.insert(id.clone(), (args.clone(), reason));
+                            slots.push(Slot::Deferred { id, name, args });
+                            continue;
                         }
                         Ok(_) => Some(ToolResultContent::error("unsupported ToolDecision variant")),
                         Err(reason) => {
@@ -1151,8 +1246,10 @@ fn run_engine<'a, M: CompletionModel>(
                 // Phase 3: `after` hooks and results, in the model's order.
                 let mut answering = slots.into_iter();
                 while let Some(slot) = answering.next() {
-                    let (id, content) = match slot {
-                        Slot::Answered { id, content } => (id, content),
+                    let (id, content, emit) = match slot {
+                        Slot::Answered { id, content, emit } => (id, content, emit),
+                        // No result yet: it waits in the suspension.
+                        Slot::Deferred { .. } => continue,
                         Slot::Gated { id, args, call, content, .. } => {
                             let mut content = content.unwrap_or_else(|| {
                                 ToolResultContent::error("Tool not run: no result was recorded")
@@ -1196,23 +1293,72 @@ fn run_engine<'a, M: CompletionModel>(
                                 for chunk in chunks { yield chunk; }
                                 return;
                             }
-                            (id, content)
+                            (id, content, true)
                         }
                     };
 
-                    let mut chunk = StreamChunk::tool_result(
-                        run_id.clone(),
-                        step_id.clone(),
-                        id.clone(),
-                        content.clone(),
-                    );
-                    for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
-                    for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
-                    yield chunk;
+                    if emit {
+                        let mut chunk = StreamChunk::tool_result(
+                            run_id.clone(),
+                            step_id.clone(),
+                            id.clone(),
+                            content.clone(),
+                        );
+                        for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
+                        for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                        yield chunk;
+                    }
 
                     if let Some(control) = &config.control { control.unregister_call(&id); }
                     tools_result.push(UserBlock::tool_result(id, content));
                 }
+            }
+
+            // A gate deferred a call: the run suspends mid-step. The
+            // step's assistant message stays in the run's messages, its
+            // results go into the suspension instead (providers need them
+            // all in the one user message after it), and the inbox is not
+            // drained: the resumed run closes the step.
+            if !deferred.is_empty() {
+                let mut answered: HashMap<String, ToolResultContent> = tools_result
+                    .into_iter()
+                    .filter_map(|block| match block {
+                        UserBlock::ToolResult { call_id, content, .. } => Some((call_id, content)),
+                        _ => None,
+                    })
+                    .collect();
+                let calls = step_calls
+                    .into_iter()
+                    .map(|(id, name, args)| {
+                        if let Some((args, reason)) = deferred.remove(&id) {
+                            SuspendedCall::new(id, name, args, CallState::Deferred { reason })
+                        } else if let Some(content) = answered.remove(&id) {
+                            SuspendedCall::new(id, name, args, CallState::Answered { content })
+                        } else {
+                            SuspendedCall::new(id, name, args, CallState::Waiting)
+                        }
+                    })
+                    .collect();
+                let suspension = Suspension::new(run_id.clone(), step_id.clone(), calls);
+                let new_messages = run_msgs.finish();
+                let usage_total = usage_run + delegated.total();
+
+                let mut chunk = StreamChunk::run_suspended(run_id.clone(), suspension);
+                for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
+                for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                yield chunk;
+
+                guard.finished(&FinishReason::Suspended, &usage_total, &new_messages).await;
+                let chunk = run_finished_chunk(
+                    &config.middlewares,
+                    &run_id,
+                    FinishReason::Suspended,
+                    usage_total,
+                    new_messages,
+                )
+                .await;
+                yield chunk;
+                return;
             }
 
             // Messages queued on the run's `RunControl` enter here, once
@@ -1323,6 +1469,15 @@ enum Slot {
     Answered {
         id: String,
         content: ToolResultContent,
+        /// Whether its `ToolResult` chunk still has to go out (not when
+        /// the suspended run already emitted it).
+        emit: bool,
+    },
+    /// A gate returned `Defer`; it waits in the run's suspension.
+    Deferred {
+        id: String,
+        name: String,
+        args: Value,
     },
     /// Through its `before` hooks. `content` is set up front when the
     /// tool will not be invoked (skipped, or cancelled during its
@@ -1342,8 +1497,15 @@ impl Slot {
     /// result, a gated one is answered as not run.
     fn into_unanswered(self) -> PendingCall {
         match self {
-            Slot::Answered { id, content } => PendingCall::Rejected { id, content },
-            Slot::Gated { id, name, args, .. } => PendingCall::Run { id, name, args },
+            Slot::Answered {
+                id,
+                content,
+                emit: true,
+            } => PendingCall::Rejected { id, content },
+            Slot::Answered { id, content, .. } => PendingCall::Answered { id, content },
+            Slot::Gated { id, name, args, .. } | Slot::Deferred { id, name, args } => {
+                PendingCall::Run { id, name, args }
+            }
         }
     }
 }
@@ -1362,6 +1524,20 @@ enum PendingCall {
     Rejected {
         id: String,
         content: ToolResultContent,
+    },
+    /// Resuming: answered in the suspended run. Keeps its result; its
+    /// `ToolResult` chunk went out there.
+    Answered {
+        id: String,
+        content: ToolResultContent,
+    },
+    /// Resuming: deferred in the suspended run, now decided. Skips its
+    /// gates, which ran there.
+    Decided {
+        id: String,
+        name: String,
+        args: Value,
+        decision: ResumeDecision,
     },
 }
 

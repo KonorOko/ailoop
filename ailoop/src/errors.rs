@@ -80,6 +80,21 @@ pub enum EngineError<E: std::error::Error> {
     /// [`CompactionError::NotEnoughHistory`]: ailoop_history::CompactionError::NotEnoughHistory
     #[error("prompt does not fit the context window even after compaction: {0}")]
     ContextOverflow(E),
+
+    /// The [`Conversation`](crate::Conversation) has a suspended run
+    /// ([`FinishReason::Suspended`](ailoop_core::FinishReason::Suspended)):
+    /// its history ends on tool calls waiting for decisions, so no new
+    /// run can start. Resume it with
+    /// [`Conversation::resume`](crate::Conversation::resume), or close
+    /// the step with
+    /// [`Conversation::abandon_suspension`](crate::Conversation::abandon_suspension).
+    #[error("the conversation has a suspended run; resume or abandon it first")]
+    Suspended,
+
+    /// The decisions given to resume a suspended run do not match its
+    /// deferred calls, or there is nothing to resume. Nothing ran.
+    #[error("cannot resume: {0}")]
+    Resume(#[from] ailoop_core::ResumeError),
 }
 
 /// A run that ended in `Err`: the cause ([`EngineError`]), what the

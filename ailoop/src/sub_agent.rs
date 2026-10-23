@@ -494,6 +494,13 @@ fn budget_label(reason: &AbortReason) -> &'static str {
 /// history would take them in lock order rather than the model's. With
 /// [`ConversationBuilder::tool_concurrency`](crate::ConversationBuilder::tool_concurrency)
 /// a call to it therefore runs alone.
+///
+/// A sub-agent cannot suspend on a deferred tool call
+/// ([`ToolDecision::Defer`](ailoop_core::ToolDecision::Defer)): nobody
+/// outside the parent run sees the child's suspension. If the child's
+/// run suspends, the wrapper abandons the suspension (the child's
+/// deferred calls are answered as not run, so the child stays usable)
+/// and the parent receives a `"sub-agent error: …"` result.
 pub struct SubAgentTool<M: CompletionModel> {
     name: String,
     description: String,
@@ -677,6 +684,14 @@ where
             Ok(outcome) => {
                 let text = outcome.final_text.unwrap_or_default();
                 match (outcome.finish_reason, wrapped_up) {
+                    // A child cannot wait for a decision the parent's
+                    // caller never sees: close the step so the child
+                    // stays usable, and report it to the parent.
+                    (FinishReason::Suspended, _) => {
+                        let _ = conv.abandon_suspension(SUB_AGENT_DEFER);
+                        ToolResultContent::text(format!("sub-agent error: {SUB_AGENT_DEFER}"))
+                            .with_is_error(true)
+                    }
                     (FinishReason::Aborted(reason), _) if text.is_empty() => {
                         ToolResultContent::text(format!("sub-agent aborted: {reason}"))
                             .with_is_error(true)
@@ -701,6 +716,11 @@ where
         }
     }
 }
+
+/// What a sub-agent whose run suspended reports, and what its deferred
+/// calls are answered with.
+const SUB_AGENT_DEFER: &str =
+    "sub-agent paused for an approval; sub-agents cannot defer tool calls";
 
 #[cfg(test)]
 mod tests {
