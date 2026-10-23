@@ -137,6 +137,20 @@ impl ChatMiddleware for TracingMiddleware {
                     "history compacted",
                 );
             }
+            StreamChunk::InboundDelivered {
+                run_id,
+                step_id,
+                ids,
+                ..
+            } => {
+                tracing::info!(
+                    target: "ailoop.step",
+                    run_id = %run_id,
+                    step_id = %step_id,
+                    count = ids.len(),
+                    "inbound messages delivered",
+                );
+            }
             StreamChunk::StepFinished {
                 run_id,
                 step_id,

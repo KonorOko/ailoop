@@ -7,9 +7,9 @@ use std::time::Duration;
 use crate::errors::{EngineError, RunError};
 use ailoop_core::{
     AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
-    ContinueDecision, FinishReason, HookAction, Message, RunConfig, RunErrorInfo, RunFinishedInfo,
-    RunId, RunStartInfo, StepId, StepInfo, StreamChunk, ToolCallInfo, ToolDecision,
-    ToolResultContent, TurnEndInfo, Usage, UserBlock,
+    ContinueDecision, FinishReason, HookAction, Inbound, Message, RunConfig, RunControl,
+    RunErrorInfo, RunFinishedInfo, RunId, RunStartInfo, StepId, StepInfo, StreamChunk,
+    ToolCallInfo, ToolDecision, ToolResultContent, TurnEndInfo, Usage, UserBlock,
 };
 use ailoop_history::{CompactionError, CompactionStats, History};
 use ailoop_tools::{ToolActivation, ToolContext, ToolRegistry, ToolRegistryError, UsageSink};
@@ -91,8 +91,15 @@ struct RunGuard {
     /// spawned stops even though only the tool future is dropped.
     tool_cancellation: CancellationToken,
     /// Set once the run reached its closing hooks (finished, aborted or
-    /// failed); a drop before that cancels `tool_cancellation`.
+    /// failed); a drop before that cancels `tool_cancellation` and
+    /// hands `taken` back to `control`.
     ended: AtomicBool,
+    /// The run's [`RunControl`], if any.
+    control: Option<RunControl>,
+    /// Messages the run took from `control`. They live only in the
+    /// run's messages, which a dropped run never commits, so a drop
+    /// puts them back in the queue.
+    taken: std::sync::Mutex<Vec<Inbound>>,
 }
 
 impl RunGuard {
@@ -100,6 +107,7 @@ impl RunGuard {
         middlewares: Vec<Arc<dyn ChatMiddleware>>,
         run_id: RunId,
         tool_cancellation: CancellationToken,
+        control: Option<RunControl>,
     ) -> Self {
         Self {
             middlewares,
@@ -107,7 +115,25 @@ impl RunGuard {
             closed: AtomicUsize::new(0),
             tool_cancellation,
             ended: AtomicBool::new(false),
+            control,
+            taken: std::sync::Mutex::default(),
         }
+    }
+
+    /// Drains the run's [`RunControl`] queue, remembering what it took
+    /// so a drop can put it back. Empty without a control.
+    fn take_inbound(&self) -> Vec<Inbound> {
+        let Some(control) = &self.control else {
+            return Vec::new();
+        };
+        let messages = control.take_pending();
+        if !messages.is_empty() {
+            self.taken
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(messages.iter().cloned());
+        }
+        messages
     }
 
     fn middlewares(&self) -> &[Arc<dyn ChatMiddleware>] {
@@ -161,6 +187,10 @@ impl Drop for RunGuard {
     fn drop(&mut self) {
         if !self.ended.load(Ordering::Relaxed) {
             self.tool_cancellation.cancel();
+            if let Some(control) = &self.control {
+                let taken = std::mem::take(self.taken.get_mut().unwrap_or_else(|e| e.into_inner()));
+                control.restore(taken);
+            }
         }
         for mw in self.pending() {
             mw.on_run_dropped(&self.run_id);
@@ -570,6 +600,7 @@ fn run_engine<'a, M: CompletionModel>(
             config.middlewares.clone(),
             run_id.clone(),
             tool_cancellation.clone(),
+            config.control.clone(),
         );
 
         for mw in &config.middlewares {
@@ -1070,11 +1101,24 @@ fn run_engine<'a, M: CompletionModel>(
                 tools_result.push(UserBlock::tool_result(id, content));
             }
 
+            // Messages queued on the run's `RunControl` enter here, once
+            // every call of the turn is done: after the tool results, in
+            // arrival order. Aborts never get here, so they stay queued.
+            let inbound = guard.take_inbound();
+            let inbound_ids: Vec<String> = inbound.iter().map(|m| m.id.clone()).collect();
+            let inbound_blocks: Vec<UserBlock> =
+                inbound.into_iter().flat_map(|m| m.blocks).collect();
+
             // Completion gate: a turn that ends without tool calls to run
             // would finish the run, unless a middleware asks to continue
-            // with an injected user message. Aborts never get here.
+            // with an injected user message. Aborts never get here, and
+            // neither does a turn that just took inbound blocks: the run
+            // goes on to answer them, and the gate runs once the model
+            // stops again with nothing queued.
             let mut continue_blocks = None;
-            if !matches!(finish_reason, FinishReason::ToolUse | FinishReason::Aborted(_)) {
+            if inbound_blocks.is_empty()
+                && !matches!(finish_reason, FinishReason::ToolUse | FinishReason::Aborted(_))
+            {
                 let decision = match race_abort(
                     run_turn_end_chain(
                         &config.middlewares, &run_id, &step_id, &finish_reason,
@@ -1096,18 +1140,30 @@ fn run_engine<'a, M: CompletionModel>(
                     continue_blocks = Some(blocks);
                 }
             }
-            let continue_run = continue_blocks.is_some();
+            let continue_run = continue_blocks.is_some() || !inbound_blocks.is_empty();
 
             // Tool results and injected blocks share one user message
             // rather than two consecutive ones. After an empty turn (no
             // assistant blocks) the injected message follows the previous
             // user message directly; providers merge the two.
             let mut user_blocks = tools_result;
+            user_blocks.extend(inbound_blocks);
             user_blocks.extend(continue_blocks.unwrap_or_default());
             if !user_blocks.is_empty() {
                 run_msgs.push(Message::User { blocks: user_blocks });
             }
             run_msgs.complete_step();
+
+            if !inbound_ids.is_empty() {
+                let mut chunk = StreamChunk::inbound_delivered(
+                    run_id.clone(),
+                    step_id.clone(),
+                    inbound_ids,
+                );
+                for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
+                for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                yield chunk;
+            }
 
             let mut chunk = StreamChunk::step_finished(
                 run_id.clone(),

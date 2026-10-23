@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::control::RunControl;
 use crate::ids::RunId;
 use crate::message::SystemPrompt;
 use crate::middleware::ChatMiddleware;
@@ -88,6 +89,12 @@ pub struct RunConfig {
     /// `parent.child_token()` if you want to cancel this run without
     /// affecting siblings sharing the parent.
     pub cancellation: Option<CancellationToken>,
+    /// Handle for controlling the run from outside while it is in
+    /// flight: messages queued on it are delivered between turns. See
+    /// [`RunControl`] for when delivery happens and what it does to the
+    /// run. `None` (the default) leaves the run as it would be without
+    /// one.
+    pub control: Option<RunControl>,
 }
 
 impl Default for RunConfig {
@@ -100,6 +107,7 @@ impl Default for RunConfig {
             run_id: None,
             timeout: None,
             cancellation: None,
+            control: None,
         }
     }
 }
@@ -115,6 +123,7 @@ impl std::fmt::Debug for RunConfig {
             .field("run_id", &self.run_id)
             .field("timeout", &self.timeout)
             .field("cancellation", &self.cancellation)
+            .field("control", &self.control)
             .finish()
     }
 }

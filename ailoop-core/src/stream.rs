@@ -16,7 +16,8 @@ use crate::{Message, RunId, StepId, ToolResultContent};
 ///    `ToolCallMalformed`) arrives before any other tool call's `Started`.
 /// 2. **Engine lifecycle events**, synthesized by the engine itself
 ///    around the provider stream — `RunStarted`, `StepStarted`,
-///    `StepFinished`, `ToolResult`, `RunFinished`, `HistoryCompacted`.
+///    `StepFinished`, `ToolResult`, `RunFinished`, `HistoryCompacted`,
+///    `InboundDelivered`.
 ///
 /// Every chunk reaches every [`crate::ChatMiddleware::on_chunk`]; the
 /// engine also drives its own assistant-history reconstruction off
@@ -254,6 +255,19 @@ pub enum StreamChunk {
         /// `"summarize"`.
         strategy: &'static str,
     },
+    /// Messages queued on the run's [`crate::RunControl`] entered the
+    /// run when a turn closed. Emitted after that turn's `ToolResult`
+    /// chunks and before its `StepFinished`, once the blocks are part
+    /// of the run's messages.
+    #[non_exhaustive]
+    InboundDelivered {
+        /// Run the messages entered.
+        run_id: RunId,
+        /// Step whose closing user message carries them.
+        step_id: StepId,
+        /// [`crate::Inbound::id`] of each message, in delivery order.
+        ids: Vec<String>,
+    },
 }
 
 impl StreamChunk {
@@ -301,6 +315,15 @@ impl StreamChunk {
             step_id,
             call_id: call_id.into(),
             content,
+        }
+    }
+
+    /// Build a [`StreamChunk::InboundDelivered`].
+    pub fn inbound_delivered(run_id: RunId, step_id: StepId, ids: Vec<String>) -> Self {
+        Self::InboundDelivered {
+            run_id,
+            step_id,
+            ids,
         }
     }
 

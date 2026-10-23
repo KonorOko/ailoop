@@ -34,6 +34,7 @@
 #![deny(missing_docs)]
 
 mod config;
+mod control;
 mod ids;
 mod message;
 mod middleware;
@@ -47,6 +48,7 @@ mod tokenizer;
 mod traits;
 
 pub use config::{DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_TOKENS, RunConfig};
+pub use control::{Inbound, RunControl};
 pub use ids::{RunId, StepId};
 pub use message::{
     AssistantBlock, CacheControl, Message, Source, SystemBlock, SystemPrompt, ToolResultBlock,
