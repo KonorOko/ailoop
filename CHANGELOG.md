@@ -10,6 +10,15 @@ and this project adheres to
 
 ### Added
 
+- `StepInfo::iteration` and `StepInfo::max_iterations`, so
+  `on_chat_request` knows which step it is in and how many are left
+  (`max_iterations - iteration`, counting this one). Before, a
+  middleware had to record `StepStarted { iteration }` from `on_chunk`
+  and the cap from `on_run_started`, keyed by run. Counting
+  `on_chat_request` calls is not a substitute: since the
+  context-overflow recovery of 1.0.0-rc.4, the hook can run twice for
+  one step. `StepInfo::with_iteration` sets both when building one in
+  a test.
 - Progress from running tools. `ToolContext::progress(ToolProgress)`
   (or a clone of `ToolContext::progress_sink()` for a task the tool
   spawns) reports progress, a total and a message, all optional, and

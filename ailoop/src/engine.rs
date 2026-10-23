@@ -808,7 +808,8 @@ fn run_engine<'a, M: CompletionModel>(
                 req.system_prompt = config.system_prompt.clone();
 
                 let mut aborted = None;
-                let step = StepInfo::new(run_id.clone(), step_id.clone());
+                let step = StepInfo::new(run_id.clone(), step_id.clone())
+                    .with_iteration(iteration, config.max_iterations);
                 for mw in &config.middlewares {
                     if let Err(reason) = race_abort(
                         mw.on_chat_request(&step, &mut req),
