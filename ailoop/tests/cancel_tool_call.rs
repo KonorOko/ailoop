@@ -406,3 +406,42 @@ async fn a_batch_call_cancelled_before_it_starts_is_not_run() {
     assert_eq!(result_of(&chunks, "t2").as_text(), Some("ok"));
     assert_eq!(quick.calls(), 1);
 }
+
+/// A call can be cancelled as soon as its `ToolCallStarted` chunk goes
+/// out, while the model is still streaming the turn: it is not
+/// invoked once the turn ends.
+#[tokio::test]
+async fn cancel_from_tool_call_started_works_mid_turn() {
+    let control = RunControl::new();
+    let quick = Arc::new(Quick::named("quick"));
+    let mut registry = ToolRegistry::new();
+    registry.register(quick.clone()).unwrap();
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "quick"), ("t2", "quick")]),
+        text_turn("done"),
+    ]);
+    let mut stream = run_chat(
+        &model,
+        vec![Message::user("hi")],
+        &registry,
+        config(&control, vec![]),
+    )
+    .await
+    .expect("run starts");
+    let mut chunks = Vec::new();
+    let mut accepted = None;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.expect("no error");
+        if let StreamChunk::ToolCallStarted { call_id, .. } = &chunk
+            && call_id == "t1"
+        {
+            accepted = Some(control.cancel_tool("t1"));
+        }
+        chunks.push(chunk);
+    }
+
+    assert_eq!(accepted, Some(true));
+    assert_error(result_of(&chunks, "t1"), NOT_RUN);
+    assert_eq!(result_of(&chunks, "t2").as_text(), Some("ok"));
+    assert_eq!(quick.calls(), 1);
+}

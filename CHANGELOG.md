@@ -65,7 +65,9 @@ and this project adheres to
   - Without a `RunControl`, runs behave as before.
 
 - `RunControl::cancel_tool(call_id)`: stop one tool call and let the run
-  go on, with the `call_id` from its `ToolCallStarted` chunk. Before,
+  go on, with the `call_id` from its `ToolCallStarted` chunk, from the
+  moment that chunk goes out (the model may still be streaming the
+  turn). Before,
   the only way to stop a tool was to cancel the whole run. Every call
   of the step in flight can be cancelled, including one still waiting
   its turn; `cancel_tool` returns `false` for any other id. The call

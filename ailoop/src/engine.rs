@@ -760,6 +760,11 @@ fn run_engine<'a, M: CompletionModel>(
             // Every call of the step in the model's order, with its
             // original arguments: what a suspension records.
             let mut step_calls: Vec<(String, String, Value)> = Vec::new();
+            // Each call's own token, a child of the run's, so
+            // `RunControl::cancel_tool` stops one call without touching
+            // its siblings. A call is registered from its
+            // `ToolCallStarted` on, while the turn still streams.
+            let mut call_tokens: HashMap<String, CancellationToken> = HashMap::new();
 
             if let Some(resume) = resuming.take() {
                 // Finishing a suspended step: its assistant message is
@@ -917,6 +922,13 @@ fn run_engine<'a, M: CompletionModel>(
                 for mw in &config.middlewares {
                     mw.on_chunk_mut(&mut chunk).await;
                 }
+                if let StreamChunk::ToolCallStarted { call_id, .. } = &chunk {
+                    let token = tool_cancellation.child_token();
+                    if let Some(control) = &config.control {
+                        control.register_call(call_id.clone(), token.clone());
+                    }
+                    call_tokens.insert(call_id.clone(), token);
+                }
                 for mw in &config.middlewares {
                     mw.on_chunk(&chunk).await;
                 }
@@ -1019,25 +1031,35 @@ fn run_engine<'a, M: CompletionModel>(
             // through its `after` hooks counts as not run, so no result
             // skips a transform like `Sanitize`.
             //
-            // Each call gets its own token, a child of the run's, so
-            // `RunControl::cancel_tool` stops one call without touching
-            // its siblings. Every call of the step is registered up
-            // front, so one still waiting its turn can be cancelled too;
-            // each is unregistered once it has its result, and the
+            // Every call of the step that can still run stays registered
+            // (and one the turn did not announce, such as a call of a
+            // resumed step, is registered now), so a call still waiting
+            // its turn can be cancelled too. A call that cannot run
+            // (malformed, or started but never finished) is dropped.
+            // Each is unregistered once it has its result, and the
             // `RunGuard` clears what is left when the run ends.
-            let call_tokens: HashMap<String, CancellationToken> = tool_calls
+            let runnable: HashSet<String> = tool_calls
                 .iter()
                 .filter_map(|call| match call {
-                    PendingCall::Run { id, .. } | PendingCall::Decided { id, .. } => {
-                        Some((id.clone(), tool_cancellation.child_token()))
-                    }
+                    PendingCall::Run { id, .. } | PendingCall::Decided { id, .. } => Some(id.clone()),
                     PendingCall::Rejected { .. } | PendingCall::Answered { .. } => None,
                 })
                 .collect();
-            if let Some(control) = &config.control {
-                for (id, token) in &call_tokens {
-                    control.register_call(id.clone(), token.clone());
+            call_tokens.retain(|id, _| {
+                let keep = runnable.contains(id);
+                if !keep && let Some(control) = &config.control {
+                    control.unregister_call(id);
                 }
+                keep
+            });
+            for id in runnable {
+                call_tokens.entry(id.clone()).or_insert_with(|| {
+                    let token = tool_cancellation.child_token();
+                    if let Some(control) = &config.control {
+                        control.register_call(id, token.clone());
+                    }
+                    token
+                });
             }
             let concurrency = config.tool_concurrency.max(1);
             let batchable = |call: &PendingCall| match call {
