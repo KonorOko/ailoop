@@ -8,6 +8,13 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [1.0.0-rc.5] — 2026-10-23
+
+This release contains one breaking change: a tool that cancels its own
+`ToolContext::cancellation` token now stops only its own call, not the
+run. Every entry describes the change against 1.0.0-rc.4; the
+Migration section at the end has the before/after snippet.
+
 ### Added
 
 - `StepInfo::iteration` and `StepInfo::max_iterations`, so
@@ -1776,7 +1783,8 @@ workspace-wide API audit (closed 2026-05-10).
 - Other providers (OpenAI public, Bedrock, Vertex, local engines)
   are not implemented.
 
-[Unreleased]: https://github.com/KonorOko/ailoop/compare/v1.0.0-rc.4...HEAD
+[Unreleased]: https://github.com/KonorOko/ailoop/compare/v1.0.0-rc.5...HEAD
+[1.0.0-rc.5]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.5
 [1.0.0-rc.4]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.4
 [1.0.0-rc.3]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.2
