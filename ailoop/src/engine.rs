@@ -140,6 +140,14 @@ impl RunGuard {
         messages
     }
 
+    /// Unregisters every call from the run's [`RunControl`]: none of
+    /// them can be cancelled any more.
+    fn clear_calls(&self) {
+        if let Some(control) = &self.control {
+            control.clear_calls();
+        }
+    }
+
     fn middlewares(&self) -> &[Arc<dyn ChatMiddleware>] {
         &self.middlewares
     }
@@ -190,9 +198,7 @@ impl RunGuard {
 impl Drop for RunGuard {
     fn drop(&mut self) {
         // However the run ended, none of its calls can be cancelled now.
-        if let Some(control) = &self.control {
-            control.clear_calls();
-        }
+        self.clear_calls();
         if !self.ended.load(Ordering::Relaxed) {
             self.tool_cancellation.cancel();
             if let Some(control) = &self.control {
@@ -271,6 +277,8 @@ async fn abort_step(
 ) -> Vec<StreamChunk> {
     let middlewares = guard.middlewares();
     let run_id = &guard.run_id;
+    // No call of an aborted step can be cancelled any more.
+    guard.clear_calls();
     let mut chunks = Vec::new();
     for call in unanswered {
         let (id, content) = match call {
@@ -1386,6 +1394,9 @@ fn run_engine<'a, M: CompletionModel>(
                         }
                     };
 
+                    // Too late to cancel once the result is decided, before
+                    // anyone sees it.
+                    if let Some(control) = &config.control { control.unregister_call(&id); }
                     if emit {
                         let mut chunk = StreamChunk::tool_result(
                             run_id.clone(),
@@ -1398,7 +1409,6 @@ fn run_engine<'a, M: CompletionModel>(
                         yield chunk;
                     }
 
-                    if let Some(control) = &config.control { control.unregister_call(&id); }
                     tools_result.push(UserBlock::tool_result(id, content));
                 }
             }
@@ -1428,6 +1438,9 @@ fn run_engine<'a, M: CompletionModel>(
                         }
                     })
                     .collect();
+                // The suspended calls run, if at all, in the resumed run,
+                // with tokens of their own.
+                guard.clear_calls();
                 let suspension = Suspension::new(run_id.clone(), step_id.clone(), calls);
                 let new_messages = run_msgs.finish();
                 let usage_total = usage_run + delegated.total();

@@ -445,3 +445,40 @@ async fn cancel_from_tool_call_started_works_mid_turn() {
     assert_eq!(result_of(&chunks, "t2").as_text(), Some("ok"));
     assert_eq!(quick.calls(), 1);
 }
+
+/// Tries to cancel each call when its `ToolResult` chunk goes by.
+#[derive(Default)]
+struct CancelOnResult {
+    control: RunControl,
+    accepted: Mutex<Vec<bool>>,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for CancelOnResult {
+    async fn on_chunk(&self, chunk: &StreamChunk) {
+        if let StreamChunk::ToolResult { call_id, .. } = chunk {
+            let accepted = self.control.cancel_tool(call_id);
+            self.accepted.lock().unwrap().push(accepted);
+        }
+    }
+}
+
+/// Once a call's result is out, `cancel_tool` says it was too late.
+#[tokio::test]
+async fn cancel_tool_is_false_once_the_result_is_out() {
+    let control = RunControl::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(Quick::named("quick"))).unwrap();
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "quick"), ("t2", "quick")]),
+        text_turn("done"),
+    ]);
+    let observer = Arc::new(CancelOnResult {
+        control: control.clone(),
+        ..CancelOnResult::default()
+    });
+    let chunks = collect(&model, &registry, config(&control, vec![observer.clone()])).await;
+
+    assert_eq!(result_of(&chunks, "t1").as_text(), Some("ok"));
+    assert_eq!(*observer.accepted.lock().unwrap(), [false, false]);
+}

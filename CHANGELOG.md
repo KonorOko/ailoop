@@ -70,7 +70,10 @@ and this project adheres to
   turn). Before,
   the only way to stop a tool was to cancel the whole run. Every call
   of the step in flight can be cancelled, including one still waiting
-  its turn; `cancel_tool` returns `false` for any other id. The call
+  its turn; `cancel_tool` returns `false` for any other id, including
+  a call whose result is already decided (its `ToolResult` chunk is
+  about to go out, or has) and every call of a step that aborted or
+  suspended. The call
   gets an `is_error` result and the run continues:
   - cancelled before its turn: the tool is not invoked and no tool hook
     fires; the result reads "Tool not run: cancelled by the caller";
