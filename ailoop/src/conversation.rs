@@ -66,9 +66,10 @@ pub const DEFAULT_HISTORY_MAX_TOKENS: usize = 100_000;
 ///
 /// **Tool calls of one step have no guaranteed order.** Tool results
 /// land in history in the order the model issued the calls, but the
-/// calls themselves may run in any order, and a later release may run
-/// them concurrently. Tools and middlewares must not depend on one call
-/// of a step finishing before another starts; see
+/// calls themselves may run in another order, and with
+/// [`ConversationBuilder::tool_concurrency`] calls to concurrency-safe
+/// tools run at the same time. Tools and middlewares must not depend on
+/// one call of a step finishing before another starts; see
 /// [Tool calls within a step](ChatMiddleware#tool-calls-within-a-step).
 pub struct Conversation<M: CompletionModel> {
     model: M,
@@ -77,6 +78,7 @@ pub struct Conversation<M: CompletionModel> {
     middlewares: Vec<Arc<dyn ChatMiddleware>>,
     max_tokens: Option<u32>,
     max_iterations: Option<usize>,
+    tool_concurrency: usize,
     context_options: ContextOptions,
 }
 
@@ -520,6 +522,7 @@ where
         config.timeout = options.timeout;
         config.cancellation = options.cancellation;
         config.control = options.control;
+        config.tool_concurrency = self.tool_concurrency;
         if let Some(n) = options.max_iterations.or(self.max_iterations) {
             config.max_iterations = n;
         }
@@ -598,6 +601,7 @@ pub struct ConversationBuilder<M: CompletionModel> {
     request_defaults: RequestDefaults,
     max_tokens: Option<u32>,
     max_iterations: Option<usize>,
+    tool_concurrency: usize,
     context_options: ContextOptions,
     errors: Vec<BuildError>,
 }
@@ -626,6 +630,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             request_defaults: RequestDefaults::default(),
             max_tokens: None,
             max_iterations: None,
+            tool_concurrency: 1,
             context_options: ContextOptions {
                 compact_between_iterations: false,
                 recover_from_overflow: true,
@@ -1104,6 +1109,19 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
+    /// Let up to `n` tool calls of one step run at the same time
+    /// (default 1: one at a time). Only calls to tools that report
+    /// [`ToolDyn::concurrency_safe`](ailoop_tools::ToolDyn::concurrency_safe)
+    /// (`#[ailoop_tool(concurrency_safe)]`) run together; any other call
+    /// runs alone, in order. Approvals and every `on_before_tool_call*`
+    /// hook still run one call at a time in the model's order, and
+    /// results reach the history in the model's order. See
+    /// [`RunConfig::tool_concurrency`] for the full contract.
+    pub fn tool_concurrency(mut self, n: usize) -> Self {
+        self.tool_concurrency = n;
+        self
+    }
+
     /// Default `additional_params` applied to every [`ChatRequest`].
     /// Useful for provider-specific knobs that don't yet have a typed
     /// surface (e.g. Anthropic `thinking`). See [`Self::temperature`]
@@ -1257,6 +1275,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             middlewares,
             max_tokens: self.max_tokens,
             max_iterations: self.max_iterations,
+            tool_concurrency: self.tool_concurrency,
             context_options: self.context_options,
         })
     }

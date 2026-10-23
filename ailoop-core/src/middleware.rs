@@ -51,11 +51,24 @@ use crate::RunConfig;
 ///   the run's active set) fires none of the tool hooks, only its
 ///   `ToolResult` chunk carrying the error sent back to the model.
 ///
-/// The order **between** calls of the same step is not guaranteed.
-/// Today the engine runs them one at a time, in the model's order, but
-/// a later release may run them concurrently, so the hooks of different
-/// calls can interleave or overlap. A middleware that must keep working
-/// then:
+/// By default the engine runs the calls of a step one at a time, in the
+/// model's order. With [`crate::RunConfig::tool_concurrency`] above 1,
+/// consecutive calls to tools that report `concurrency_safe` form a
+/// batch, and for each batch:
+///
+/// - the `on_before_tool_call_mut` / `on_before_tool_call` hooks of every
+///   call run first, one call at a time in the model's order, so gates
+///   such as approvals still see one call at a time and in sequence;
+/// - the calls that passed then run at the same time, up to the limit;
+/// - the `on_after_tool_call_mut` / `on_after_tool_call` hooks and the
+///   `ToolResult` chunks follow, one call at a time in the model's
+///   order, once every call of the batch has finished.
+///
+/// A call to any other tool is a batch of its own. So the hooks of
+/// different calls can interleave (a batch's `before` hooks all run
+/// before its first `after` hook), and tools of one batch overlap.
+/// Beyond that, the order between calls of a step is not part of the
+/// contract and may change. A middleware that must keep working then:
 ///
 /// - does not assume an `on_after_tool_call` belongs to the most recent
 ///   `on_before_tool_call`, or that the calls before it in the model's

@@ -37,3 +37,20 @@ fn derive_emits_empty_when_tags_omitted() {
     let def = Untagged.definition();
     assert!(def.tags.is_empty());
 }
+
+#[ailoop_tool(description = "read a file", tags(ReadOnly), concurrency_safe)]
+async fn read_file(path: String) -> String {
+    path
+}
+
+#[test]
+fn derive_sets_concurrency_safe_only_when_asked() {
+    use ailoop::ToolDyn;
+    assert!(ReadFile.concurrency_safe());
+    const { assert!(<ReadFile as Tool>::CONCURRENCY_SAFE) };
+    assert!(!Fetch.concurrency_safe());
+    assert!(matches!(
+        ReadFile.definition().tags[..],
+        [ToolTag::ReadOnly]
+    ));
+}

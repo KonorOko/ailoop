@@ -51,6 +51,10 @@ pub trait Tool: Send + Sync + Sized {
     /// OpenAI is more permissive).
     const NAME: &'static str;
 
+    /// See [`ToolDyn::concurrency_safe`]. `#[ailoop_tool(concurrency_safe)]`
+    /// sets it to `true`.
+    const CONCURRENCY_SAFE: bool = false;
+
     /// Argument struct deserialized from the model's JSON `input`.
     type Args: for<'a> serde::Deserialize<'a> + Send;
     /// Successful return value. Serialized back as the tool result;
@@ -117,12 +121,26 @@ pub trait ToolDyn: Send + Sync {
     /// tool loading). Handlers that don't need it simply ignore
     /// the parameter.
     async fn call(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolResultContent;
+
+    /// Whether calls to this tool may run at the same time as other
+    /// calls of the same step to tools that also say so. Only takes
+    /// effect when the run allows it (`RunConfig::tool_concurrency`,
+    /// `ConversationBuilder::tool_concurrency`). Defaults to `false`:
+    /// return `true` only when concurrent calls cannot interfere, e.g.
+    /// reads with no shared mutable state.
+    fn concurrency_safe(&self) -> bool {
+        false
+    }
 }
 
 #[async_trait::async_trait]
 impl<T: Tool> ToolDyn for T {
     fn name(&self) -> &str {
         T::NAME
+    }
+
+    fn concurrency_safe(&self) -> bool {
+        T::CONCURRENCY_SAFE
     }
 
     fn tool_definition(&self) -> ToolDefinition {

@@ -16,6 +16,8 @@ struct MacroArgs {
     /// caller is taking explicit control.
     required: Option<Vec<String>>,
     tags: Vec<Ident>,
+    /// `concurrency_safe` was written: sets `Tool::CONCURRENCY_SAFE`.
+    concurrency_safe: bool,
 }
 
 /// Resolve the path to an item that lives in (or is re-exported by) one of the
@@ -168,6 +170,7 @@ impl Parse for MacroArgs {
         let mut param_descriptions = HashMap::new();
         let mut required: Option<Vec<String>> = None;
         let mut tags = Vec::new();
+        let mut concurrency_safe = false;
 
         // If the input is empty, return default values
         if input.is_empty() {
@@ -177,6 +180,7 @@ impl Parse for MacroArgs {
                 param_descriptions,
                 required,
                 tags,
+                concurrency_safe,
             });
         }
 
@@ -272,6 +276,9 @@ impl Parse for MacroArgs {
                         }
                     }
                 }
+                Meta::Path(path) if path.is_ident("concurrency_safe") => {
+                    concurrency_safe = true;
+                }
                 Meta::Path(path) => {
                     let message = if let Some(ident) = path.get_ident() {
                         format!("unsupported top-level #[ailoop_tool] argument `{ident}`")
@@ -290,6 +297,7 @@ impl Parse for MacroArgs {
             param_descriptions,
             required,
             tags,
+            concurrency_safe,
         })
     }
 }
@@ -609,6 +617,7 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
     let tool_definition_path = ailoop_tool_definition_path();
     let tool_tag_path = ailoop_tool_tag_path();
 
+    let concurrency_safe = args.concurrency_safe;
     let tags_expr = if args.tags.is_empty() {
         quote! { ::std::vec::Vec::new() }
     } else {
@@ -658,6 +667,7 @@ pub fn ailoop_tool(args: TokenStream, input: TokenStream) -> TokenStream {
 
         impl #tool_path for #struct_name {
             const NAME: &'static str = #tool_name;
+            const CONCURRENCY_SAFE: bool = #concurrency_safe;
 
             type Args = #params_struct_name;
             type Output = #output_type;
