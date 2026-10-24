@@ -430,8 +430,7 @@ fn budget_label(reason: &AbortReason) -> &'static str {
 /// no image or document variants today, so the wrapper continues to
 /// relay [`RunOutcome::final_text`](crate::RunOutcome::final_text) as
 /// the tool result. Multimodal-out would require adding inline-media
-/// variants to [`AssistantBlock`] first — tracked as a separate decision
-/// in `dev-notes/sub-agent-improvements.md`.
+/// variants to [`AssistantBlock`] first.
 ///
 /// [`AssistantBlock`]: ailoop_core::AssistantBlock
 ///
