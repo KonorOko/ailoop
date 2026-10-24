@@ -9,8 +9,8 @@ from the side crates (`ailoop-history`, `ailoop-tools`,
 
 ```toml
 [dependencies]
-ailoop = "1.0.0-rc.5"
-ailoop-anthropic = "1.0.0-rc.5"
+ailoop = "1.0.0-rc.6"
+ailoop-anthropic = "1.0.0-rc.6"
 tokio = { version = "1", features = ["full"] }
 ```
 
