@@ -92,8 +92,10 @@ impl SuspendedCall {
 #[non_exhaustive]
 pub enum CallState {
     /// Already has its result: it ran (and went through its `after`
-    /// hooks) or was answered without running. Resuming keeps the
-    /// result and never runs it again.
+    /// hooks), was answered without running, or, in a suspension put
+    /// back after a failed or dropped resume, was interrupted while it
+    /// ran (an error result saying it may have partly completed).
+    /// Resuming keeps the result and never runs it again.
     Answered {
         /// The recorded result.
         content: ToolResultContent,
