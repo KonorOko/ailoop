@@ -91,6 +91,23 @@ and this project adheres to
   version goes up when a reader that ignores a new field would misread
   the payload, and a field that can be ignored safely does not raise
   it.
+- A resumed run that ends in `Err` or whose stream is dropped now puts
+  back an updated suspension instead of the one it resumed, so resuming
+  again runs each call at most once. Before, the suspension came back
+  whole: an approved call that had already run (say, the model failed
+  on the turn after the resumed step) ran a second time on the next
+  resume, and `abandon_suspension` answered it as not run. Now every
+  call of the resumed step that got its result (approved and run,
+  denied, or waiting and run through its gates) is `CallState::Answered`
+  with that result, as it came out of its `after` hooks; a call that
+  was running when the run ended is `Answered` with `"Tool interrupted
+  while running: the resumed run ended before it finished; it may have
+  partly completed"`; a call that never started keeps its state. The
+  history is still rolled back as before. No signature changes, but the
+  next resume's decisions must name only the calls still deferred
+  (`Suspension::pending`): a decision for a call that is now answered
+  fails with `ResumeError::NotDeferred`, before anything runs. The
+  updated suspension is in snapshots like any other.
 
 ### Fixed
 
