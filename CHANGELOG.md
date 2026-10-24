@@ -92,6 +92,22 @@ and this project adheres to
   the payload, and a field that can be ignored safely does not raise
   it.
 
+### Fixed
+
+- A run no longer takes messages or background results from its
+  `RunControl` at the close of the last step `RunConfig::max_iterations`
+  allows. Before, that turn drained the queue and the run went on, only
+  to hit the cap: a run that was about to end well finished as
+  `Aborted(MaxIterations)`, with the message in the history and no
+  answer to it. Now the run ends as it would have without the queue
+  (`on_turn_end` runs as usual, and a last step ending in tool calls
+  still aborts at the cap), queued messages stay on the `RunControl`
+  for the next run (read them back with `take_pending`), and background
+  results waiting for the run go to `BackgroundConfig::on_result` with
+  `delivered: false`, no `InboundDelivered` or `BackgroundToolFinished`
+  being emitted. The rule: a run does not take what it cannot answer.
+  The cap stays strict; runs with steps to spare are unchanged.
+
 ## [1.0.0-rc.5] — 2026-10-23
 
 This release contains one breaking change: a tool that cancels its own
