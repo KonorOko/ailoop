@@ -1141,3 +1141,49 @@ async fn moved_call_cancelled_while_the_run_lives_is_delivered_as_cancelled() {
     let result = results.try_recv().unwrap();
     assert!(result.cancelled && result.delivered);
 }
+
+/// A background result the run takes goes ahead of the messages queued
+/// for the same turn close, even those queued before it arrived.
+#[tokio::test(start_paused = true)]
+async fn background_results_go_ahead_of_queued_messages() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 5));
+    let mut wait = Job::new("wait", 10);
+    wait.background = false;
+    let wait = Arc::new(wait);
+    let registry = tools([job.clone(), wait.clone()]);
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "job")]),
+        tool_calls_turn(&[("t2", "wait")]),
+        text_turn("done"),
+    ]);
+    let (background, _results) = callback();
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    let pusher = {
+        let (control, wait) = (control.clone(), wait.clone());
+        tokio::spawn(async move {
+            wait.started.notified().await;
+            // Before `t1` finishes.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            control.push(Inbound::text("m", "queued first"));
+        })
+    };
+    let chunks = collect(&model, &registry, config(&control, background)).await;
+    mover.await.unwrap();
+    pusher.await.unwrap();
+
+    assert!(chunks.iter().any(|c| matches!(
+        c,
+        StreamChunk::InboundDelivered { ids, .. } if ids == &["t1", "m"]
+    )));
+    let (_, new_messages) = finish(&chunks);
+    let texts = user_texts(&new_messages);
+    assert_eq!(
+        texts[texts.len() - 3..],
+        [
+            "Result of background tool call `job` (call id t1):".to_string(),
+            "job done".into(),
+            "queued first".into(),
+        ]
+    );
+}
