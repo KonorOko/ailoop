@@ -71,6 +71,27 @@ and this project adheres to
   alone needs neither the callback nor an earlier chunk), and matching
   `JsonTracer` / `TracingMiddleware` events.
 
+### Changed
+
+- `ConversationSnapshot` is written as version 2 when it carries a
+  suspension; without one it is still version 1, byte for byte the same
+  shape as before. In rc.5 the suspension was added to version 1, so a
+  reader that predates it (rc.4 or earlier: a rollback, or workers of
+  different versions sharing one store) accepted the payload, dropped
+  the suspension without a word and loaded a history ending on tool
+  calls with no results, which the next provider request rejected. Such
+  a reader now refuses the payload instead. Reading accepts versions 1
+  and 2, including a version-1 payload with a suspension as rc.5 wrote
+  it. `ConversationSnapshot::VERSION` is now 2 (the newest version
+  read and written) and the new `ConversationSnapshot::MIN_VERSION` is
+  1. The written version follows the contents, whatever the public
+  `version` field says. Compatibility: rc.5 rejects a suspended
+  snapshot written by this release; snapshots without a suspension
+  stay readable by every earlier release. The rule from here on: the
+  version goes up when a reader that ignores a new field would misread
+  the payload, and a field that can be ignored safely does not raise
+  it.
+
 ## [1.0.0-rc.5] — 2026-10-23
 
 This release contains one breaking change: a tool that cancels its own
