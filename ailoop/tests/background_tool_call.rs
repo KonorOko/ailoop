@@ -1083,3 +1083,61 @@ async fn dropped_run_leaves_a_later_result_to_the_callback() {
     assert!(results.try_recv().is_err());
     assert!(control.take_pending().is_empty());
 }
+
+/// A moved call cancelled while its run is alive: the run takes the
+/// cancellation as the call's result, and both the chunk and the
+/// message say so.
+#[tokio::test(start_paused = true)]
+async fn moved_call_cancelled_while_the_run_lives_is_delivered_as_cancelled() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 60));
+    let mut wait = Job::new("wait", 10);
+    wait.background = false;
+    let wait = Arc::new(wait);
+    let registry = tools([job.clone(), wait.clone()]);
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "job")]),
+        tool_calls_turn(&[("t2", "wait")]),
+        text_turn("done"),
+    ]);
+    let (background, mut results) = callback();
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    let canceller = {
+        let (control, wait) = (control.clone(), wait.clone());
+        tokio::spawn(async move {
+            wait.started.notified().await;
+            assert!(control.cancel_background("t1"));
+        })
+    };
+    let chunks = collect(&model, &registry, config(&control, background)).await;
+    mover.await.unwrap();
+    canceller.await.unwrap();
+
+    let finished = chunks
+        .iter()
+        .find_map(|c| match c {
+            StreamChunk::BackgroundToolFinished {
+                call_id,
+                name,
+                content,
+                cancelled,
+                ..
+            } if call_id == "t1" => Some((name.clone(), content.clone(), *cancelled)),
+            _ => None,
+        })
+        .expect("BackgroundToolFinished");
+    assert_eq!(finished.0, "job");
+    assert!(finished.1.is_error && finished.2);
+    assert_eq!(finished.1.as_text(), Some(CANCELLED_IN_BACKGROUND));
+    let (_, new_messages) = finish(&chunks);
+    let texts = user_texts(&new_messages);
+    assert_eq!(
+        texts[texts.len() - 2..],
+        [
+            "Background tool call `job` (call id t1) was cancelled:".to_string(),
+            CANCELLED_IN_BACKGROUND.to_string(),
+        ]
+    );
+    let result = results.try_recv().unwrap();
+    assert!(result.cancelled && result.delivered);
+}

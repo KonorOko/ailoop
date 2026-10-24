@@ -62,7 +62,10 @@ and this project adheres to
   step that suspends is answered in the suspension with its
   provisional result, its real result going to the callback. Also new:
   `StreamChunk::ToolBackgrounded`, emitted before the provisional
-  `ToolResult`, and matching `JsonTracer` / `TracingMiddleware` events.
+  `ToolResult`, `StreamChunk::BackgroundToolFinished` (with the tool's
+  name and whether the call was cancelled, so a consumer of the stream
+  alone needs neither the callback nor an earlier chunk), and matching
+  `JsonTracer` / `TracingMiddleware` events.
 
 ## [1.0.0-rc.5] — 2026-10-23
 

@@ -424,14 +424,18 @@ impl ChatMiddleware for JsonTracer {
                 run_id,
                 step_id,
                 call_id,
+                name,
                 content,
+                cancelled,
                 ..
             } => {
                 let mut p = serde_json::Map::new();
                 p.insert("run_id".into(), json!(run_id.to_string()));
                 p.insert("step_id".into(), json!(step_id.to_string()));
                 p.insert("call_id".into(), json!(call_id));
+                p.insert("name".into(), json!(name));
                 p.insert("is_error".into(), json!(content.is_error));
+                p.insert("cancelled".into(), json!(cancelled));
                 self.emit("background_tool_finished", p).await;
             }
             // RunStarted / RunFinished have dedicated hooks with richer

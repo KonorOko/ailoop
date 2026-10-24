@@ -1816,7 +1816,9 @@ fn run_engine<'a, M: CompletionModel>(
                     run_id.clone(),
                     step_id.clone(),
                     result.call_id,
+                    result.name,
                     result.content,
+                    result.cancelled,
                 );
                 for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
                 for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
