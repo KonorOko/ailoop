@@ -912,8 +912,12 @@ mod tests {
         use std::sync::Barrier;
         use std::thread;
 
-        let (mut drained_count, mut refused_count) = (0, 0);
-        for round in 0..5000 {
+        // The offerer offers results back to back while the run drains
+        // until a closing drain finds nothing, so offers keep landing
+        // around that drain: one landing between finding nothing and
+        // closing (were they two steps) would be left behind.
+        let mut rounds_with_results = 0;
+        for round in 0..2000 {
             let control = RunControl::new();
             let run = control.open_run();
             let barrier = Arc::new(Barrier::new(2));
@@ -921,33 +925,40 @@ mod tests {
                 let (control, barrier) = (control.clone(), barrier.clone());
                 thread::spawn(move || {
                     barrier.wait();
-                    for _ in 0..(round % 50) {
-                        std::hint::spin_loop();
+                    let mut accepted = 0;
+                    while control
+                        .offer_background_result(
+                            run,
+                            Inbound::text("a", "a"),
+                            background_result("a"),
+                        )
+                        .is_none()
+                    {
+                        accepted += 1;
                     }
-                    control.offer_background_result(
-                        run,
-                        Inbound::text("a", "a"),
-                        background_result("a"),
-                    )
+                    accepted
                 })
             };
             barrier.wait();
-            let drained = control.drain(run, true);
-            let refused = offerer.join().unwrap();
-            let left = control.close_run(run);
-            assert!(
-                left.is_empty(),
-                "round {round}: stranded after the closing drain"
+            let mut drained = 0;
+            loop {
+                let taken = control.drain(run, true).results.len();
+                drained += taken;
+                if taken == 0 {
+                    break;
+                }
+            }
+            let accepted = offerer.join().unwrap();
+            let left = control.close_run(run).len();
+            assert_eq!(
+                (drained, left),
+                (accepted, 0),
+                "round {round}: a result accepted after the closing drain was left behind"
             );
-            match (drained.results.len(), refused.is_some()) {
-                (1, false) => drained_count += 1,
-                (0, true) => refused_count += 1,
-                other => panic!("round {round}: {other:?}"),
+            if accepted > 0 {
+                rounds_with_results += 1;
             }
         }
-        assert!(
-            drained_count > 0 && refused_count > 0,
-            "the race was never exercised"
-        );
+        assert!(rounds_with_results > 0, "the race was never exercised");
     }
 }
