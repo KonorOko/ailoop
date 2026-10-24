@@ -347,6 +347,12 @@ async fn abort_step(
     let mut chunks = Vec::new();
     for call in unanswered {
         let (id, content) = match call {
+            // Nothing to run: the answer given on resume stands.
+            PendingCall::Decided {
+                id,
+                decision: ResumeDecision::Answer { content },
+                ..
+            } => (id, content),
             PendingCall::Run { id, .. } | PendingCall::Decided { id, .. } => {
                 (id, not_run_result(&reason))
             }
@@ -419,9 +425,10 @@ async fn abort_step(
 
 /// Aborts a run before its first step. A resumed run that never got
 /// to the suspended step still closes it, as [`abort_step`] would: the
-/// calls answered in the suspended run keep their result and every
-/// other one is answered as not run, so the history the run commits has
-/// no `tool_use` without its `tool_result`.
+/// calls answered in the suspended run keep their result, a call
+/// answered on resume ([`ResumeDecision::Answer`]) gets that answer,
+/// and every other one is answered as not run, so the history the run
+/// commits has no `tool_use` without its `tool_result`.
 async fn abort_before_step(
     guard: &RunGuard,
     resuming: Option<Resume>,
@@ -429,7 +436,12 @@ async fn abort_before_step(
     usage: Usage,
     run_msgs: &mut RunMessages<'_>,
 ) -> Vec<StreamChunk> {
-    let Some(Resume { suspension, .. }) = resuming else {
+    let Some(Resume {
+        suspension,
+        mut decisions,
+        ..
+    }) = resuming
+    else {
         let new_messages = run_msgs.finish();
         return vec![fire_abort_hooks(guard, reason, usage, new_messages).await];
     };
@@ -440,6 +452,19 @@ async fn abort_before_step(
             CallState::Answered { content } => PendingCall::Answered {
                 id: call.call_id,
                 content,
+            },
+            CallState::Deferred { .. } => match decisions.remove(&call.call_id) {
+                Some(decision) => PendingCall::Decided {
+                    id: call.call_id,
+                    name: call.name,
+                    args: call.args,
+                    decision,
+                },
+                None => PendingCall::Run {
+                    id: call.call_id,
+                    name: call.name,
+                    args: call.args,
+                },
             },
             _ => PendingCall::Run {
                 id: call.call_id,
@@ -1378,13 +1403,16 @@ fn run_engine<'a, M: CompletionModel>(
                                 .cloned()
                                 .unwrap_or_else(|| tool_cancellation.child_token());
                             let call = ToolCallInfo::new(run_id.clone(), step_id.clone(), id.clone(), name.clone());
+                            let given = matches!(decision, ResumeDecision::Answer { .. });
                             let content = match decision {
+                                // Nothing to run, so a cancelled token changes nothing.
+                                ResumeDecision::Answer { content } => Some(content),
                                 ResumeDecision::Approve if token.is_cancelled() => Some(cancelled_before_run()),
                                 ResumeDecision::Approve => None,
                                 ResumeDecision::Deny { reason } => Some(denied_result(&reason)),
                                 _ => Some(ToolResultContent::error("unsupported ResumeDecision variant")),
                             };
-                            slots.push(Slot::Gated { id, name, args, call, token, content, moved: false });
+                            slots.push(Slot::Gated { id, name, args, call, token, content, moved: false, given });
                             continue;
                         }
                     };
@@ -1454,7 +1482,7 @@ fn run_engine<'a, M: CompletionModel>(
                             return;
                         }
                     };
-                    slots.push(Slot::Gated { id, name, args, call, token, content, moved: false });
+                    slots.push(Slot::Gated { id, name, args, call, token, content, moved: false, given: false });
                 }
 
                 // Phase 2: run the calls that passed, together. Each
@@ -2125,15 +2153,25 @@ enum Slot {
         token: CancellationToken,
         content: Option<ToolResultContent>,
         moved: bool,
+        /// `content` was given on resume ([`ResumeDecision::Answer`]):
+        /// an abort keeps it instead of answering the call as not run.
+        given: bool,
     },
 }
 
 impl Slot {
     /// The call as `abort_step` takes it: an answered call keeps its
-    /// result, a moved one its provisional result, and any other gated
-    /// one is answered as not run.
+    /// result, a moved one its provisional result, one answered on
+    /// resume its given result, and any other gated one is answered as
+    /// not run.
     fn into_unanswered(self) -> PendingCall {
         match self {
+            Slot::Gated {
+                id,
+                content: Some(content),
+                given: true,
+                ..
+            } => PendingCall::Rejected { id, content },
             Slot::Answered {
                 id,
                 content,

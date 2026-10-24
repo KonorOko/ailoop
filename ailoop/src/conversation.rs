@@ -415,6 +415,8 @@ where
     ///   suspended run), then its `after` hooks;
     /// - a denied call gets an error result reading `"Tool denied:
     ///   <reason>"` and goes through its `after` hooks;
+    /// - an answered call ([`ResumeDecision::Answer`]) is not run: its
+    ///   given result goes through its `after` hooks;
     /// - a call that was waiting goes through its gates as usual, and
     ///   may be deferred again, which suspends the new run (since that
     ///   step makes no request, an [`ApprovalRequest`](crate::ApprovalRequest)
@@ -442,9 +444,13 @@ where
     ///
     /// The next resume's `decisions` name only the calls still deferred
     /// ([`Suspension::pending`]); naming an answered one fails with
-    /// [`ResumeError::NotDeferred`]. If the resumed run aborts (timeout, cancellation,
-    /// `Terminate`), the step is closed instead: calls without a result
-    /// are answered as not run, and the suspension is gone.
+    /// [`ResumeError::NotDeferred`].
+    ///
+    /// If the resumed run aborts (timeout, cancellation, `Terminate`),
+    /// the step is closed instead: a call answered with
+    /// [`ResumeDecision::Answer`] gets its given result, the other calls
+    /// without a result are answered as not run, and the suspension is
+    /// gone.
     ///
     /// The resumed run is a run like any other, configured by `options`
     /// alone: per-run state starts afresh, so `max_iterations` and
