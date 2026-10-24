@@ -913,3 +913,33 @@ async fn result_racing_the_run_end_is_delivered_exactly_once() {
     // Not asserted (timing-dependent), but useful when it is run by hand.
     eprintln!("delivered {delivered}, not delivered {not_delivered}");
 }
+
+/// A later run on the same handle may reuse the id of a call an earlier
+/// run moved and that is still running: the two calls stay apart.
+#[tokio::test(start_paused = true)]
+async fn reused_call_id_does_not_mix_up_a_moved_call_and_a_new_one() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 5));
+    let other = Arc::new(Job::new("other", 10));
+    let registry = tools([job.clone(), other.clone()]);
+    let (background, mut results) = callback();
+
+    // The first run moves `t1` and ends while it runs.
+    let model = ScriptedModel::new([tool_calls_turn(&[("t1", "job")]), text_turn("ok")]);
+    let mover = move_when_started(&control, &job, "t1", Duration::from_secs(1));
+    collect(&model, &registry, config(&control, background.clone())).await;
+    mover.await.unwrap();
+
+    // The second run calls another tool under the same id, and waits
+    // for it past the end of the first call.
+    let model = ScriptedModel::new([tool_calls_turn(&[("t1", "other")]), text_turn("ok")]);
+    let chunks = collect(&model, &registry, config(&control, background)).await;
+    assert_eq!(result_of(&chunks, "t1").as_text(), Some("other done"));
+    assert_eq!(backgrounded(&chunks, "t1"), None);
+
+    let result = results.recv().await.unwrap();
+    assert_eq!(result.name, "job");
+    assert_eq!(result.content.as_text(), Some("job done"));
+    assert!(!result.delivered);
+    assert!(results.try_recv().is_err());
+}

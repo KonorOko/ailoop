@@ -1415,13 +1415,13 @@ fn run_engine<'a, M: CompletionModel>(
                                     return (index, CallOutput::NotStarted);
                                 }
                                 let control = task.control.clone();
-                                let on_moved = control
+                                let (key, on_moved) = control
                                     .register_background(id.clone(), ctx.cancellation().clone());
                                 // Whatever ends this wait (a result, a move,
                                 // `cancel_tool`, the run's abort dropping it),
                                 // the engine lets go of the call here.
-                                let _release = ReleaseOnDrop { control: &control, call_id: id, moved: moved_calls };
-                                let mut joined = tokio::spawn(task.run(ctx));
+                                let _release = ReleaseOnDrop { control: &control, key, call_id: id, moved: moved_calls };
+                                let mut joined = tokio::spawn(task.run(ctx, key));
                                 let moved = async {
                                     // An error means the call finished
                                     // (or was let go of) unmoved.
@@ -1869,13 +1869,14 @@ impl Drop for CloseOnDrop {
 /// it, recording it in `moved` if it was moved by then.
 struct ReleaseOnDrop<'a> {
     control: &'a RunControl,
+    key: u64,
     call_id: &'a String,
     moved: &'a std::sync::Mutex<HashSet<String>>,
 }
 
 impl Drop for ReleaseOnDrop<'_> {
     fn drop(&mut self) {
-        if self.control.release_background(self.call_id) {
+        if self.control.release_background(self.key) {
             self.moved
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -1897,10 +1898,10 @@ struct BackgroundTask {
 }
 
 impl BackgroundTask {
-    /// Runs the tool. Returns its result when the engine is waiting for
-    /// it; once the call is moved, delivers the result itself and
-    /// returns `None`.
-    async fn run(self, ctx: ToolContext) -> Option<ToolResultContent> {
+    /// Runs the tool, tracked under `key`. Returns its result when the
+    /// engine is waiting for it; once the call is moved, delivers the
+    /// result itself and returns `None`.
+    async fn run(self, ctx: ToolContext, key: u64) -> Option<ToolResultContent> {
         let token = ctx.cancellation().clone();
         let (content, cancelled, panic) = tokio::select! {
             biased;
@@ -1916,7 +1917,7 @@ impl BackgroundTask {
                 }
             }
         };
-        match self.control.finish_background(&self.call.call_id) {
+        match self.control.finish_background(key) {
             BackgroundEnd::Engine => {
                 // Not moved: the panic belongs to the run, as with any
                 // other tool.

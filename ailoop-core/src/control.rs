@@ -1,7 +1,7 @@
 //! Controlling a run from outside while it is in flight: see
 //! [`RunControl`].
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -106,9 +106,30 @@ pub struct RunControl {
     inbox: Arc<Mutex<Inbox>>,
     /// Token of each tool call of the step in flight, by `call_id`.
     calls: Arc<Mutex<HashMap<String, CancellationToken>>>,
-    /// Calls to backgroundable tools that are running, by `call_id`,
-    /// moved or not.
-    background: Arc<Mutex<HashMap<String, BackgroundCall>>>,
+    /// Calls to backgroundable tools that are running, moved or not.
+    background: Arc<Mutex<BackgroundCalls>>,
+}
+
+/// The background calls a handle tracks, each under a key of its own:
+/// a `call_id` alone is not enough, since a later run may reuse the id
+/// of a call an earlier run moved and that is still running.
+#[derive(Default)]
+struct BackgroundCalls {
+    /// The key the next call gets; keys only grow, so the newest call
+    /// with a given `call_id` has the highest key.
+    next: u64,
+    calls: BTreeMap<u64, BackgroundCall>,
+}
+
+impl BackgroundCalls {
+    /// Key of the newest tracked call with `call_id` that `matches`.
+    fn newest(&self, call_id: &str, matches: impl Fn(&BackgroundState) -> bool) -> Option<u64> {
+        self.calls
+            .iter()
+            .rev()
+            .find(|(_, call)| call.call_id == call_id && matches(&call.state))
+            .map(|(key, _)| *key)
+    }
 }
 
 /// The queue and what the run in flight still takes besides it, under
@@ -127,6 +148,7 @@ struct Inbox {
 /// A call to a backgroundable tool, tracked from when it starts until
 /// the engine lets go of it (or, once moved, until it finishes).
 struct BackgroundCall {
+    call_id: String,
     /// The token its tool sees, not tied to the run's.
     token: CancellationToken,
     state: BackgroundState,
@@ -349,8 +371,11 @@ impl RunControl {
     pub fn background_tool(&self, call_id: &str) -> bool {
         let moved = {
             let mut background = self.background();
-            match background.get_mut(call_id) {
-                Some(call) if matches!(call.state, BackgroundState::Waiting(_)) => {
+            let key = background.newest(call_id, |state| {
+                matches!(state, BackgroundState::Waiting(_))
+            });
+            match key.and_then(|key| background.calls.get_mut(&key)) {
+                Some(call) => {
                     let BackgroundState::Waiting(moved) =
                         std::mem::replace(&mut call.state, BackgroundState::Moved)
                     else {
@@ -362,7 +387,7 @@ impl RunControl {
                     let _ = moved.send(());
                     true
                 }
-                _ => false,
+                None => false,
             }
         };
         if moved {
@@ -378,19 +403,25 @@ impl RunControl {
     /// partly completed (with [`BackgroundToolResult::cancelled`] set),
     /// delivered like any background result. Returns `false`, doing
     /// nothing, when no moved call with that id is still running
-    /// (unknown, not moved, or already finished).
+    /// (unknown, not moved, or already finished). If several moved
+    /// calls with that id are running (a provider reusing call ids
+    /// across runs), it stops the most recently started one.
     pub fn cancel_background(&self, call_id: &str) -> bool {
-        match self.background().get(call_id) {
-            Some(call) if matches!(call.state, BackgroundState::Moved) => {
+        let background = self.background();
+        let key = background.newest(call_id, |state| matches!(state, BackgroundState::Moved));
+        match key.and_then(|key| background.calls.get(&key)) {
+            Some(call) => {
                 call.token.cancel();
                 true
             }
-            _ => false,
+            None => false,
         }
     }
 
     /// Track a running call to a backgroundable tool, whose tool sees
-    /// `token`. The receiver fires if it is moved.
+    /// `token`. Returns the key that [`Self::finish_background`] and
+    /// [`Self::release_background`] take, and a receiver that fires if
+    /// the call is moved.
     ///
     /// Engine plumbing, hidden from the docs and not covered by semver:
     /// its signature may change in any release.
@@ -399,16 +430,20 @@ impl RunControl {
         &self,
         call_id: String,
         token: CancellationToken,
-    ) -> oneshot::Receiver<()> {
+    ) -> (u64, oneshot::Receiver<()>) {
         let (moved, on_moved) = oneshot::channel();
-        self.background().insert(
-            call_id,
+        let mut background = self.background();
+        let key = background.next;
+        background.next += 1;
+        background.calls.insert(
+            key,
             BackgroundCall {
+                call_id,
                 token,
                 state: BackgroundState::Waiting(moved),
             },
         );
-        on_moved
+        (key, on_moved)
     }
 
     /// Called by a background call's task once its tool is done; says
@@ -418,19 +453,19 @@ impl RunControl {
     /// Engine plumbing, hidden from the docs and not covered by semver:
     /// its signature may change in any release.
     #[doc(hidden)]
-    pub fn finish_background(&self, call_id: &str) -> BackgroundEnd {
+    pub fn finish_background(&self, key: u64) -> BackgroundEnd {
         let mut background = self.background();
-        match background.get(call_id).map(|call| &call.state) {
+        match background.calls.get(&key).map(|call| &call.state) {
             Some(BackgroundState::Waiting(_)) => {
                 // Kept until the engine releases it, so a release
                 // finding no entry can only mean the call was moved.
-                if let Some(call) = background.get_mut(call_id) {
+                if let Some(call) = background.calls.get_mut(&key) {
                     call.state = BackgroundState::Done;
                 }
                 BackgroundEnd::Engine
             }
             Some(BackgroundState::Moved) => {
-                background.remove(call_id);
+                background.calls.remove(&key);
                 BackgroundEnd::Moved
             }
             Some(BackgroundState::Done) | None => BackgroundEnd::Abandoned,
@@ -446,19 +481,19 @@ impl RunControl {
     /// Engine plumbing, hidden from the docs and not covered by semver:
     /// its signature may change in any release.
     #[doc(hidden)]
-    pub fn release_background(&self, call_id: &str) -> bool {
+    pub fn release_background(&self, key: u64) -> bool {
         let mut background = self.background();
-        match background.get(call_id).map(|call| &call.state) {
+        match background.calls.get(&key).map(|call| &call.state) {
             Some(BackgroundState::Moved) => true,
             // Moved, and already finished.
             None => true,
             Some(BackgroundState::Done) => {
                 // Like any finished call, its token is left alone.
-                background.remove(call_id);
+                background.calls.remove(&key);
                 false
             }
             Some(BackgroundState::Waiting(_)) => {
-                if let Some(call) = background.remove(call_id) {
+                if let Some(call) = background.calls.remove(&key) {
                     call.token.cancel();
                 }
                 false
@@ -553,7 +588,7 @@ impl RunControl {
         self.calls.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn background(&self) -> MutexGuard<'_, HashMap<String, BackgroundCall>> {
+    fn background(&self) -> MutexGuard<'_, BackgroundCalls> {
         // Same reasoning as `lock`.
         self.background.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -564,7 +599,7 @@ impl std::fmt::Debug for RunControl {
         f.debug_struct("RunControl")
             .field("queued", &self.len())
             .field("calls", &self.calls().len())
-            .field("background", &self.background().len())
+            .field("background", &self.background().calls.len())
             .finish()
     }
 }
@@ -727,25 +762,25 @@ mod tests {
         let control = RunControl::new();
         // Moved first: the task delivers, the engine sees it moved.
         let token = CancellationToken::new();
-        let mut on_moved = control.register_background("a".into(), token.clone());
+        let (key, mut on_moved) = control.register_background("a".into(), token.clone());
         assert!(!control.cancel_background("a"), "not moved yet");
         assert!(control.background_tool("a"));
         assert!(on_moved.try_recv().is_ok());
         assert!(!control.background_tool("a"));
-        assert!(control.release_background("a"), "the engine sees it moved");
+        assert!(control.release_background(key), "the engine sees it moved");
         assert!(!token.is_cancelled());
         assert!(control.cancel_background("a"));
         assert!(token.is_cancelled());
-        assert_eq!(control.finish_background("a"), BackgroundEnd::Moved);
+        assert_eq!(control.finish_background(key), BackgroundEnd::Moved);
         assert!(!control.cancel_background("a"), "finished");
-        assert!(control.release_background("a"), "moved and finished");
+        assert!(control.release_background(key), "moved and finished");
 
         // Finished first: the engine takes the result, a move is refused.
         let token = CancellationToken::new();
-        let _on_moved = control.register_background("b".into(), token.clone());
-        assert_eq!(control.finish_background("b"), BackgroundEnd::Engine);
+        let (key, _on_moved) = control.register_background("b".into(), token.clone());
+        assert_eq!(control.finish_background(key), BackgroundEnd::Engine);
         assert!(!control.background_tool("b"));
-        assert!(!control.release_background("b"));
+        assert!(!control.release_background(key));
         assert!(
             !token.is_cancelled(),
             "a finished call's token is left alone"
@@ -753,11 +788,41 @@ mod tests {
 
         // Let go of while running: its token fires, its task finds no taker.
         let token = CancellationToken::new();
-        let _on_moved = control.register_background("c".into(), token.clone());
-        assert!(!control.release_background("c"));
+        let (key, _on_moved) = control.register_background("c".into(), token.clone());
+        assert!(!control.release_background(key));
         assert!(token.is_cancelled());
-        assert_eq!(control.finish_background("c"), BackgroundEnd::Abandoned);
+        assert_eq!(control.finish_background(key), BackgroundEnd::Abandoned);
         assert!(!control.background_tool("c"));
+    }
+
+    #[test]
+    fn calls_sharing_an_id_are_tracked_apart() {
+        let control = RunControl::new();
+        // An earlier run's call, moved and still running.
+        let old_token = CancellationToken::new();
+        let (old, _on_moved) = control.register_background("t1".into(), old_token.clone());
+        assert!(control.background_tool("t1"));
+        assert!(control.release_background(old));
+        // A later run reuses the id.
+        let new_token = CancellationToken::new();
+        let (new, _on_moved) = control.register_background("t1".into(), new_token.clone());
+        assert_ne!(old, new);
+        assert_eq!(
+            control.finish_background(old),
+            BackgroundEnd::Moved,
+            "the moved call still delivers its own result"
+        );
+        assert_eq!(control.finish_background(new), BackgroundEnd::Engine);
+        assert!(!control.release_background(new));
+
+        // Both moved: `cancel_background` stops the newest.
+        let (first, _on_moved) = control.register_background("t2".into(), old_token.clone());
+        assert!(control.background_tool("t2"));
+        let (_, _on_moved) = control.register_background("t2".into(), new_token.clone());
+        assert!(control.background_tool("t2"));
+        assert!(control.cancel_background("t2"));
+        assert!(new_token.is_cancelled() && !old_token.is_cancelled());
+        assert_eq!(control.finish_background(first), BackgroundEnd::Moved);
     }
 
     #[test]
