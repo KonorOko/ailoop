@@ -1046,3 +1046,40 @@ async fn dropped_run_reports_a_taken_result_as_not_delivered() {
         "queued messages go back, the background result does not"
     );
 }
+
+/// A run whose stream is dropped while a call it moved still runs
+/// stops taking results: the real result goes to the callback, as not
+/// delivered.
+#[tokio::test(start_paused = true)]
+async fn dropped_run_leaves_a_later_result_to_the_callback() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 5));
+    let mut wait = Job::new("wait", 10);
+    wait.background = false;
+    let registry = tools([job.clone(), Arc::new(wait)]);
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "job")]),
+        tool_calls_turn(&[("t2", "wait")]),
+        text_turn("done"),
+    ]);
+    let (background, mut results) = callback();
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    run_until(
+        &model,
+        &registry,
+        config(&control, background),
+        |c| matches!(c, StreamChunk::ToolCallStarted { call_id, .. } if call_id == "t2"),
+    )
+    .await;
+    mover.await.unwrap();
+    assert!(!job.finished());
+
+    let result = tokio::time::timeout(Duration::from_secs(60), results.recv())
+        .await
+        .expect("reported to the callback")
+        .unwrap();
+    assert_eq!(result.content.as_text(), Some("job done"));
+    assert!(!result.delivered);
+    assert!(results.try_recv().is_err());
+    assert!(control.take_pending().is_empty());
+}
