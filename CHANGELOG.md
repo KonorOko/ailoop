@@ -26,7 +26,9 @@ and this project adheres to
   queued on the inbox) until it finished, and the only way out,
   `cancel_tool`, threw its work away. A moved call is answered at once
   with a provisional result (`"Moved to the background while running
-  …"`, or the text set with `BackgroundConfig::notice`), which stays
+  … Its result may arrive later in a user message …"`, or the text set
+  with `BackgroundConfig::notice`; it says "may" because a result the
+  run does not take reaches the model only if the caller delivers it), which stays
   in the history as its tool result; the step goes on, so a message
   pushed while the tool ran enters at that turn close, and a moved call
   in a parallel batch stops holding the batch. The tool keeps running

@@ -63,10 +63,14 @@ impl BackgroundConfig {
         self
     }
 
-    /// The text a moved call gets when no [`Self::notice`] is set.
+    /// The text a moved call gets when no [`Self::notice`] is set. It
+    /// tells the model the result may arrive later, not that it will:
+    /// a result the run does not take reaches the model only if the
+    /// caller delivers it (see [`BackgroundToolResult::delivered`]),
+    /// and without [`Self::on_result`] it is dropped.
     pub fn default_notice(call: &ToolCallInfo) -> String {
         format!(
-            "Moved to the background while running (call id {}). Its result will arrive \
+            "Moved to the background while running (call id {}). Its result may arrive \
              later in a user message; do not call the tool again for it.",
             call.call_id
         )
@@ -218,6 +222,14 @@ mod tests {
                 other => panic!("unexpected block {other:?}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn default_notice_does_not_promise_the_result() {
+        let call = ToolCallInfo::new(RunId::new(), StepId::new(), "t1", "job");
+        let notice = BackgroundConfig::default_notice(&call);
+        assert!(notice.contains("(call id t1)"));
+        assert!(notice.contains("may arrive later"), "{notice}");
     }
 
     #[test]
