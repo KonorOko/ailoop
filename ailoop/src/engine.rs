@@ -118,6 +118,11 @@ struct RunGuard {
     /// The id under which `control` hands this run background results,
     /// while it takes them.
     background_run: Option<u64>,
+    /// Background results the run took. They are reported once the run
+    /// is over, when it is known whether its messages count: delivered
+    /// if it handed `RunFinished` over or failed (they are in the
+    /// error's partial messages), not delivered if it was rolled back.
+    took_results: std::sync::Mutex<Vec<BackgroundToolResult>>,
 }
 
 impl RunGuard {
@@ -142,12 +147,14 @@ impl RunGuard {
             errored: AtomicBool::new(false),
             background,
             background_run,
+            took_results: std::sync::Mutex::default(),
         }
     }
 
     /// Drains the run's [`RunControl`]: queued messages and the
     /// background results waiting for this run, remembering what it
-    /// took so a drop can put it back. With `close_if_empty`, finding
+    /// took so a drop can put the messages back and the results can be
+    /// reported when the run is over. With `close_if_empty`, finding
     /// nothing also stops the run taking background results, in the
     /// same step. Empty without a control.
     fn drain(&self, close_if_empty: bool) -> Drained {
@@ -155,14 +162,17 @@ impl RunGuard {
             return Drained::default();
         };
         let drained = control.drain(run, close_if_empty);
-        if !drained.messages.is_empty() || !drained.results.is_empty() {
-            self.taken.lock().unwrap_or_else(|e| e.into_inner()).extend(
-                drained
-                    .results
-                    .iter()
-                    .map(|(message, _)| message.clone())
-                    .chain(drained.messages.iter().cloned()),
-            );
+        if !drained.messages.is_empty() {
+            self.taken
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(drained.messages.iter().cloned());
+        }
+        if !drained.results.is_empty() {
+            self.took_results
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(drained.results.iter().map(|(_, result)| result.clone()));
         }
         drained
     }
@@ -246,12 +256,22 @@ impl Drop for RunGuard {
         }
         // A run dropped before it handed `RunFinished` over is rolled
         // back, even if its closing hooks had started.
-        if !self.handed_over.load(Ordering::SeqCst)
-            && !self.errored.load(Ordering::Relaxed)
-            && let Some(control) = &self.control
-        {
+        let committed =
+            self.handed_over.load(Ordering::SeqCst) || self.errored.load(Ordering::Relaxed);
+        if !committed && let Some(control) = &self.control {
             let taken = std::mem::take(self.taken.get_mut().unwrap_or_else(|e| e.into_inner()));
             control.restore(taken);
+        }
+        // The background results it took are not put back: a rolled
+        // back run leaves them to the callback, as not delivered.
+        let took = std::mem::take(
+            self.took_results
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        for mut result in took {
+            result.delivered = committed;
+            self.background.report(result);
         }
         for mw in self.pending() {
             mw.on_run_dropped(&self.run_id);
@@ -1732,14 +1752,12 @@ fn run_engine<'a, M: CompletionModel>(
             // stay queued. A turn that would end the run and finds
             // nothing to deliver also stops it taking background
             // results, so none arrives after its last drain.
+            // The guard reports the background results to the callback
+            // once the run is over.
             let drained = guard.drain(!matches!(finish_reason, FinishReason::ToolUse));
             let mut background_finished = Vec::new();
             let mut inbound = Vec::with_capacity(drained.results.len() + drained.messages.len());
-            for (message, mut result) in drained.results {
-                // Reported as soon as it is the run's, before anything
-                // is yielded: a stream dropped at a `yield` would skip it.
-                result.delivered = true;
-                config.background.report(result.clone());
+            for (message, result) in drained.results {
                 background_finished.push(result);
                 inbound.push(message);
             }

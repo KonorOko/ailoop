@@ -49,10 +49,10 @@ impl BackgroundConfig {
 
     /// Called once for every call this run moves to the background,
     /// with its real result, whether or not the run took that result
-    /// (see [`BackgroundToolResult::delivered`]). It may be called from
-    /// the run's stream, from the call's own task, or when the run ends
-    /// (its stream dropped included), possibly after the run is over,
-    /// so it must not block: hand the result over (a channel send, say)
+    /// (see [`BackgroundToolResult::delivered`]). It is called from the
+    /// call's own task, or when the run that took the result is over
+    /// (its stream dropped included), possibly long after the run, so
+    /// it must not block: hand the result over (a channel send, say)
     /// and return.
     pub fn on_result(
         mut self,
@@ -133,9 +133,11 @@ pub struct BackgroundToolResult {
     /// id is [`Self::call_id`], reported on
     /// [`crate::StreamChunk::InboundDelivered`]. When `false` that run
     /// had stopped taking results (it ended, or its last turn closed
-    /// before the result arrived) and nothing delivered it: it is the
-    /// caller's to deliver, for instance by pushing it on the next
-    /// run's [`crate::RunControl`].
+    /// before the result arrived), or took it but was rolled back (its
+    /// stream dropped before it handed `RunFinished` over), and nothing
+    /// delivered it: it is the caller's to deliver, for instance by
+    /// pushing it on the next run's [`crate::RunControl`]. A rolled
+    /// back run does not put it back in the queue.
     pub delivered: bool,
 }
 

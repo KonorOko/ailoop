@@ -989,3 +989,60 @@ async fn cancel_tool_and_background_tool_exclude_each_other() {
         }
     }
 }
+
+/// Runs until `stop` matches a chunk, then drops the stream.
+async fn run_until(
+    model: &ScriptedModel,
+    registry: &ToolRegistry,
+    config: RunConfig,
+    stop: impl Fn(&StreamChunk) -> bool,
+) {
+    let mut stream = run_chat(model, vec![Message::user("hi")], registry, config)
+        .await
+        .expect("run starts");
+    while let Some(chunk) = stream.next().await {
+        if stop(&chunk.expect("no error")) {
+            return;
+        }
+    }
+    panic!("the run ended before the chunk to stop at");
+}
+
+/// A run dropped after it took a background result is rolled back, so
+/// the result is not delivered: the callback says so, once, and the
+/// result is not put back in the queue for a later run to deliver.
+#[tokio::test(start_paused = true)]
+async fn dropped_run_reports_a_taken_result_as_not_delivered() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 2));
+    let mut wait = Job::new("wait", 10);
+    wait.background = false;
+    let registry = tools([job.clone(), Arc::new(wait)]);
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "job")]),
+        tool_calls_turn(&[("t2", "wait")]),
+        text_turn("done"),
+    ]);
+    let (background, mut results) = callback();
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    control.push(Inbound::text("m", "queued"));
+    run_until(
+        &model,
+        &registry,
+        config(&control, background),
+        |c| matches!(c, StreamChunk::BackgroundToolFinished { call_id, .. } if call_id == "t1"),
+    )
+    .await;
+    mover.await.unwrap();
+
+    let result = results.try_recv().expect("reported when the run dropped");
+    assert_eq!(result.content.as_text(), Some("job done"));
+    assert!(!result.delivered);
+    assert!(results.try_recv().is_err());
+    let pending = control.take_pending();
+    assert_eq!(
+        pending.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["m"],
+        "queued messages go back, the background result does not"
+    );
+}

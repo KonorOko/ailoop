@@ -91,9 +91,10 @@ impl Inbound {
 /// Delivered messages are part of the run's messages, so they are in
 /// `new_messages` on `RunFinished`, aborts included. If the run's
 /// stream is dropped before the run ends, the messages it took are put
-/// back at the front of the queue. If the run fails with an error they
-/// are not: they are in the error's partial messages, like every other
-/// message of the run.
+/// back at the front of the queue; the background results it took are
+/// not, and go to `BackgroundConfig::on_result` as not delivered. If
+/// the run fails with an error neither is: they are in the error's
+/// partial messages, like every other message of the run.
 ///
 /// Delivery is in memory and best-effort across process restarts: a
 /// caller that must not lose a message keeps its own copy until it

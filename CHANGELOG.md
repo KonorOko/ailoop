@@ -43,7 +43,10 @@ and this project adheres to
   deliver; deciding that and draining happen under one lock, and the
   callback's `BackgroundToolResult::delivered` says which happened, so
   a result is never delivered twice nor left in a queue no run will
-  drain. Configure it per run with `RunConfig::background` or
+  drain. A run whose stream is dropped before it hands `RunFinished`
+  over is rolled back: the results it took are reported as not
+  delivered and, unlike queued messages, not put back in the queue.
+  Configure it per run with `RunConfig::background` or
   `RunOptions::background`. Only tools that opt in can be moved:
   `ToolDyn::backgroundable` (default `false`), `Tool::BACKGROUNDABLE`,
   `#[ailoop_tool(backgroundable)]`, and
