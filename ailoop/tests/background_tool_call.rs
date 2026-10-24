@@ -695,11 +695,21 @@ async fn provisional_result_uses_the_notice_and_runs_after_hooks() {
     let control = RunControl::new();
     let job = Arc::new(Job::new("job", 30));
     let registry = tools([job.clone()]);
-    let model = ScriptedModel::new([tool_calls_turn(&[("t1", "job")]), text_turn("ok")]);
+    let mut turn = tool_calls_turn(&[("t1", "job")]);
+    if let StreamChunk::ToolCallFinished { args, .. } = &mut turn[1] {
+        *args = json!({"target": "docs"});
+    }
+    let model = ScriptedModel::new([turn, text_turn("ok")]);
     let after = Arc::new(After::default());
     let mut cfg = config(
         &control,
-        BackgroundConfig::new().notice(|call| format!("{} keeps running", call.name)),
+        BackgroundConfig::new().notice(|call, args| {
+            format!(
+                "{} of {} keeps running",
+                call.name,
+                args["target"].as_str().unwrap()
+            )
+        }),
     );
     cfg.middlewares = vec![after.clone()];
     let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
@@ -707,11 +717,11 @@ async fn provisional_result_uses_the_notice_and_runs_after_hooks() {
     mover.await.unwrap();
     assert_eq!(
         result_of(&chunks, "t1").as_text(),
-        Some("job keeps running")
+        Some("job of docs keeps running")
     );
     let seen = after.0.lock().unwrap();
     assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].1.as_text(), Some("job keeps running"));
+    assert_eq!(seen[0].1.as_text(), Some("job of docs keeps running"));
 }
 
 /// A moved call in a step that suspends is answered in the suspension;
@@ -1200,7 +1210,7 @@ async fn conversation_takes_the_background_config_from_run_options() {
         .build()
         .expect("build");
     let (background, mut results) = callback();
-    let background = background.notice(|call| format!("moved {}", call.call_id));
+    let background = background.notice(|call, _| format!("moved {}", call.call_id));
     let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
     let outcome = chat
         .run_with_options(

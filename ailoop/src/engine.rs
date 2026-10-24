@@ -1541,11 +1541,11 @@ fn run_engine<'a, M: CompletionModel>(
                 // abort: the tool goes on running either way.
                 let moved_calls = std::mem::take(&mut *moved_calls.lock().unwrap_or_else(|e| e.into_inner()));
                 for slot in &mut slots {
-                    if let Slot::Gated { id, call, content, moved, .. } = slot
+                    if let Slot::Gated { id, args, call, content, moved, .. } = slot
                         && moved_calls.contains(id)
                     {
                         *moved = true;
-                        *content = Some(config.background.notice_for(call));
+                        *content = Some(config.background.notice_for(call, args));
                     }
                 }
                 let outputs = match outputs {

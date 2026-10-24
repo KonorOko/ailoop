@@ -10,7 +10,7 @@ use crate::ids::{RunId, StepId};
 use crate::message::{ToolResultBlock, ToolResultContent, UserBlock};
 use crate::middleware::ToolCallInfo;
 
-type NoticeFn = dyn Fn(&ToolCallInfo) -> String + Send + Sync;
+type NoticeFn = dyn Fn(&ToolCallInfo, &Value) -> String + Send + Sync;
 type ResultFn = dyn Fn(BackgroundToolResult) + Send + Sync;
 
 /// How a run handles the tool calls moved to the background with
@@ -37,12 +37,13 @@ impl BackgroundConfig {
     }
 
     /// The text of the provisional result a call gets when it is moved,
-    /// built from the call. It is a successful result (`is_error:
-    /// false`) and goes through the run's `on_after_tool_call*` hooks
-    /// like any other.
+    /// built from the call and the arguments its tool runs with (after
+    /// the run's `on_before_tool_call_mut` hooks). It is a successful
+    /// result (`is_error: false`) and goes through the run's
+    /// `on_after_tool_call*` hooks like any other.
     pub fn notice(
         mut self,
-        notice: impl Fn(&ToolCallInfo) -> String + Send + Sync + 'static,
+        notice: impl Fn(&ToolCallInfo, &Value) -> String + Send + Sync + 'static,
     ) -> Self {
         self.notice = Some(Arc::new(notice));
         self
@@ -81,9 +82,9 @@ impl BackgroundConfig {
     /// Engine plumbing, hidden from the docs and not covered by semver:
     /// its signature may change in any release.
     #[doc(hidden)]
-    pub fn notice_for(&self, call: &ToolCallInfo) -> ToolResultContent {
+    pub fn notice_for(&self, call: &ToolCallInfo, args: &Value) -> ToolResultContent {
         let text = match &self.notice {
-            Some(notice) => notice(call),
+            Some(notice) => notice(call, args),
             None => Self::default_notice(call),
         };
         ToolResultContent::text(text)
