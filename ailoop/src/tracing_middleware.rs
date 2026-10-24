@@ -198,7 +198,9 @@ impl ChatMiddleware for TracingMiddleware {
                 run_id,
                 step_id,
                 call_id,
+                name,
                 content,
+                cancelled,
                 ..
             } => {
                 tracing::info!(
@@ -206,7 +208,9 @@ impl ChatMiddleware for TracingMiddleware {
                     run_id = %run_id,
                     step_id = %step_id,
                     call_id = %call_id,
+                    name = %name,
                     is_error = content.is_error,
+                    cancelled = *cancelled,
                     "background tool call result delivered",
                 );
             }

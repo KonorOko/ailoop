@@ -1,7 +1,7 @@
 //! Controlling a run from outside while it is in flight: see
 //! [`RunControl`].
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -91,9 +91,10 @@ impl Inbound {
 /// Delivered messages are part of the run's messages, so they are in
 /// `new_messages` on `RunFinished`, aborts included. If the run's
 /// stream is dropped before the run ends, the messages it took are put
-/// back at the front of the queue. If the run fails with an error they
-/// are not: they are in the error's partial messages, like every other
-/// message of the run.
+/// back at the front of the queue; the background results it took are
+/// not, and go to `BackgroundConfig::on_result` as not delivered. If
+/// the run fails with an error neither is: they are in the error's
+/// partial messages, like every other message of the run.
 ///
 /// Delivery is in memory and best-effort across process restarts: a
 /// caller that must not lose a message keeps its own copy until it
@@ -105,15 +106,37 @@ impl Inbound {
 pub struct RunControl {
     inbox: Arc<Mutex<Inbox>>,
     /// Token of each tool call of the step in flight, by `call_id`.
+    /// When both are held, this lock is taken before `background`.
     calls: Arc<Mutex<HashMap<String, CancellationToken>>>,
-    /// Calls to backgroundable tools that are running, by `call_id`,
-    /// moved or not.
-    background: Arc<Mutex<HashMap<String, BackgroundCall>>>,
+    /// Calls to backgroundable tools that are running, moved or not.
+    background: Arc<Mutex<BackgroundCalls>>,
+}
+
+/// The background calls a handle tracks, each under a key of its own:
+/// a `call_id` alone is not enough, since a later run may reuse the id
+/// of a call an earlier run moved and that is still running.
+#[derive(Default)]
+struct BackgroundCalls {
+    /// The key the next call gets; keys only grow, so the newest call
+    /// with a given `call_id` has the highest key.
+    next: u64,
+    calls: BTreeMap<u64, BackgroundCall>,
+}
+
+impl BackgroundCalls {
+    /// Key of the newest tracked call with `call_id` that `matches`.
+    fn newest(&self, call_id: &str, matches: impl Fn(&BackgroundState) -> bool) -> Option<u64> {
+        self.calls
+            .iter()
+            .rev()
+            .find(|(_, call)| call.call_id == call_id && matches(&call.state))
+            .map(|(key, _)| *key)
+    }
 }
 
 /// The queue and what the run in flight still takes besides it, under
 /// one lock: deciding that a run takes no more background results and
-/// draining what it took are one step.
+/// handing back those it did not drain are one step.
 #[derive(Default)]
 struct Inbox {
     queue: VecDeque<Inbound>,
@@ -127,6 +150,7 @@ struct Inbox {
 /// A call to a backgroundable tool, tracked from when it starts until
 /// the engine lets go of it (or, once moved, until it finishes).
 struct BackgroundCall {
+    call_id: String,
     /// The token its tool sees, not tied to the run's.
     token: CancellationToken,
     state: BackgroundState,
@@ -320,13 +344,14 @@ impl RunControl {
     /// unless the call is to a tool that opts in
     /// (`ToolDyn::backgroundable`), is running (past its
     /// `on_before_tool_call*` hooks, tool invoked) and has no result
-    /// yet; a call already moved returns `false` too.
+    /// yet; a call already moved, or already stopped with
+    /// [`Self::cancel_tool`], returns `false` too.
     ///
     /// Once moved, the call is no longer the run's:
     ///
     /// - Ending, aborting or cancelling the run does not stop it, and
     ///   [`Self::cancel_tool`] returns `false` for it; stop it with
-    ///   [`Self::cancel_background`]. The token its tool sees
+    ///   [`Self::cancel_background_tool`]. The token its tool sees
     ///   (`ToolContext::cancellation`) fires only then.
     /// - Its real result goes through the run's
     ///   `on_after_tool_call_mut` hooks (so a `Sanitize` applies), then
@@ -334,8 +359,7 @@ impl RunControl {
     ///   run still takes it: delivered at the next turn close like any
     ///   queued message, ahead of them, with a
     ///   [`crate::StreamChunk::BackgroundToolFinished`]. A run takes
-    ///   results until it ends, or until a turn that would end it
-    ///   closes with nothing to deliver. Either way the result also
+    ///   results until it ends. Either way the result also
     ///   goes to `BackgroundConfig::on_result`, whose
     ///   [`BackgroundToolResult::delivered`] says whether the run took
     ///   it; a result is never left in a queue no run will drain.
@@ -347,10 +371,23 @@ impl RunControl {
     /// a user message. Nothing caps how many calls run in the
     /// background: that is the caller's to limit.
     pub fn background_tool(&self, call_id: &str) -> bool {
+        // Holding `calls` throughout makes this exclusive with
+        // `cancel_tool`: a call it already cancelled is not moved, and
+        // a moved call leaves `calls` before `cancel_tool` can find it.
+        let mut calls = self.calls();
+        if calls
+            .get(call_id)
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return false;
+        }
         let moved = {
             let mut background = self.background();
-            match background.get_mut(call_id) {
-                Some(call) if matches!(call.state, BackgroundState::Waiting(_)) => {
+            let key = background.newest(call_id, |state| {
+                matches!(state, BackgroundState::Waiting(_))
+            });
+            match key.and_then(|key| background.calls.get_mut(&key)) {
+                Some(call) => {
                     let BackgroundState::Waiting(moved) =
                         std::mem::replace(&mut call.state, BackgroundState::Moved)
                     else {
@@ -362,11 +399,11 @@ impl RunControl {
                     let _ = moved.send(());
                     true
                 }
-                _ => false,
+                None => false,
             }
         };
         if moved {
-            self.unregister_call(call_id);
+            calls.remove(call_id);
         }
         moved
     }
@@ -378,19 +415,25 @@ impl RunControl {
     /// partly completed (with [`BackgroundToolResult::cancelled`] set),
     /// delivered like any background result. Returns `false`, doing
     /// nothing, when no moved call with that id is still running
-    /// (unknown, not moved, or already finished).
-    pub fn cancel_background(&self, call_id: &str) -> bool {
-        match self.background().get(call_id) {
-            Some(call) if matches!(call.state, BackgroundState::Moved) => {
+    /// (unknown, not moved, or already finished). If several moved
+    /// calls with that id are running (a provider reusing call ids
+    /// across runs), it stops the most recently started one.
+    pub fn cancel_background_tool(&self, call_id: &str) -> bool {
+        let background = self.background();
+        let key = background.newest(call_id, |state| matches!(state, BackgroundState::Moved));
+        match key.and_then(|key| background.calls.get(&key)) {
+            Some(call) => {
                 call.token.cancel();
                 true
             }
-            _ => false,
+            None => false,
         }
     }
 
     /// Track a running call to a backgroundable tool, whose tool sees
-    /// `token`. The receiver fires if it is moved.
+    /// `token`. Returns the key that [`Self::finish_background`] and
+    /// [`Self::release_background`] take, and a receiver that fires if
+    /// the call is moved.
     ///
     /// Engine plumbing, hidden from the docs and not covered by semver:
     /// its signature may change in any release.
@@ -399,16 +442,20 @@ impl RunControl {
         &self,
         call_id: String,
         token: CancellationToken,
-    ) -> oneshot::Receiver<()> {
+    ) -> (u64, oneshot::Receiver<()>) {
         let (moved, on_moved) = oneshot::channel();
-        self.background().insert(
-            call_id,
+        let mut background = self.background();
+        let key = background.next;
+        background.next += 1;
+        background.calls.insert(
+            key,
             BackgroundCall {
+                call_id,
                 token,
                 state: BackgroundState::Waiting(moved),
             },
         );
-        on_moved
+        (key, on_moved)
     }
 
     /// Called by a background call's task once its tool is done; says
@@ -418,19 +465,19 @@ impl RunControl {
     /// Engine plumbing, hidden from the docs and not covered by semver:
     /// its signature may change in any release.
     #[doc(hidden)]
-    pub fn finish_background(&self, call_id: &str) -> BackgroundEnd {
+    pub fn finish_background(&self, key: u64) -> BackgroundEnd {
         let mut background = self.background();
-        match background.get(call_id).map(|call| &call.state) {
+        match background.calls.get(&key).map(|call| &call.state) {
             Some(BackgroundState::Waiting(_)) => {
                 // Kept until the engine releases it, so a release
                 // finding no entry can only mean the call was moved.
-                if let Some(call) = background.get_mut(call_id) {
+                if let Some(call) = background.calls.get_mut(&key) {
                     call.state = BackgroundState::Done;
                 }
                 BackgroundEnd::Engine
             }
             Some(BackgroundState::Moved) => {
-                background.remove(call_id);
+                background.calls.remove(&key);
                 BackgroundEnd::Moved
             }
             Some(BackgroundState::Done) | None => BackgroundEnd::Abandoned,
@@ -446,19 +493,19 @@ impl RunControl {
     /// Engine plumbing, hidden from the docs and not covered by semver:
     /// its signature may change in any release.
     #[doc(hidden)]
-    pub fn release_background(&self, call_id: &str) -> bool {
+    pub fn release_background(&self, key: u64) -> bool {
         let mut background = self.background();
-        match background.get(call_id).map(|call| &call.state) {
+        match background.calls.get(&key).map(|call| &call.state) {
             Some(BackgroundState::Moved) => true,
             // Moved, and already finished.
             None => true,
             Some(BackgroundState::Done) => {
                 // Like any finished call, its token is left alone.
-                background.remove(call_id);
+                background.calls.remove(&key);
                 false
             }
             Some(BackgroundState::Waiting(_)) => {
-                if let Some(call) = background.remove(call_id) {
+                if let Some(call) = background.calls.remove(&key) {
                     call.token.cancel();
                 }
                 false
@@ -500,15 +547,13 @@ impl RunControl {
         None
     }
 
-    /// Take the queue and `run`'s background results in one step. With
-    /// `close_if_empty`, a drain that finds neither also stops `run`
-    /// taking results, in the same step, so a result arriving after it
-    /// is refused rather than left behind.
+    /// Take the queue and `run`'s background results in one step. `run`
+    /// goes on taking results until [`Self::close_run`].
     ///
     /// Engine plumbing, hidden from the docs and not covered by semver:
     /// its signature may change in any release.
     #[doc(hidden)]
-    pub fn drain(&self, run: u64, close_if_empty: bool) -> Drained {
+    pub fn drain(&self, run: u64) -> Drained {
         let mut inbox = self.lock();
         let open = inbox.open == Some(run);
         let results = if open {
@@ -517,14 +562,13 @@ impl RunControl {
             Vec::new()
         };
         let messages: Vec<Inbound> = inbox.queue.drain(..).collect();
-        if open && close_if_empty && messages.is_empty() && results.is_empty() {
-            inbox.open = None;
-        }
         Drained { messages, results }
     }
 
     /// Stop `run` taking background results; returns those it took but
-    /// never drained, for the caller to report as not delivered.
+    /// never drained, for the caller to report as not delivered. Both in
+    /// one step, so a result offered at the same time is either handed
+    /// back here or refused, never left where no drain will take it.
     ///
     /// Engine plumbing, hidden from the docs and not covered by semver:
     /// its signature may change in any release.
@@ -553,7 +597,7 @@ impl RunControl {
         self.calls.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn background(&self) -> MutexGuard<'_, HashMap<String, BackgroundCall>> {
+    fn background(&self) -> MutexGuard<'_, BackgroundCalls> {
         // Same reasoning as `lock`.
         self.background.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -564,7 +608,7 @@ impl std::fmt::Debug for RunControl {
         f.debug_struct("RunControl")
             .field("queued", &self.len())
             .field("calls", &self.calls().len())
-            .field("background", &self.background().len())
+            .field("background", &self.background().calls.len())
             .finish()
     }
 }
@@ -727,25 +771,25 @@ mod tests {
         let control = RunControl::new();
         // Moved first: the task delivers, the engine sees it moved.
         let token = CancellationToken::new();
-        let mut on_moved = control.register_background("a".into(), token.clone());
-        assert!(!control.cancel_background("a"), "not moved yet");
+        let (key, mut on_moved) = control.register_background("a".into(), token.clone());
+        assert!(!control.cancel_background_tool("a"), "not moved yet");
         assert!(control.background_tool("a"));
         assert!(on_moved.try_recv().is_ok());
         assert!(!control.background_tool("a"));
-        assert!(control.release_background("a"), "the engine sees it moved");
+        assert!(control.release_background(key), "the engine sees it moved");
         assert!(!token.is_cancelled());
-        assert!(control.cancel_background("a"));
+        assert!(control.cancel_background_tool("a"));
         assert!(token.is_cancelled());
-        assert_eq!(control.finish_background("a"), BackgroundEnd::Moved);
-        assert!(!control.cancel_background("a"), "finished");
-        assert!(control.release_background("a"), "moved and finished");
+        assert_eq!(control.finish_background(key), BackgroundEnd::Moved);
+        assert!(!control.cancel_background_tool("a"), "finished");
+        assert!(control.release_background(key), "moved and finished");
 
         // Finished first: the engine takes the result, a move is refused.
         let token = CancellationToken::new();
-        let _on_moved = control.register_background("b".into(), token.clone());
-        assert_eq!(control.finish_background("b"), BackgroundEnd::Engine);
+        let (key, _on_moved) = control.register_background("b".into(), token.clone());
+        assert_eq!(control.finish_background(key), BackgroundEnd::Engine);
         assert!(!control.background_tool("b"));
-        assert!(!control.release_background("b"));
+        assert!(!control.release_background(key));
         assert!(
             !token.is_cancelled(),
             "a finished call's token is left alone"
@@ -753,11 +797,41 @@ mod tests {
 
         // Let go of while running: its token fires, its task finds no taker.
         let token = CancellationToken::new();
-        let _on_moved = control.register_background("c".into(), token.clone());
-        assert!(!control.release_background("c"));
+        let (key, _on_moved) = control.register_background("c".into(), token.clone());
+        assert!(!control.release_background(key));
         assert!(token.is_cancelled());
-        assert_eq!(control.finish_background("c"), BackgroundEnd::Abandoned);
+        assert_eq!(control.finish_background(key), BackgroundEnd::Abandoned);
         assert!(!control.background_tool("c"));
+    }
+
+    #[test]
+    fn calls_sharing_an_id_are_tracked_apart() {
+        let control = RunControl::new();
+        // An earlier run's call, moved and still running.
+        let old_token = CancellationToken::new();
+        let (old, _on_moved) = control.register_background("t1".into(), old_token.clone());
+        assert!(control.background_tool("t1"));
+        assert!(control.release_background(old));
+        // A later run reuses the id.
+        let new_token = CancellationToken::new();
+        let (new, _on_moved) = control.register_background("t1".into(), new_token.clone());
+        assert_ne!(old, new);
+        assert_eq!(
+            control.finish_background(old),
+            BackgroundEnd::Moved,
+            "the moved call still delivers its own result"
+        );
+        assert_eq!(control.finish_background(new), BackgroundEnd::Engine);
+        assert!(!control.release_background(new));
+
+        // Both moved: `cancel_background_tool` stops the newest.
+        let (first, _on_moved) = control.register_background("t2".into(), old_token.clone());
+        assert!(control.background_tool("t2"));
+        let (_, _on_moved) = control.register_background("t2".into(), new_token.clone());
+        assert!(control.background_tool("t2"));
+        assert!(control.cancel_background_tool("t2"));
+        assert!(new_token.is_cancelled() && !old_token.is_cancelled());
+        assert_eq!(control.finish_background(first), BackgroundEnd::Moved);
     }
 
     #[test]
@@ -767,6 +841,15 @@ mod tests {
         let _on_moved = control.register_background("a".into(), CancellationToken::new());
         assert!(control.background_tool("a"));
         assert!(!control.cancel_tool("a"));
+    }
+
+    #[test]
+    fn cancelling_a_call_makes_background_tool_refuse_it() {
+        let control = RunControl::new();
+        control.register_call("a".into(), CancellationToken::new());
+        let _on_moved = control.register_background("a".into(), CancellationToken::new());
+        assert!(control.cancel_tool("a"));
+        assert!(!control.background_tool("a"));
     }
 
     #[test]
@@ -790,8 +873,8 @@ mod tests {
         control.push(Inbound::text("m", "m"));
         assert_eq!(control.len(), 1, "results are not queued messages");
         assert_eq!(ids(&control.take_pending()), ["m"]);
-        // A drain that takes something keeps the run open.
-        let drained = control.drain(run, true);
+        // Draining keeps the run open.
+        let drained = control.drain(run);
         assert_eq!(drained.results.len(), 1);
         assert!(
             control
@@ -808,59 +891,86 @@ mod tests {
                 .is_some()
         );
         assert!(control.close_run(run).is_empty());
-        // An empty closing drain stops taking results.
+        // So does a drain that finds nothing: only `close_run` stops it.
         let run = control.open_run();
-        assert!(control.drain(run, true).results.is_empty());
+        assert!(control.drain(run).results.is_empty());
         assert!(
             control
                 .offer_background_result(run, Inbound::text("d", "d"), background_result("d"))
-                .is_some()
+                .is_none()
         );
+        assert_eq!(control.close_run(run).len(), 1);
     }
 
-    /// A result offered while the run's last drain closes it is either
-    /// in that drain or refused: never left where nothing will take it.
+    /// A result offered while the run closes is either handed back by
+    /// the close or refused: never left where nothing will take it.
     #[test]
-    fn closing_drain_and_offer_never_strand_a_result() {
+    fn closing_and_offer_never_strand_a_result() {
         use std::sync::Barrier;
         use std::thread;
 
-        let (mut drained_count, mut refused_count) = (0, 0);
-        for round in 0..5000 {
-            let control = RunControl::new();
-            let run = control.open_run();
-            let barrier = Arc::new(Barrier::new(2));
-            let offerer = {
-                let (control, barrier) = (control.clone(), barrier.clone());
-                thread::spawn(move || {
-                    barrier.wait();
-                    for _ in 0..(round % 50) {
-                        std::hint::spin_loop();
-                    }
-                    control.offer_background_result(
-                        run,
-                        Inbound::text("a", "a"),
-                        background_result("a"),
-                    )
+        // Each round, the offerer offers results back to back while the
+        // run drains and then closes, so offers keep landing around the
+        // close: one landing between handing back the results and
+        // refusing more (were they two steps) would be left behind. The
+        // window is narrow, so there are many rounds, made cheap by two
+        // long-lived threads meeting at a barrier.
+        const ROUNDS: usize = 50_000;
+        let runs: Arc<Vec<(RunControl, u64)>> = Arc::new(
+            (0..ROUNDS)
+                .map(|_| {
+                    let control = RunControl::new();
+                    let run = control.open_run();
+                    (control, run)
                 })
-            };
-            barrier.wait();
-            let drained = control.drain(run, true);
-            let refused = offerer.join().unwrap();
-            let left = control.close_run(run);
-            assert!(
-                left.is_empty(),
-                "round {round}: stranded after the closing drain"
-            );
-            match (drained.results.len(), refused.is_some()) {
-                (1, false) => drained_count += 1,
-                (0, true) => refused_count += 1,
-                other => panic!("round {round}: {other:?}"),
-            }
-        }
-        assert!(
-            drained_count > 0 && refused_count > 0,
-            "the race was never exercised"
+                .collect(),
         );
+        let barrier = Arc::new(Barrier::new(2));
+        let offerer = {
+            let (runs, barrier) = (runs.clone(), barrier.clone());
+            thread::spawn(move || {
+                runs.iter()
+                    .map(|(control, run)| {
+                        barrier.wait();
+                        let mut accepted = 0;
+                        while control
+                            .offer_background_result(
+                                *run,
+                                Inbound::text("a", "a"),
+                                background_result("a"),
+                            )
+                            .is_none()
+                        {
+                            accepted += 1;
+                        }
+                        accepted
+                    })
+                    .collect::<Vec<usize>>()
+            })
+        };
+        let taken: Vec<usize> = runs
+            .iter()
+            .enumerate()
+            .map(|(round, (control, run))| {
+                barrier.wait();
+                // Close only once the offerer is under way.
+                let mut taken = 0;
+                while taken == 0 {
+                    taken += control.drain(*run).results.len();
+                }
+                for _ in 0..(round % 4) {
+                    taken += control.drain(*run).results.len();
+                }
+                taken + control.close_run(*run).len()
+            })
+            .collect();
+        let accepted = offerer.join().unwrap();
+        for (round, (control, _)) in runs.iter().enumerate() {
+            assert_eq!(
+                taken[round], accepted[round],
+                "round {round}: a result accepted before the close was left behind"
+            );
+            assert!(control.lock().results.is_empty(), "round {round}");
+        }
     }
 }

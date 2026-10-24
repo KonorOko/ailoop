@@ -323,8 +323,15 @@ pub enum StreamChunk {
         step_id: StepId,
         /// The call, as on its `ToolCallStarted`.
         call_id: String,
+        /// The tool's name, as on the call's `ToolCallStarted`.
+        name: String,
         /// The result, after the run's `on_after_tool_call_mut` hooks.
+        /// An error result when the call was cancelled (`cancelled`)
+        /// or the tool failed.
         content: ToolResultContent,
+        /// The call was stopped by
+        /// [`crate::RunControl::cancel_background_tool`].
+        cancelled: bool,
     },
 }
 
@@ -419,13 +426,17 @@ impl StreamChunk {
         run_id: RunId,
         step_id: StepId,
         call_id: impl Into<String>,
+        name: impl Into<String>,
         content: ToolResultContent,
+        cancelled: bool,
     ) -> Self {
         Self::BackgroundToolFinished {
             run_id,
             step_id,
             call_id: call_id.into(),
+            name: name.into(),
             content,
+            cancelled,
         }
     }
 

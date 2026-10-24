@@ -80,6 +80,7 @@ pub struct Conversation<M: CompletionModel> {
     max_tokens: Option<u32>,
     max_iterations: Option<usize>,
     tool_concurrency: usize,
+    background: BackgroundConfig,
     context_options: ContextOptions,
     /// The suspended run, while there is one: the history ends on its
     /// step's tool calls.
@@ -198,9 +199,12 @@ pub struct RunOptions {
     /// How this run handles tool calls moved to the background with
     /// [`RunControl::background_tool`]: the provisional result a moved
     /// call gets and the callback its real result goes to. Same
-    /// semantics as [`ailoop_core::RunConfig::background`]; `None`
-    /// uses [`BackgroundConfig::default`]. The callback is kept by each
-    /// moved call's task, so it outlives the run.
+    /// semantics as [`ailoop_core::RunConfig::background`]. The callback
+    /// is kept by each moved call's task, so it outlives the run.
+    ///
+    /// Precedence, highest first: this field >
+    /// [`ConversationBuilder::background`] > [`BackgroundConfig::default`].
+    /// `None` falls through to the builder default.
     pub background: Option<BackgroundConfig>,
     /// Run-scoped middlewares appended after the builder's chain
     /// (after `ApprovalMiddleware`). Internal: used by
@@ -263,8 +267,9 @@ impl RunOptions {
         self
     }
 
-    /// Set how this run handles calls moved to the background. See
-    /// [`Self::background`] for semantics.
+    /// Set how this run handles calls moved to the background, in
+    /// place of the builder default. See [`Self::background`] for
+    /// semantics.
     pub fn background(mut self, background: BackgroundConfig) -> Self {
         self.background = Some(background);
         self
@@ -676,7 +681,9 @@ where
         config.timeout = options.timeout;
         config.cancellation = options.cancellation;
         config.control = options.control;
-        config.background = options.background.unwrap_or_default();
+        config.background = options
+            .background
+            .unwrap_or_else(|| self.background.clone());
         config.tool_concurrency = self.tool_concurrency;
         // A resumed run takes the suspension; the stream puts it back if
         // the run fails or is dropped, since the history is rolled back.
@@ -767,6 +774,7 @@ pub struct ConversationBuilder<M: CompletionModel> {
     max_tokens: Option<u32>,
     max_iterations: Option<usize>,
     tool_concurrency: usize,
+    background: BackgroundConfig,
     context_options: ContextOptions,
     errors: Vec<BuildError>,
 }
@@ -797,6 +805,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             max_tokens: None,
             max_iterations: None,
             tool_concurrency: 1,
+            background: BackgroundConfig::default(),
             context_options: ContextOptions {
                 compact_between_iterations: false,
                 recover_from_overflow: true,
@@ -1289,6 +1298,18 @@ impl<M: CompletionModel> ConversationBuilder<M> {
         self
     }
 
+    /// Default handling of tool calls moved to the background with
+    /// [`RunControl::background_tool`] for every run: the provisional
+    /// result a moved call gets and the callback its real result goes
+    /// to (see [`BackgroundConfig`]). The callback usually belongs to
+    /// the whole application, so it can be set once here; a per-run
+    /// [`RunOptions::background`] replaces it for that run. Defaults to
+    /// [`BackgroundConfig::default`].
+    pub fn background(mut self, background: BackgroundConfig) -> Self {
+        self.background = background;
+        self
+    }
+
     /// Default `additional_params` applied to every [`ChatRequest`].
     /// Useful for provider-specific knobs that don't yet have a typed
     /// surface (e.g. Anthropic `thinking`). See [`Self::temperature`]
@@ -1443,6 +1464,7 @@ impl<M: CompletionModel> ConversationBuilder<M> {
             max_tokens: self.max_tokens,
             max_iterations: self.max_iterations,
             tool_concurrency: self.tool_concurrency,
+            background: self.background,
             context_options: self.context_options,
             suspension: self.seeded_suspension,
         })

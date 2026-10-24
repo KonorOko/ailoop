@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use ailoop::{
     AbortReason, BackgroundConfig, BackgroundToolResult, CallState, CancellationToken,
-    ChatMiddleware, FinishReason, Inbound, Message, RunConfig, RunControl, Sanitize, StreamChunk,
-    ToolCallInfo, ToolDecision, ToolDefinition, ToolProgress, ToolResultBlock, ToolResultContent,
-    Usage, UserBlock, advanced::run_chat,
+    ChatMiddleware, Conversation, FinishReason, Inbound, Message, RunConfig, RunControl,
+    RunOptions, Sanitize, StreamChunk, TimeoutTool, ToolCallInfo, ToolDecision, ToolDefinition,
+    ToolProgress, ToolResultBlock, ToolResultContent, Usage, UserBlock, advanced::run_chat,
 };
 use ailoop_core::testing::ScriptedModel;
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
@@ -470,8 +470,9 @@ async fn real_result_goes_through_after_mut_hooks_on_both_paths() {
     assert_eq!(result.content.as_text(), Some("job [redacted]"));
 }
 
-/// Cancelling the run does not reach a moved call; `cancel_background`
-/// does, even though the tool never looks at its token.
+/// Cancelling the run does not reach a moved call;
+/// `cancel_background_tool` does, even though the tool never looks at
+/// its token.
 #[tokio::test(start_paused = true)]
 async fn ending_or_cancelling_the_run_leaves_the_moved_call_running() {
     for _ in 0..20 {
@@ -514,14 +515,14 @@ async fn ending_or_cancelling_the_run_leaves_the_moved_call_running() {
         assert!(!control.cancel_tool("t1"));
 
         tokio::time::sleep(Duration::from_secs(5)).await;
-        assert!(control.cancel_background("t1"));
+        assert!(control.cancel_background_tool("t1"));
         let result = results.recv().await.unwrap();
         assert!(job.token().is_cancelled());
         assert!(!job.finished(), "the tool future was dropped");
         assert!(result.cancelled && !result.delivered);
         assert!(result.content.is_error);
         assert_eq!(result.content.as_text(), Some(CANCELLED_IN_BACKGROUND));
-        assert!(!control.cancel_background("t1"), "already finished");
+        assert!(!control.cancel_background_tool("t1"), "already finished");
         assert!(!control.background_tool("t1"));
     }
 }
@@ -685,7 +686,7 @@ async fn cancel_tool_before_the_move_works_as_before() {
     tokio::time::sleep(Duration::from_secs(60)).await;
     assert!(!job.finished());
     assert!(results.try_recv().is_err());
-    assert!(!control.background_tool("t1") && !control.cancel_background("t1"));
+    assert!(!control.background_tool("t1") && !control.cancel_background_tool("t1"));
 }
 
 /// The provisional result uses the configured notice and goes through
@@ -695,11 +696,21 @@ async fn provisional_result_uses_the_notice_and_runs_after_hooks() {
     let control = RunControl::new();
     let job = Arc::new(Job::new("job", 30));
     let registry = tools([job.clone()]);
-    let model = ScriptedModel::new([tool_calls_turn(&[("t1", "job")]), text_turn("ok")]);
+    let mut turn = tool_calls_turn(&[("t1", "job")]);
+    if let StreamChunk::ToolCallFinished { args, .. } = &mut turn[1] {
+        *args = json!({"target": "docs"});
+    }
+    let model = ScriptedModel::new([turn, text_turn("ok")]);
     let after = Arc::new(After::default());
     let mut cfg = config(
         &control,
-        BackgroundConfig::new().notice(|call| format!("{} keeps running", call.name)),
+        BackgroundConfig::new().notice(|call, args| {
+            format!(
+                "{} of {} keeps running",
+                call.name,
+                args["target"].as_str().unwrap()
+            )
+        }),
     );
     cfg.middlewares = vec![after.clone()];
     let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
@@ -707,11 +718,11 @@ async fn provisional_result_uses_the_notice_and_runs_after_hooks() {
     mover.await.unwrap();
     assert_eq!(
         result_of(&chunks, "t1").as_text(),
-        Some("job keeps running")
+        Some("job of docs keeps running")
     );
     let seen = after.0.lock().unwrap();
     assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].1.as_text(), Some("job keeps running"));
+    assert_eq!(seen[0].1.as_text(), Some("job of docs keeps running"));
 }
 
 /// A moved call in a step that suspends is answered in the suspension;
@@ -912,4 +923,530 @@ async fn result_racing_the_run_end_is_delivered_exactly_once() {
     }
     // Not asserted (timing-dependent), but useful when it is run by hand.
     eprintln!("delivered {delivered}, not delivered {not_delivered}");
+}
+
+/// A later run on the same handle may reuse the id of a call an earlier
+/// run moved and that is still running: the two calls stay apart.
+#[tokio::test(start_paused = true)]
+async fn reused_call_id_does_not_mix_up_a_moved_call_and_a_new_one() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 5));
+    let other = Arc::new(Job::new("other", 10));
+    let registry = tools([job.clone(), other.clone()]);
+    let (background, mut results) = callback();
+
+    // The first run moves `t1` and ends while it runs.
+    let model = ScriptedModel::new([tool_calls_turn(&[("t1", "job")]), text_turn("ok")]);
+    let mover = move_when_started(&control, &job, "t1", Duration::from_secs(1));
+    collect(&model, &registry, config(&control, background.clone())).await;
+    mover.await.unwrap();
+
+    // The second run calls another tool under the same id, and waits
+    // for it past the end of the first call.
+    let model = ScriptedModel::new([tool_calls_turn(&[("t1", "other")]), text_turn("ok")]);
+    let chunks = collect(&model, &registry, config(&control, background)).await;
+    assert_eq!(result_of(&chunks, "t1").as_text(), Some("other done"));
+    assert_eq!(backgrounded(&chunks, "t1"), None);
+
+    let result = results.recv().await.unwrap();
+    assert_eq!(result.name, "job");
+    assert_eq!(result.content.as_text(), Some("job done"));
+    assert!(!result.delivered);
+    assert!(results.try_recv().is_err());
+}
+
+/// `cancel_tool` and `background_tool` on the same running call: the
+/// first one wins and the other returns `false`, so a call reported
+/// cancelled is never left running in the background.
+#[tokio::test(start_paused = true)]
+async fn cancel_tool_and_background_tool_exclude_each_other() {
+    for cancel_first in [true, false] {
+        let control = RunControl::new();
+        let job = Arc::new(Job::new("job", 30));
+        let registry = tools([job.clone()]);
+        let model = ScriptedModel::new([tool_calls_turn(&[("t1", "job")]), text_turn("ok")]);
+        let (background, mut results) = callback();
+        let racer = {
+            let (control, job) = (control.clone(), job.clone());
+            tokio::spawn(async move {
+                job.started.notified().await;
+                // Both before the engine looks at the call again.
+                if cancel_first {
+                    (control.cancel_tool("t1"), control.background_tool("t1"))
+                } else {
+                    let moved = control.background_tool("t1");
+                    (control.cancel_tool("t1"), moved)
+                }
+            })
+        };
+        let chunks = collect(&model, &registry, config(&control, background)).await;
+        let (cancelled, moved) = racer.await.unwrap();
+        assert_eq!((cancelled, moved), (cancel_first, !cancel_first));
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        if cancel_first {
+            assert_eq!(result_of(&chunks, "t1").as_text(), Some(WHILE_RUNNING));
+            assert!(!job.finished());
+            assert!(results.try_recv().is_err());
+        } else {
+            assert_eq!(
+                result_of(&chunks, "t1").as_text(),
+                Some(notice("t1").as_str())
+            );
+            assert!(job.finished());
+            assert_eq!(
+                results.try_recv().unwrap().content.as_text(),
+                Some("job done")
+            );
+        }
+    }
+}
+
+/// Runs until `stop` matches a chunk, then drops the stream.
+async fn run_until(
+    model: &ScriptedModel,
+    registry: &ToolRegistry,
+    config: RunConfig,
+    stop: impl Fn(&StreamChunk) -> bool,
+) {
+    let mut stream = run_chat(model, vec![Message::user("hi")], registry, config)
+        .await
+        .expect("run starts");
+    while let Some(chunk) = stream.next().await {
+        if stop(&chunk.expect("no error")) {
+            return;
+        }
+    }
+    panic!("the run ended before the chunk to stop at");
+}
+
+/// A run dropped after it took a background result is rolled back, so
+/// the result is not delivered: the callback says so, once, and the
+/// result is not put back in the queue for a later run to deliver.
+#[tokio::test(start_paused = true)]
+async fn dropped_run_reports_a_taken_result_as_not_delivered() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 2));
+    let mut wait = Job::new("wait", 10);
+    wait.background = false;
+    let registry = tools([job.clone(), Arc::new(wait)]);
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "job")]),
+        tool_calls_turn(&[("t2", "wait")]),
+        text_turn("done"),
+    ]);
+    let (background, mut results) = callback();
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    control.push(Inbound::text("m", "queued"));
+    run_until(
+        &model,
+        &registry,
+        config(&control, background),
+        |c| matches!(c, StreamChunk::BackgroundToolFinished { call_id, .. } if call_id == "t1"),
+    )
+    .await;
+    mover.await.unwrap();
+
+    let result = results.try_recv().expect("reported when the run dropped");
+    assert_eq!(result.content.as_text(), Some("job done"));
+    assert!(!result.delivered);
+    assert!(results.try_recv().is_err());
+    let pending = control.take_pending();
+    assert_eq!(
+        pending.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["m"],
+        "queued messages go back, the background result does not"
+    );
+}
+
+/// A run whose stream is dropped while a call it moved still runs
+/// stops taking results: the real result goes to the callback, as not
+/// delivered.
+#[tokio::test(start_paused = true)]
+async fn dropped_run_leaves_a_later_result_to_the_callback() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 5));
+    let mut wait = Job::new("wait", 10);
+    wait.background = false;
+    let registry = tools([job.clone(), Arc::new(wait)]);
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "job")]),
+        tool_calls_turn(&[("t2", "wait")]),
+        text_turn("done"),
+    ]);
+    let (background, mut results) = callback();
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    run_until(
+        &model,
+        &registry,
+        config(&control, background),
+        |c| matches!(c, StreamChunk::ToolCallStarted { call_id, .. } if call_id == "t2"),
+    )
+    .await;
+    mover.await.unwrap();
+    assert!(!job.finished());
+
+    let result = tokio::time::timeout(Duration::from_secs(60), results.recv())
+        .await
+        .expect("reported to the callback")
+        .unwrap();
+    assert_eq!(result.content.as_text(), Some("job done"));
+    assert!(!result.delivered);
+    assert!(results.try_recv().is_err());
+    assert!(control.take_pending().is_empty());
+}
+
+/// A moved call cancelled while its run is alive: the run takes the
+/// cancellation as the call's result, and both the chunk and the
+/// message say so.
+#[tokio::test(start_paused = true)]
+async fn moved_call_cancelled_while_the_run_lives_is_delivered_as_cancelled() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 60));
+    let mut wait = Job::new("wait", 10);
+    wait.background = false;
+    let wait = Arc::new(wait);
+    let registry = tools([job.clone(), wait.clone()]);
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "job")]),
+        tool_calls_turn(&[("t2", "wait")]),
+        text_turn("done"),
+    ]);
+    let (background, mut results) = callback();
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    let canceller = {
+        let (control, wait) = (control.clone(), wait.clone());
+        tokio::spawn(async move {
+            wait.started.notified().await;
+            assert!(control.cancel_background_tool("t1"));
+        })
+    };
+    let chunks = collect(&model, &registry, config(&control, background)).await;
+    mover.await.unwrap();
+    canceller.await.unwrap();
+
+    let finished = chunks
+        .iter()
+        .find_map(|c| match c {
+            StreamChunk::BackgroundToolFinished {
+                call_id,
+                name,
+                content,
+                cancelled,
+                ..
+            } if call_id == "t1" => Some((name.clone(), content.clone(), *cancelled)),
+            _ => None,
+        })
+        .expect("BackgroundToolFinished");
+    assert_eq!(finished.0, "job");
+    assert!(finished.1.is_error && finished.2);
+    assert_eq!(finished.1.as_text(), Some(CANCELLED_IN_BACKGROUND));
+    let (_, new_messages) = finish(&chunks);
+    let texts = user_texts(&new_messages);
+    assert_eq!(
+        texts[texts.len() - 2..],
+        [
+            "Background tool call `job` (call id t1) was cancelled:".to_string(),
+            CANCELLED_IN_BACKGROUND.to_string(),
+        ]
+    );
+    let result = results.try_recv().unwrap();
+    assert!(result.cancelled && result.delivered);
+}
+
+/// A background result the run takes goes ahead of the messages queued
+/// for the same turn close, even those queued before it arrived.
+#[tokio::test(start_paused = true)]
+async fn background_results_go_ahead_of_queued_messages() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 5));
+    let mut wait = Job::new("wait", 10);
+    wait.background = false;
+    let wait = Arc::new(wait);
+    let registry = tools([job.clone(), wait.clone()]);
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "job")]),
+        tool_calls_turn(&[("t2", "wait")]),
+        text_turn("done"),
+    ]);
+    let (background, _results) = callback();
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    let pusher = {
+        let (control, wait) = (control.clone(), wait.clone());
+        tokio::spawn(async move {
+            wait.started.notified().await;
+            // Before `t1` finishes.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            control.push(Inbound::text("m", "queued first"));
+        })
+    };
+    let chunks = collect(&model, &registry, config(&control, background)).await;
+    mover.await.unwrap();
+    pusher.await.unwrap();
+
+    assert!(chunks.iter().any(|c| matches!(
+        c,
+        StreamChunk::InboundDelivered { ids, .. } if ids == &["t1", "m"]
+    )));
+    let (_, new_messages) = finish(&chunks);
+    let texts = user_texts(&new_messages);
+    assert_eq!(
+        texts[texts.len() - 3..],
+        [
+            "Result of background tool call `job` (call id t1):".to_string(),
+            "job done".into(),
+            "queued first".into(),
+        ]
+    );
+}
+
+/// Through `Conversation`, `RunOptions::background` sets the notice
+/// and the callback of the run.
+#[tokio::test(start_paused = true)]
+async fn conversation_takes_the_background_config_from_run_options() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 30));
+    let model = ScriptedModel::new([tool_calls_turn(&[("t1", "job")]), text_turn("ok")]);
+    let mut chat = Conversation::builder(model)
+        .tool_dyn(job.clone())
+        .build()
+        .expect("build");
+    let (background, mut results) = callback();
+    let background = background.notice(|call, _| format!("moved {}", call.call_id));
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    let outcome = chat
+        .run_with_options(
+            "hi",
+            RunOptions::new()
+                .control(control.clone())
+                .background(background),
+        )
+        .await
+        .expect("run");
+    mover.await.unwrap();
+
+    assert!(user_texts(&outcome.new_messages).contains(&"result t1: moved t1".to_string()));
+    let result = results.recv().await.unwrap();
+    assert_eq!(result.content.as_text(), Some("job done"));
+    assert!(!result.delivered);
+}
+
+/// Reports usage when it starts and again when it ends, `secs` later.
+struct Spender {
+    secs: u64,
+    started: Notify,
+}
+
+#[async_trait::async_trait]
+impl ToolDyn for Spender {
+    fn name(&self) -> &str {
+        "spend"
+    }
+    fn tool_definition(&self) -> ToolDefinition {
+        ToolDefinition::new("spend", "test spender", json!({"type": "object"}), vec![])
+    }
+    fn backgroundable(&self) -> bool {
+        true
+    }
+    async fn call(&self, _: Value, ctx: &ToolContext) -> ToolResultContent {
+        ctx.report_usage(Usage::new(10, 1));
+        self.started.notify_one();
+        tokio::time::sleep(Duration::from_secs(self.secs)).await;
+        ctx.report_usage(Usage::new(100, 10));
+        ToolResultContent::text("spent")
+    }
+}
+
+/// A moved call's usage counts towards its run while the run lasts:
+/// what it reports after the run finished is not in the run's usage.
+#[tokio::test(start_paused = true)]
+async fn moved_call_usage_counts_until_the_run_finishes() {
+    for (secs, expected) in [(2, Usage::new(110, 11)), (30, Usage::new(10, 1))] {
+        let control = RunControl::new();
+        let spender = Arc::new(Spender {
+            secs,
+            started: Notify::new(),
+        });
+        let mut wait = Job::new("wait", 10);
+        wait.background = false;
+        let mut registry = tools([Arc::new(wait)]);
+        registry.register(spender.clone()).unwrap();
+        let model = ScriptedModel::new([
+            tool_calls_turn(&[("t1", "spend")]),
+            tool_calls_turn(&[("t2", "wait")]),
+            text_turn("done"),
+        ]);
+        let (background, mut results) = callback();
+        let mover = {
+            let (control, spender) = (control.clone(), spender.clone());
+            tokio::spawn(async move {
+                spender.started.notified().await;
+                assert!(control.background_tool("t1"));
+            })
+        };
+        let chunks = collect(&model, &registry, config(&control, background)).await;
+        mover.await.unwrap();
+        let usage = match chunks.last() {
+            Some(StreamChunk::RunFinished { usage, .. }) => *usage,
+            other => panic!("expected RunFinished, got {other:?}"),
+        };
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens),
+            (expected.input_tokens, expected.output_tokens),
+            "tool running {secs} s"
+        );
+        assert_eq!(
+            results.recv().await.unwrap().content.as_text(),
+            Some("spent")
+        );
+    }
+}
+
+/// Shares a [`Job`] with the test while another wrapper owns the tool.
+struct Shared(Arc<Job>);
+
+#[async_trait::async_trait]
+impl ToolDyn for Shared {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn tool_definition(&self) -> ToolDefinition {
+        self.0.tool_definition()
+    }
+    fn backgroundable(&self) -> bool {
+        self.0.backgroundable()
+    }
+    async fn call(&self, args: Value, ctx: &ToolContext) -> ToolResultContent {
+        self.0.call(args, ctx).await
+    }
+}
+
+/// A `TimeoutTool` can be moved, and its timeout still stops the call
+/// once it is in the background.
+#[tokio::test(start_paused = true)]
+async fn timeout_still_applies_to_a_moved_call() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 60));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(TimeoutTool::new(
+            Shared(job.clone()),
+            Duration::from_secs(5),
+        )))
+        .unwrap();
+    let model = ScriptedModel::new([tool_calls_turn(&[("t1", "job")]), text_turn("ok")]);
+    let (background, mut results) = callback();
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    let start = Instant::now();
+    let chunks = collect(&model, &registry, config(&control, background)).await;
+    mover.await.unwrap();
+    assert_eq!(
+        result_of(&chunks, "t1").as_text(),
+        Some(notice("t1").as_str())
+    );
+
+    let result = results.recv().await.unwrap();
+    assert_eq!(Instant::now() - start, Duration::from_secs(5));
+    assert!(result.content.is_error && !result.cancelled && !result.delivered);
+    assert_eq!(
+        result.content.as_text(),
+        Some("Tool 'job' timed out after 5s")
+    );
+    assert!(!job.finished());
+}
+
+/// Asks for one more turn the first time a turn would end the run.
+#[derive(Default)]
+struct ContinueOnce(AtomicBool);
+
+#[async_trait::async_trait]
+impl ChatMiddleware for ContinueOnce {
+    async fn on_turn_end(&self, _turn: &ailoop::TurnEndInfo<'_>) -> ailoop::ContinueDecision {
+        if self.0.swap(true, Ordering::SeqCst) {
+            ailoop::ContinueDecision::Stop
+        } else {
+            ailoop::ContinueDecision::Continue {
+                blocks: vec![UserBlock::text("go on")],
+            }
+        }
+    }
+}
+
+/// A turn that would end the run and finds nothing to deliver does not
+/// stop the run taking background results when `on_turn_end` keeps it
+/// going: a result arriving in a later turn enters the run.
+#[tokio::test(start_paused = true)]
+async fn run_kept_going_by_on_turn_end_still_takes_background_results() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 5));
+    let mut wait = Job::new("wait", 10);
+    wait.background = false;
+    let registry = tools([job.clone(), Arc::new(wait)]);
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "job")]),
+        // Would end the run, with `t1` still running.
+        text_turn("waiting"),
+        tool_calls_turn(&[("t2", "wait")]),
+        text_turn("done"),
+    ]);
+    let (background, mut results) = callback();
+    let mut cfg = config(&control, background);
+    cfg.middlewares = vec![Arc::new(ContinueOnce::default())];
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    let chunks = collect(&model, &registry, cfg).await;
+    mover.await.unwrap();
+
+    assert!(chunks.iter().any(|c| matches!(
+        c,
+        StreamChunk::InboundDelivered { ids, .. } if ids == &["t1"]
+    )));
+    let result = results.try_recv().expect("reported when the run ended");
+    assert!(result.delivered);
+    assert_eq!(result.content.as_text(), Some("job done"));
+}
+
+/// `ConversationBuilder::background` is the default for every run, and
+/// a per-run `RunOptions::background` replaces it for that run.
+#[tokio::test(start_paused = true)]
+async fn builder_background_config_is_the_default_run_options_override() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 30));
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "job")]),
+        text_turn("ok"),
+        tool_calls_turn(&[("t2", "job")]),
+        text_turn("ok"),
+    ]);
+    let (background, mut results) = callback();
+    let mut chat = Conversation::builder(model)
+        .tool_dyn(job.clone())
+        .background(background.notice(|call, _| format!("builder {}", call.call_id)))
+        .build()
+        .expect("build");
+
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    let outcome = chat
+        .run_with_options("hi", RunOptions::new().control(control.clone()))
+        .await
+        .expect("run");
+    mover.await.unwrap();
+    assert!(user_texts(&outcome.new_messages).contains(&"result t1: builder t1".to_string()));
+
+    let mover = move_when_started(&control, &job, "t2", Duration::ZERO);
+    let outcome = chat
+        .run_with_options(
+            "again",
+            RunOptions::new().control(control.clone()).background(
+                BackgroundConfig::new().notice(|call, _| format!("run {}", call.call_id)),
+            ),
+        )
+        .await
+        .expect("run");
+    mover.await.unwrap();
+    assert!(user_texts(&outcome.new_messages).contains(&"result t2: run t2".to_string()));
+
+    // Only the first run's callback was the builder's.
+    let result = results.recv().await.unwrap();
+    assert_eq!(result.call_id, "t1");
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert!(results.try_recv().is_err());
 }

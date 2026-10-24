@@ -160,9 +160,10 @@ impl McpConnectionBuilder {
     /// Spawn the MCP server child process and complete the
     /// `initialize` handshake. Returns a connected [`McpConnection`]
     /// ready for tool discovery.
-    pub async fn connect(self) -> Result<McpConnection, McpError> {
+    pub async fn connect(mut self) -> Result<McpConnection, McpError> {
         let exe = self
             .command
+            .take()
             .ok_or_else(|| McpError::TransportCreation("missing command".into()))?;
 
         let mut command = Command::new(&exe);
@@ -183,12 +184,22 @@ impl McpConnectionBuilder {
             .await
             .map_err(|e| McpError::Service(e.to_string()))?;
 
-        Ok(McpConnection {
+        Ok(self.into_connection(inner, progress))
+    }
+
+    /// The connection over an initialized `inner`, with what the
+    /// builder sets that is not about launching the server.
+    fn into_connection(
+        self,
+        inner: RunningService<RoleClient, ProgressRouter>,
+        progress: ProgressRouter,
+    ) -> McpConnection {
+        McpConnection {
             server_label: self.server_label,
             inner: Arc::new(inner),
             progress,
             backgroundable: self.backgroundable,
-        })
+        }
     }
 }
 
@@ -210,6 +221,64 @@ mod tests {
                 .backgroundable(true)
                 .backgroundable
         );
+    }
+
+    /// Lists one tool and serves nothing else.
+    struct OneToolServer;
+
+    impl rmcp::ServerHandler for OneToolServer {
+        async fn list_tools(
+            &self,
+            _request: Option<rmcp::model::PaginatedRequestParams>,
+            _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+            Ok(rmcp::model::ListToolsResult::with_all_items(vec![
+                rmcp::model::Tool::new("work", "does work", Arc::new(Default::default())),
+            ]))
+        }
+
+        fn get_info(&self) -> rmcp::model::ServerInfo {
+            rmcp::model::ServerInfo::new(
+                rmcp::model::ServerCapabilities::builder()
+                    .enable_tools()
+                    .build(),
+            )
+        }
+    }
+
+    /// A connection to an in-process [`OneToolServer`], built the way
+    /// `connect` builds one.
+    async fn connect_in_process(builder: McpConnectionBuilder) -> McpConnection {
+        use rmcp::ServiceExt;
+
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let running = OneToolServer
+                .serve(server_io)
+                .await
+                .expect("server handshake");
+            let _ = running.waiting().await;
+        });
+        let progress = ProgressRouter::default();
+        let inner = progress
+            .clone()
+            .serve(client_io)
+            .await
+            .expect("client handshake");
+        builder.into_connection(inner, progress)
+    }
+
+    #[tokio::test]
+    async fn listed_tools_carry_the_connection_backgroundable_flag() {
+        for backgroundable in [false, true] {
+            let connection =
+                connect_in_process(McpConnection::builder("test").backgroundable(backgroundable))
+                    .await;
+            let tools = connection.list_tools().await.expect("list tools");
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].name(), "mcp__test__work");
+            assert_eq!(tools[0].backgroundable(), backgroundable);
+        }
     }
 
     #[tokio::test]

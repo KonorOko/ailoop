@@ -5,11 +5,12 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::control::Inbound;
 use crate::ids::{RunId, StepId};
-use crate::message::ToolResultContent;
+use crate::message::{ToolResultBlock, ToolResultContent, UserBlock};
 use crate::middleware::ToolCallInfo;
 
-type NoticeFn = dyn Fn(&ToolCallInfo) -> String + Send + Sync;
+type NoticeFn = dyn Fn(&ToolCallInfo, &Value) -> String + Send + Sync;
 type ResultFn = dyn Fn(BackgroundToolResult) + Send + Sync;
 
 /// How a run handles the tool calls moved to the background with
@@ -36,12 +37,13 @@ impl BackgroundConfig {
     }
 
     /// The text of the provisional result a call gets when it is moved,
-    /// built from the call. It is a successful result (`is_error:
-    /// false`) and goes through the run's `on_after_tool_call*` hooks
-    /// like any other.
+    /// built from the call and the arguments its tool runs with (after
+    /// the run's `on_before_tool_call_mut` hooks). It is a successful
+    /// result (`is_error: false`) and goes through the run's
+    /// `on_after_tool_call*` hooks like any other.
     pub fn notice(
         mut self,
-        notice: impl Fn(&ToolCallInfo) -> String + Send + Sync + 'static,
+        notice: impl Fn(&ToolCallInfo, &Value) -> String + Send + Sync + 'static,
     ) -> Self {
         self.notice = Some(Arc::new(notice));
         self
@@ -49,10 +51,10 @@ impl BackgroundConfig {
 
     /// Called once for every call this run moves to the background,
     /// with its real result, whether or not the run took that result
-    /// (see [`BackgroundToolResult::delivered`]). It may be called from
-    /// the run's stream, from the call's own task, or when the run ends
-    /// (its stream dropped included), possibly after the run is over,
-    /// so it must not block: hand the result over (a channel send, say)
+    /// (see [`BackgroundToolResult::delivered`]). It is called from the
+    /// call's own task, or when the run that took the result is over
+    /// (its stream dropped included), possibly long after the run, so
+    /// it must not block: hand the result over (a channel send, say)
     /// and return.
     pub fn on_result(
         mut self,
@@ -62,10 +64,14 @@ impl BackgroundConfig {
         self
     }
 
-    /// The text a moved call gets when no [`Self::notice`] is set.
+    /// The text a moved call gets when no [`Self::notice`] is set. It
+    /// tells the model the result may arrive later, not that it will:
+    /// a result the run does not take reaches the model only if the
+    /// caller delivers it (see [`BackgroundToolResult::delivered`]),
+    /// and without [`Self::on_result`] it is dropped.
     pub fn default_notice(call: &ToolCallInfo) -> String {
         format!(
-            "Moved to the background while running (call id {}). Its result will arrive \
+            "Moved to the background while running (call id {}). Its result may arrive \
              later in a user message; do not call the tool again for it.",
             call.call_id
         )
@@ -76,9 +82,9 @@ impl BackgroundConfig {
     /// Engine plumbing, hidden from the docs and not covered by semver:
     /// its signature may change in any release.
     #[doc(hidden)]
-    pub fn notice_for(&self, call: &ToolCallInfo) -> ToolResultContent {
+    pub fn notice_for(&self, call: &ToolCallInfo, args: &Value) -> ToolResultContent {
         let text = match &self.notice {
-            Some(notice) => notice(call),
+            Some(notice) => notice(call, args),
             None => Self::default_notice(call),
         };
         ToolResultContent::text(text)
@@ -126,16 +132,19 @@ pub struct BackgroundToolResult {
     /// was cancelled ([`Self::cancelled`]) or the tool panicked.
     pub content: ToolResultContent,
     /// The call was stopped by
-    /// [`crate::RunControl::cancel_background`].
+    /// [`crate::RunControl::cancel_background_tool`].
     pub cancelled: bool,
     /// Whether the run that moved the call took this result: it is
     /// then part of that run's messages, as an [`crate::Inbound`] whose
     /// id is [`Self::call_id`], reported on
     /// [`crate::StreamChunk::InboundDelivered`]. When `false` that run
-    /// had stopped taking results (it ended, or its last turn closed
-    /// before the result arrived) and nothing delivered it: it is the
-    /// caller's to deliver, for instance by pushing it on the next
-    /// run's [`crate::RunControl`].
+    /// had ended before its last turn close took the result, or took it
+    /// but was rolled back (its
+    /// stream dropped before it handed `RunFinished` over), and nothing
+    /// delivered it: it is the caller's to deliver, for instance by
+    /// pushing [`Self::to_inbound`] on the next run's
+    /// [`crate::RunControl`]. A rolled back run does not put it back in
+    /// the queue.
     pub delivered: bool,
 }
 
@@ -159,5 +168,94 @@ impl BackgroundToolResult {
             cancelled: false,
             delivered: false,
         }
+    }
+
+    /// The message that delivers this result to a run, the same one the
+    /// run that moved the call gets when it takes the result: a text
+    /// line naming the call (and saying whether it failed or was
+    /// cancelled), then the result's text and image blocks. Its id is
+    /// [`Self::call_id`].
+    pub fn to_inbound(&self) -> Inbound {
+        let Self {
+            call_id,
+            name,
+            content,
+            cancelled,
+            ..
+        } = self;
+        let header = if *cancelled {
+            format!("Background tool call `{name}` (call id {call_id}) was cancelled:")
+        } else if content.is_error {
+            format!("Background tool call `{name}` (call id {call_id}) failed:")
+        } else {
+            format!("Result of background tool call `{name}` (call id {call_id}):")
+        };
+        let mut blocks = vec![UserBlock::text(header)];
+        blocks.extend(content.blocks.iter().map(|block| match block {
+            ToolResultBlock::Text { text } => UserBlock::text(text.clone()),
+            ToolResultBlock::Image { source } => UserBlock::image(source.clone()),
+        }));
+        Inbound::new(call_id.clone(), blocks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(content: ToolResultContent) -> BackgroundToolResult {
+        BackgroundToolResult::new(
+            RunId::new(),
+            StepId::new(),
+            "t1",
+            "job",
+            Value::Null,
+            content,
+        )
+    }
+
+    fn texts(inbound: &Inbound) -> Vec<&str> {
+        inbound
+            .blocks
+            .iter()
+            .map(|block| match block {
+                UserBlock::Text { text, .. } => text.as_str(),
+                other => panic!("unexpected block {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn default_notice_does_not_promise_the_result() {
+        let call = ToolCallInfo::new(RunId::new(), StepId::new(), "t1", "job");
+        let notice = BackgroundConfig::default_notice(&call);
+        assert!(notice.contains("(call id t1)"));
+        assert!(notice.contains("may arrive later"), "{notice}");
+    }
+
+    #[test]
+    fn to_inbound_names_the_call_and_how_it_ended() {
+        let done = result(ToolResultContent::text("done")).to_inbound();
+        assert_eq!(done.id, "t1");
+        assert_eq!(
+            texts(&done),
+            ["Result of background tool call `job` (call id t1):", "done"]
+        );
+
+        let failed = result(ToolResultContent::error("boom")).to_inbound();
+        assert_eq!(
+            texts(&failed),
+            ["Background tool call `job` (call id t1) failed:", "boom"]
+        );
+
+        let mut cancelled = result(ToolResultContent::error("stopped"));
+        cancelled.cancelled = true;
+        assert_eq!(
+            texts(&cancelled.to_inbound()),
+            [
+                "Background tool call `job` (call id t1) was cancelled:",
+                "stopped"
+            ]
+        );
     }
 }

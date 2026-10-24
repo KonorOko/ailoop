@@ -102,9 +102,6 @@ mod tests {
         fn concurrency_safe(&self) -> bool {
             true
         }
-        fn backgroundable(&self) -> bool {
-            true
-        }
         async fn call(&self, _: serde_json::Value, _: &ToolContext) -> ToolResultContent {
             ToolResultContent::text("ok")
         }
@@ -124,6 +121,11 @@ mod tests {
                 json!({ "type": "object", "properties": {}, "required": [] }),
                 vec![],
             )
+        }
+        // The opposite of its concurrency safety, so a wrapper that
+        // forwards one flag for the other fails the tests below.
+        fn backgroundable(&self) -> bool {
+            true
         }
         async fn call(&self, _: serde_json::Value, _: &ToolContext) -> ToolResultContent {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -157,8 +159,8 @@ mod tests {
     /// run.
     #[test]
     fn delegates_backgroundable() {
-        assert!(TimeoutTool::new(InstantTool, Duration::from_millis(10)).backgroundable());
-        assert!(!TimeoutTool::new(SlowTool, Duration::from_millis(10)).backgroundable());
+        assert!(TimeoutTool::new(SlowTool, Duration::from_millis(10)).backgroundable());
+        assert!(!TimeoutTool::new(InstantTool, Duration::from_millis(10)).backgroundable());
     }
 
     /// A call that resolves inside the budget passes through untouched.

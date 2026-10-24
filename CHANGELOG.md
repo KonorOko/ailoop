@@ -26,25 +26,34 @@ and this project adheres to
   queued on the inbox) until it finished, and the only way out,
   `cancel_tool`, threw its work away. A moved call is answered at once
   with a provisional result (`"Moved to the background while running
-  …"`, or the text set with `BackgroundConfig::notice`), which stays
+  … Its result may arrive later in a user message …"`, or the text set
+  with `BackgroundConfig::notice`, built from the call and its
+  arguments; the default says "may" because a result the run does not
+  take reaches the model only if the caller delivers it), which stays
   in the history as its tool result; the step goes on, so a message
   pushed while the tool ran enters at that turn close, and a moved call
   in a parallel batch stops holding the batch. The tool keeps running
   in a task of its own, with a cancellation token no longer tied to the
   run: ending, aborting or cancelling the run does not stop it, and
-  `cancel_tool` no longer applies; `RunControl::cancel_background`
+  `cancel_tool` no longer applies; `RunControl::cancel_background_tool`
   does, even for a tool that ignores its token. Its real result goes
   through the run's `on_after_tool_call_mut` hooks (so `Sanitize`
   applies), then into the same run as an inbox message whose id is the
   call id, reported with `StreamChunk::BackgroundToolFinished` and on
   `InboundDelivered`, if the run still takes it, and always to the
   `BackgroundConfig::on_result` callback. A run takes results until it
-  ends or until a turn that would end it closes with nothing to
-  deliver; deciding that and draining happen under one lock, and the
-  callback's `BackgroundToolResult::delivered` says which happened, so
+  ends; deciding that and handing back the results it did not drain
+  happen under one lock, and the callback's `BackgroundToolResult::delivered` says which happened, so
   a result is never delivered twice nor left in a queue no run will
-  drain. Configure it per run with `RunConfig::background` or
-  `RunOptions::background`. Only tools that opt in can be moved:
+  drain. A run whose stream is dropped before it hands `RunFinished`
+  over is rolled back: the results it took are reported as not
+  delivered and, unlike queued messages, not put back in the queue.
+  `BackgroundToolResult::to_inbound` builds the message the run would
+  have delivered, so a caller can hand an undelivered result to its
+  next run in the same shape. Configure it with `RunConfig::background`, or on a
+  `Conversation` with `ConversationBuilder::background` as the default
+  for every run (the callback usually belongs to the whole application)
+  and `RunOptions::background` to replace it for one run. Only tools that opt in can be moved:
   `ToolDyn::backgroundable` (default `false`), `Tool::BACKGROUNDABLE`,
   `#[ailoop_tool(backgroundable)]`, and
   `McpConnectionBuilder::backgroundable` for every tool of an MCP
@@ -57,7 +66,10 @@ and this project adheres to
   step that suspends is answered in the suspension with its
   provisional result, its real result going to the callback. Also new:
   `StreamChunk::ToolBackgrounded`, emitted before the provisional
-  `ToolResult`, and matching `JsonTracer` / `TracingMiddleware` events.
+  `ToolResult`, `StreamChunk::BackgroundToolFinished` (with the tool's
+  name and whether the call was cancelled, so a consumer of the stream
+  alone needs neither the callback nor an earlier chunk), and matching
+  `JsonTracer` / `TracingMiddleware` events.
 
 ## [1.0.0-rc.5] — 2026-10-23
 
