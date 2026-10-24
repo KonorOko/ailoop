@@ -8,6 +8,15 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [1.0.0-rc.6] — 2026-10-24
+
+This release contains two breaking changes, both around resuming a
+suspended run: `ResumeDecision` no longer implements `Eq`, and a failed
+resume now puts back an updated suspension, so retrying it with the same
+decisions fails with `ResumeError::NotDeferred`. Every entry describes
+the change against 1.0.0-rc.5; the Migration section at the end has the
+before/after snippets.
+
 ### Added
 
 - `RunControl::retract(id)` and `RunControl::replace(id, Inbound)`
@@ -1964,7 +1973,8 @@ workspace-wide API audit (closed 2026-05-10).
 - Other providers (OpenAI public, Bedrock, Vertex, local engines)
   are not implemented.
 
-[Unreleased]: https://github.com/KonorOko/ailoop/compare/v1.0.0-rc.5...HEAD
+[Unreleased]: https://github.com/KonorOko/ailoop/compare/v1.0.0-rc.6...HEAD
+[1.0.0-rc.6]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.6
 [1.0.0-rc.5]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.5
 [1.0.0-rc.4]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.4
 [1.0.0-rc.3]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.3
