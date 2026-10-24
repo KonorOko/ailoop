@@ -943,3 +943,49 @@ async fn reused_call_id_does_not_mix_up_a_moved_call_and_a_new_one() {
     assert!(!result.delivered);
     assert!(results.try_recv().is_err());
 }
+
+/// `cancel_tool` and `background_tool` on the same running call: the
+/// first one wins and the other returns `false`, so a call reported
+/// cancelled is never left running in the background.
+#[tokio::test(start_paused = true)]
+async fn cancel_tool_and_background_tool_exclude_each_other() {
+    for cancel_first in [true, false] {
+        let control = RunControl::new();
+        let job = Arc::new(Job::new("job", 30));
+        let registry = tools([job.clone()]);
+        let model = ScriptedModel::new([tool_calls_turn(&[("t1", "job")]), text_turn("ok")]);
+        let (background, mut results) = callback();
+        let racer = {
+            let (control, job) = (control.clone(), job.clone());
+            tokio::spawn(async move {
+                job.started.notified().await;
+                // Both before the engine looks at the call again.
+                if cancel_first {
+                    (control.cancel_tool("t1"), control.background_tool("t1"))
+                } else {
+                    let moved = control.background_tool("t1");
+                    (control.cancel_tool("t1"), moved)
+                }
+            })
+        };
+        let chunks = collect(&model, &registry, config(&control, background)).await;
+        let (cancelled, moved) = racer.await.unwrap();
+        assert_eq!((cancelled, moved), (cancel_first, !cancel_first));
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        if cancel_first {
+            assert_eq!(result_of(&chunks, "t1").as_text(), Some(WHILE_RUNNING));
+            assert!(!job.finished());
+            assert!(results.try_recv().is_err());
+        } else {
+            assert_eq!(
+                result_of(&chunks, "t1").as_text(),
+                Some(notice("t1").as_str())
+            );
+            assert!(job.finished());
+            assert_eq!(
+                results.try_recv().unwrap().content.as_text(),
+                Some("job done")
+            );
+        }
+    }
+}

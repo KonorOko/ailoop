@@ -105,6 +105,7 @@ impl Inbound {
 pub struct RunControl {
     inbox: Arc<Mutex<Inbox>>,
     /// Token of each tool call of the step in flight, by `call_id`.
+    /// When both are held, this lock is taken before `background`.
     calls: Arc<Mutex<HashMap<String, CancellationToken>>>,
     /// Calls to backgroundable tools that are running, moved or not.
     background: Arc<Mutex<BackgroundCalls>>,
@@ -342,7 +343,8 @@ impl RunControl {
     /// unless the call is to a tool that opts in
     /// (`ToolDyn::backgroundable`), is running (past its
     /// `on_before_tool_call*` hooks, tool invoked) and has no result
-    /// yet; a call already moved returns `false` too.
+    /// yet; a call already moved, or already stopped with
+    /// [`Self::cancel_tool`], returns `false` too.
     ///
     /// Once moved, the call is no longer the run's:
     ///
@@ -369,6 +371,16 @@ impl RunControl {
     /// a user message. Nothing caps how many calls run in the
     /// background: that is the caller's to limit.
     pub fn background_tool(&self, call_id: &str) -> bool {
+        // Holding `calls` throughout makes this exclusive with
+        // `cancel_tool`: a call it already cancelled is not moved, and
+        // a moved call leaves `calls` before `cancel_tool` can find it.
+        let mut calls = self.calls();
+        if calls
+            .get(call_id)
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return false;
+        }
         let moved = {
             let mut background = self.background();
             let key = background.newest(call_id, |state| {
@@ -391,7 +403,7 @@ impl RunControl {
             }
         };
         if moved {
-            self.unregister_call(call_id);
+            calls.remove(call_id);
         }
         moved
     }
@@ -832,6 +844,15 @@ mod tests {
         let _on_moved = control.register_background("a".into(), CancellationToken::new());
         assert!(control.background_tool("a"));
         assert!(!control.cancel_tool("a"));
+    }
+
+    #[test]
+    fn cancelling_a_call_makes_background_tool_refuse_it() {
+        let control = RunControl::new();
+        control.register_call("a".into(), CancellationToken::new());
+        let _on_moved = control.register_background("a".into(), CancellationToken::new());
+        assert!(control.cancel_tool("a"));
+        assert!(!control.background_tool("a"));
     }
 
     #[test]
