@@ -1751,7 +1751,16 @@ fn run_engine<'a, M: CompletionModel>(
             // ends (`RunGuard::close_background`), which hands those
             // that came too late to the callback; the guard reports the
             // ones it took once the run is over.
-            let drained = guard.drain();
+            //
+            // A run does not take what it cannot answer: on the last
+            // step the cap allows, nothing is drained. The run ends as
+            // it would have, messages stay queued for the next run, and
+            // background results go to the callback as not delivered.
+            let drained = if iteration + 1 >= config.max_iterations {
+                Drained::default()
+            } else {
+                guard.drain()
+            };
             let mut background_finished = Vec::new();
             let mut inbound = Vec::with_capacity(drained.results.len() + drained.messages.len());
             for (message, result) in drained.results {

@@ -281,10 +281,58 @@ async fn delivery_keeps_the_run_going_and_skips_the_gate_that_turn() {
     assert!(matches!(finished(&chunks).0, FinishReason::EndTurn));
 }
 
-/// The continuation a delivery causes counts against `max_iterations`;
-/// at the cap the run aborts with the delivered message kept.
+/// A run does not take what it cannot answer: on the last step the cap
+/// allows, a message queued during the turn is left in the queue, and
+/// the run ends as it would have without it.
 #[tokio::test]
-async fn delivery_continuation_counts_against_max_iterations() {
+async fn last_allowed_step_leaves_the_queue_alone() {
+    let control = RunControl::new();
+    let model = ScriptedModel::new([text_turn("first"), text_turn("second")]);
+    let gate = Arc::new(Gate::default());
+    let chunks = run(
+        &model,
+        &ToolRegistry::new(),
+        &control,
+        vec![
+            PushOnFirstRequest::new(&control, Inbound::text("m1", STEER)),
+            gate.clone(),
+        ],
+        1,
+    )
+    .await;
+
+    let (reason, new_messages) = finished(&chunks);
+    assert_eq!(reason, FinishReason::EndTurn);
+    assert!(deliveries(&chunks).is_empty());
+    assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+    assert!(!new_messages.iter().any(
+        |m| matches!(m, Message::User { blocks } if blocks.iter().any(|b| is_text(b, STEER)))
+    ));
+    let pending = control.take_pending();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, "m1");
+}
+
+/// A last step that ends in tool calls still aborts at the cap, and
+/// takes nothing either: the message pushed while its tool ran stays
+/// queued.
+#[tokio::test]
+async fn last_allowed_step_with_tool_calls_takes_nothing() {
+    let control = RunControl::new();
+    let model = ScriptedModel::new([tool_call_turn("t1"), text_turn("done")]);
+    let chunks = run(&model, &registry_with_pusher(&control), &control, vec![], 1).await;
+
+    let (reason, new_messages) = finished(&chunks);
+    assert_eq!(reason, FinishReason::Aborted(AbortReason::MaxIterations(1)));
+    assert!(deliveries(&chunks).is_empty());
+    let last = user_blocks(new_messages.last().unwrap());
+    assert_eq!(last.len(), 1, "only the tool result: {last:?}");
+    assert_eq!(control.take_pending().len(), 1);
+}
+
+/// With a step to spare the message is delivered as before.
+#[tokio::test]
+async fn delivery_with_a_step_to_spare_is_unchanged() {
     let control = RunControl::new();
     let model = ScriptedModel::new([text_turn("first"), text_turn("second")]);
     let chunks = run(
@@ -295,20 +343,13 @@ async fn delivery_continuation_counts_against_max_iterations() {
             &control,
             Inbound::text("m1", STEER),
         )],
-        1,
+        2,
     )
     .await;
 
-    let (reason, new_messages) = finished(&chunks);
-    assert_eq!(
-        reason,
-        FinishReason::Aborted(AbortReason::MaxIterations(1)),
-        "the delivery continued past the cap"
-    );
-    assert!(is_text(
-        &user_blocks(new_messages.last().unwrap())[0],
-        STEER
-    ));
+    assert_eq!(deliveries(&chunks).len(), 1);
+    assert_eq!(finished(&chunks).0, FinishReason::EndTurn);
+    assert!(control.is_empty());
 }
 
 /// A message with no blocks is reported but does not keep the run
