@@ -470,8 +470,9 @@ async fn real_result_goes_through_after_mut_hooks_on_both_paths() {
     assert_eq!(result.content.as_text(), Some("job [redacted]"));
 }
 
-/// Cancelling the run does not reach a moved call; `cancel_background`
-/// does, even though the tool never looks at its token.
+/// Cancelling the run does not reach a moved call;
+/// `cancel_background_tool` does, even though the tool never looks at
+/// its token.
 #[tokio::test(start_paused = true)]
 async fn ending_or_cancelling_the_run_leaves_the_moved_call_running() {
     for _ in 0..20 {
@@ -514,14 +515,14 @@ async fn ending_or_cancelling_the_run_leaves_the_moved_call_running() {
         assert!(!control.cancel_tool("t1"));
 
         tokio::time::sleep(Duration::from_secs(5)).await;
-        assert!(control.cancel_background("t1"));
+        assert!(control.cancel_background_tool("t1"));
         let result = results.recv().await.unwrap();
         assert!(job.token().is_cancelled());
         assert!(!job.finished(), "the tool future was dropped");
         assert!(result.cancelled && !result.delivered);
         assert!(result.content.is_error);
         assert_eq!(result.content.as_text(), Some(CANCELLED_IN_BACKGROUND));
-        assert!(!control.cancel_background("t1"), "already finished");
+        assert!(!control.cancel_background_tool("t1"), "already finished");
         assert!(!control.background_tool("t1"));
     }
 }
@@ -685,7 +686,7 @@ async fn cancel_tool_before_the_move_works_as_before() {
     tokio::time::sleep(Duration::from_secs(60)).await;
     assert!(!job.finished());
     assert!(results.try_recv().is_err());
-    assert!(!control.background_tool("t1") && !control.cancel_background("t1"));
+    assert!(!control.background_tool("t1") && !control.cancel_background_tool("t1"));
 }
 
 /// The provisional result uses the configured notice and goes through
@@ -1116,7 +1117,7 @@ async fn moved_call_cancelled_while_the_run_lives_is_delivered_as_cancelled() {
         let (control, wait) = (control.clone(), wait.clone());
         tokio::spawn(async move {
             wait.started.notified().await;
-            assert!(control.cancel_background("t1"));
+            assert!(control.cancel_background_tool("t1"));
         })
     };
     let chunks = collect(&model, &registry, config(&control, background)).await;

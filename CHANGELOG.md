@@ -35,7 +35,7 @@ and this project adheres to
   in a parallel batch stops holding the batch. The tool keeps running
   in a task of its own, with a cancellation token no longer tied to the
   run: ending, aborting or cancelling the run does not stop it, and
-  `cancel_tool` no longer applies; `RunControl::cancel_background`
+  `cancel_tool` no longer applies; `RunControl::cancel_background_tool`
   does, even for a tool that ignores its token. Its real result goes
   through the run's `on_after_tool_call_mut` hooks (so `Sanitize`
   applies), then into the same run as an inbox message whose id is the

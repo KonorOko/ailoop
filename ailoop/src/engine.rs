@@ -1980,7 +1980,7 @@ impl BackgroundTask {
 }
 
 /// The real result of a call moved to the background, as stopped by
-/// `RunControl::cancel_background`.
+/// `RunControl::cancel_background_tool`.
 fn cancelled_in_background() -> ToolResultContent {
     ToolResultContent::error(
         "Background tool call cancelled by the caller; it may have partly completed",

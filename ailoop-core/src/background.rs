@@ -132,7 +132,7 @@ pub struct BackgroundToolResult {
     /// was cancelled ([`Self::cancelled`]) or the tool panicked.
     pub content: ToolResultContent,
     /// The call was stopped by
-    /// [`crate::RunControl::cancel_background`].
+    /// [`crate::RunControl::cancel_background_tool`].
     pub cancelled: bool,
     /// Whether the run that moved the call took this result: it is
     /// then part of that run's messages, as an [`crate::Inbound`] whose

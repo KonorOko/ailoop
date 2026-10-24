@@ -330,7 +330,7 @@ pub enum StreamChunk {
         /// or the tool failed.
         content: ToolResultContent,
         /// The call was stopped by
-        /// [`crate::RunControl::cancel_background`].
+        /// [`crate::RunControl::cancel_background_tool`].
         cancelled: bool,
     },
 }

@@ -351,7 +351,7 @@ impl RunControl {
     ///
     /// - Ending, aborting or cancelling the run does not stop it, and
     ///   [`Self::cancel_tool`] returns `false` for it; stop it with
-    ///   [`Self::cancel_background`]. The token its tool sees
+    ///   [`Self::cancel_background_tool`]. The token its tool sees
     ///   (`ToolContext::cancellation`) fires only then.
     /// - Its real result goes through the run's
     ///   `on_after_tool_call_mut` hooks (so a `Sanitize` applies), then
@@ -418,7 +418,7 @@ impl RunControl {
     /// (unknown, not moved, or already finished). If several moved
     /// calls with that id are running (a provider reusing call ids
     /// across runs), it stops the most recently started one.
-    pub fn cancel_background(&self, call_id: &str) -> bool {
+    pub fn cancel_background_tool(&self, call_id: &str) -> bool {
         let background = self.background();
         let key = background.newest(call_id, |state| matches!(state, BackgroundState::Moved));
         match key.and_then(|key| background.calls.get(&key)) {
@@ -772,16 +772,16 @@ mod tests {
         // Moved first: the task delivers, the engine sees it moved.
         let token = CancellationToken::new();
         let (key, mut on_moved) = control.register_background("a".into(), token.clone());
-        assert!(!control.cancel_background("a"), "not moved yet");
+        assert!(!control.cancel_background_tool("a"), "not moved yet");
         assert!(control.background_tool("a"));
         assert!(on_moved.try_recv().is_ok());
         assert!(!control.background_tool("a"));
         assert!(control.release_background(key), "the engine sees it moved");
         assert!(!token.is_cancelled());
-        assert!(control.cancel_background("a"));
+        assert!(control.cancel_background_tool("a"));
         assert!(token.is_cancelled());
         assert_eq!(control.finish_background(key), BackgroundEnd::Moved);
-        assert!(!control.cancel_background("a"), "finished");
+        assert!(!control.cancel_background_tool("a"), "finished");
         assert!(control.release_background(key), "moved and finished");
 
         // Finished first: the engine takes the result, a move is refused.
@@ -824,12 +824,12 @@ mod tests {
         assert_eq!(control.finish_background(new), BackgroundEnd::Engine);
         assert!(!control.release_background(new));
 
-        // Both moved: `cancel_background` stops the newest.
+        // Both moved: `cancel_background_tool` stops the newest.
         let (first, _on_moved) = control.register_background("t2".into(), old_token.clone());
         assert!(control.background_tool("t2"));
         let (_, _on_moved) = control.register_background("t2".into(), new_token.clone());
         assert!(control.background_tool("t2"));
-        assert!(control.cancel_background("t2"));
+        assert!(control.cancel_background_tool("t2"));
         assert!(new_token.is_cancelled() && !old_token.is_cancelled());
         assert_eq!(control.finish_background(first), BackgroundEnd::Moved);
     }
