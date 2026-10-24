@@ -1402,3 +1402,50 @@ async fn run_kept_going_by_on_turn_end_still_takes_background_results() {
     assert!(result.delivered);
     assert_eq!(result.content.as_text(), Some("job done"));
 }
+
+/// `ConversationBuilder::background` is the default for every run, and
+/// a per-run `RunOptions::background` replaces it for that run.
+#[tokio::test(start_paused = true)]
+async fn builder_background_config_is_the_default_run_options_override() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 30));
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "job")]),
+        text_turn("ok"),
+        tool_calls_turn(&[("t2", "job")]),
+        text_turn("ok"),
+    ]);
+    let (background, mut results) = callback();
+    let mut chat = Conversation::builder(model)
+        .tool_dyn(job.clone())
+        .background(background.notice(|call, _| format!("builder {}", call.call_id)))
+        .build()
+        .expect("build");
+
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    let outcome = chat
+        .run_with_options("hi", RunOptions::new().control(control.clone()))
+        .await
+        .expect("run");
+    mover.await.unwrap();
+    assert!(user_texts(&outcome.new_messages).contains(&"result t1: builder t1".to_string()));
+
+    let mover = move_when_started(&control, &job, "t2", Duration::ZERO);
+    let outcome = chat
+        .run_with_options(
+            "again",
+            RunOptions::new().control(control.clone()).background(
+                BackgroundConfig::new().notice(|call, _| format!("run {}", call.call_id)),
+            ),
+        )
+        .await
+        .expect("run");
+    mover.await.unwrap();
+    assert!(user_texts(&outcome.new_messages).contains(&"result t2: run t2".to_string()));
+
+    // Only the first run's callback was the builder's.
+    let result = results.recv().await.unwrap();
+    assert_eq!(result.call_id, "t1");
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert!(results.try_recv().is_err());
+}
