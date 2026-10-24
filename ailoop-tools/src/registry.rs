@@ -143,7 +143,7 @@ pub trait ToolDyn: Send + Sync {
     /// Defaults to `false`. Return `true` only when the tool can finish
     /// on its own after the run moves on or ends, holds no state tied
     /// to the run, and its result still makes sense to the model a
-    /// few turns later (a long command, an image generation).
+    /// few turns later (a long build, a slow external job).
     ///
     /// With a `RunControl` on the run, every call to such a tool runs
     /// in a `tokio` task from the start (so it can be moved without
