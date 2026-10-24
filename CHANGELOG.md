@@ -70,6 +70,124 @@ and this project adheres to
   name and whether the call was cancelled, so a consumer of the stream
   alone needs neither the callback nor an earlier chunk), and matching
   `JsonTracer` / `TracingMiddleware` events.
+- `ResumeDecision::Answer { content }` (and `ResumeDecision::answer`)
+  resumes a deferred call with a result given from outside the run,
+  such as a person's answer or a result computed elsewhere, without
+  invoking the tool. Before, the only options were `Approve` (run the
+  tool) and `Deny` (an error result), so a given answer had to be
+  faked with `Approve` and a tool built around the answer, and traces
+  and hooks saw a call approved and run that never ran. The call gets
+  `content` as given (`is_error` included) after its
+  `on_after_tool_call_mut` hooks (so `Sanitize` covers it too), its
+  `after` hooks run and its `ToolResult` goes out; its `before` hooks
+  do not run again, as with `Approve` and `Deny`. Nothing is invoked
+  even if the call was cancelled before its turn came, and an abort of
+  the resumed run (timeout, cancellation, `Terminate`) before the
+  call's turn answers it with `content` (without hooks, like every call
+  an abort answers) instead of "Tool not run", so a person's answer is
+  not lost. If the resumed run fails, the suspension put back has the
+  call answered with its content.
+
+### Changed (BREAKING)
+
+- `ResumeDecision` no longer implements `Eq`, since its new `Answer`
+  variant carries a `ToolResultContent`, which is only `PartialEq`.
+- A resumed run that ends in `Err` or whose stream is dropped now puts
+  back an updated suspension instead of the one it resumed, so resuming
+  again runs each call at most once. Before, the suspension came back
+  whole: an approved call that had already run (say, the model failed
+  on the turn after the resumed step) ran a second time on the next
+  resume, and `abandon_suspension` answered it as not run. Now every
+  call of the resumed step that got its result (approved and run,
+  denied, or waiting and run through its gates) is `CallState::Answered`
+  with that result, as it came out of its `after` hooks; a call that
+  was running when the run ended is `Answered` with `"Tool interrupted
+  while running: the resumed run ended before it finished; it may have
+  partly completed"`; a call that never started keeps its state. The
+  history is still rolled back as before. No signature changes, but it
+  is breaking for a caller that retries a failed resume with the same
+  decisions: the next resume's decisions must name only the calls
+  still deferred (`Suspension::pending`), and a decision for a call
+  that is now answered fails with `ResumeError::NotDeferred`, before
+  anything runs and with the suspension kept. The
+  updated suspension is in snapshots like any other.
+
+### Changed
+
+- `ConversationSnapshot` is written as version 2 when it carries a
+  suspension; without one it is still version 1, byte for byte the same
+  shape as before. In rc.5 the suspension was added to version 1, so a
+  reader that predates it (rc.4 or earlier: a rollback, or workers of
+  different versions sharing one store) accepted the payload, dropped
+  the suspension without a word and loaded a history ending on tool
+  calls with no results, which the next provider request rejected. Such
+  a reader now refuses the payload instead. Reading accepts versions 1
+  and 2, including a version-1 payload with a suspension as rc.5 wrote
+  it. `ConversationSnapshot::VERSION` is now 2 (the newest version
+  read and written) and the new `ConversationSnapshot::MIN_VERSION` is
+  1. The written version follows the contents, whatever the public
+  `version` field says. Compatibility: rc.5 rejects a suspended
+  snapshot written by this release; snapshots without a suspension
+  stay readable by every earlier release. The rule from here on: the
+  version goes up when a reader that ignores a new field would misread
+  the payload, and a field that can be ignored safely does not raise
+  it.
+### Fixed
+
+- A run no longer takes messages or background results from its
+  `RunControl` at the close of the last step `RunConfig::max_iterations`
+  allows. Before, that turn drained the queue and the run went on, only
+  to hit the cap: a run that was about to end well finished as
+  `Aborted(MaxIterations)`, with the message in the history and no
+  answer to it. Now the run ends as it would have without the queue
+  (`on_turn_end` runs as usual, and a last step ending in tool calls
+  still aborts at the cap), queued messages stay on the `RunControl`
+  for the next run (read them back with `take_pending`), and background
+  results waiting for the run go to `BackgroundConfig::on_result` with
+  `delivered: false`, no `InboundDelivered` or `BackgroundToolFinished`
+  being emitted. The rule: a run does not take what it cannot answer.
+  The cap stays strict; runs with steps to spare are unchanged.
+
+### Migration
+
+- Retrying a failed resume: pass decisions only for the calls still
+  deferred in the suspension put back; those already answered keep
+  their result.
+
+  ```rust
+  // Before
+  if chat.resume(decisions.clone()).await.is_err() {
+      chat.resume(decisions).await?;
+  }
+  // After
+  if chat.resume(decisions.clone()).await.is_err() {
+      let pending: Vec<String> = chat
+          .suspension()
+          .map(|s| s.pending().map(|call| call.call_id.clone()).collect())
+          .unwrap_or_default();
+      decisions.retain(|(call_id, _)| pending.contains(call_id));
+      chat.resume(decisions).await?;
+  }
+  ```
+
+- `ResumeDecision` without `Eq`: comparisons with `==` and
+  `assert_eq!` keep working through `PartialEq`. A type of yours that
+  holds one and derives `Eq` derives only `PartialEq` instead:
+
+  ```rust
+  // Before
+  #[derive(Debug, Clone, PartialEq, Eq)]
+  struct PendingApproval {
+      call_id: String,
+      decision: ResumeDecision,
+  }
+  // After
+  #[derive(Debug, Clone, PartialEq)]
+  struct PendingApproval {
+      call_id: String,
+      decision: ResumeDecision,
+  }
+  ```
 
 ## [1.0.0-rc.5] — 2026-10-23
 

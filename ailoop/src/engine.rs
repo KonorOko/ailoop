@@ -347,6 +347,12 @@ async fn abort_step(
     let mut chunks = Vec::new();
     for call in unanswered {
         let (id, content) = match call {
+            // Nothing to run: the answer given on resume stands.
+            PendingCall::Decided {
+                id,
+                decision: ResumeDecision::Answer { content },
+                ..
+            } => (id, content),
             PendingCall::Run { id, .. } | PendingCall::Decided { id, .. } => {
                 (id, not_run_result(&reason))
             }
@@ -419,9 +425,10 @@ async fn abort_step(
 
 /// Aborts a run before its first step. A resumed run that never got
 /// to the suspended step still closes it, as [`abort_step`] would: the
-/// calls answered in the suspended run keep their result and every
-/// other one is answered as not run, so the history the run commits has
-/// no `tool_use` without its `tool_result`.
+/// calls answered in the suspended run keep their result, a call
+/// answered on resume ([`ResumeDecision::Answer`]) gets that answer,
+/// and every other one is answered as not run, so the history the run
+/// commits has no `tool_use` without its `tool_result`.
 async fn abort_before_step(
     guard: &RunGuard,
     resuming: Option<Resume>,
@@ -429,7 +436,12 @@ async fn abort_before_step(
     usage: Usage,
     run_msgs: &mut RunMessages<'_>,
 ) -> Vec<StreamChunk> {
-    let Some(Resume { suspension, .. }) = resuming else {
+    let Some(Resume {
+        suspension,
+        mut decisions,
+        ..
+    }) = resuming
+    else {
         let new_messages = run_msgs.finish();
         return vec![fire_abort_hooks(guard, reason, usage, new_messages).await];
     };
@@ -440,6 +452,19 @@ async fn abort_before_step(
             CallState::Answered { content } => PendingCall::Answered {
                 id: call.call_id,
                 content,
+            },
+            CallState::Deferred { .. } => match decisions.remove(&call.call_id) {
+                Some(decision) => PendingCall::Decided {
+                    id: call.call_id,
+                    name: call.name,
+                    args: call.args,
+                    decision,
+                },
+                None => PendingCall::Run {
+                    id: call.call_id,
+                    name: call.name,
+                    args: call.args,
+                },
             },
             _ => PendingCall::Run {
                 id: call.call_id,
@@ -483,6 +508,70 @@ fn cancelled_while_running() -> ToolResultContent {
 /// The result recorded for a call the run was aborted before running.
 fn not_run_result(reason: &AbortReason) -> ToolResultContent {
     ToolResultContent::error(format!("Tool not run: the run was aborted ({reason})"))
+}
+
+/// The result a suspension records for a call of the resumed step that
+/// was running when the resumed run failed or was dropped. It may have
+/// had its effect already, so the text does not claim otherwise.
+fn interrupted_on_resume() -> ToolResultContent {
+    ToolResultContent::error(
+        "Tool interrupted while running: the resumed run ended before it finished; \
+         it may have partly completed",
+    )
+}
+
+/// What became of each call of a resumed step, by `call_id`, as the
+/// resumed run goes: `Conversation` updates the suspension it puts back
+/// with it when that run fails or is dropped, so resuming again does not
+/// repeat a call that already ran.
+#[derive(Clone, Default)]
+pub(crate) struct ResumeLedger(Arc<std::sync::Mutex<HashMap<String, LedgerEntry>>>);
+
+enum LedgerEntry {
+    /// The tool was invoked; no result was recorded.
+    Started,
+    /// The call's result, after its `after` hooks.
+    Answered(ToolResultContent),
+}
+
+impl ResumeLedger {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, LedgerEntry>> {
+        // One map call per operation, so a poisoned lock is consistent.
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn started(&self, call_id: &str) {
+        self.lock()
+            .entry(call_id.to_string())
+            .or_insert(LedgerEntry::Started);
+    }
+
+    fn answered(&self, call_id: &str, content: ToolResultContent) {
+        self.lock()
+            .insert(call_id.to_string(), LedgerEntry::Answered(content));
+    }
+
+    /// `suspension` with every call that has a result, or was running,
+    /// marked [`CallState::Answered`]; the others keep their state.
+    pub(crate) fn apply(&self, mut suspension: Suspension) -> Suspension {
+        let entries = self.lock();
+        for call in &mut suspension.calls {
+            match entries.get(&call.call_id) {
+                Some(LedgerEntry::Answered(content)) => {
+                    call.state = CallState::Answered {
+                        content: content.clone(),
+                    };
+                }
+                Some(LedgerEntry::Started) => {
+                    call.state = CallState::Answered {
+                        content: interrupted_on_resume(),
+                    };
+                }
+                None => {}
+            }
+        }
+        suspension
+    }
 }
 
 /// Turns an `Err` into a [`RunError`] carrying the run's usage so far
@@ -703,6 +792,7 @@ pub async fn run_chat<'a, M: CompletionModel>(
         config,
         |_| false,
         None,
+        None,
     ))
 }
 
@@ -713,7 +803,9 @@ pub async fn run_chat<'a, M: CompletionModel>(
 /// for [`ContextOptions::recover_from_overflow`]. `usage_parent`, when
 /// set, receives every token this run spends (own turns and tool
 /// reports) as it happens; `SubAgentTool` passes its own
-/// `ToolContext::usage_sink` here.
+/// `ToolContext::usage_sink` here. `ledger`, for a resumed run, records
+/// what becomes of each call of the resumed step.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_with_history<'a, M: CompletionModel>(
     model: &'a M,
     history: &'a mut History,
@@ -722,6 +814,7 @@ pub(crate) fn run_with_history<'a, M: CompletionModel>(
     options: ContextOptions,
     is_overflow: fn(&M::Error) -> bool,
     usage_parent: Option<UsageSink>,
+    ledger: Option<ResumeLedger>,
 ) -> EngineStream<'a, M::Error> {
     let rollback = Some((history.messages().to_vec(), history.pinned().to_vec()));
     let managed = ManagedHistory {
@@ -737,6 +830,7 @@ pub(crate) fn run_with_history<'a, M: CompletionModel>(
         config,
         is_overflow,
         usage_parent,
+        ledger,
     )
 }
 
@@ -747,6 +841,7 @@ fn run_engine<'a, M: CompletionModel>(
     mut config: RunConfig,
     is_overflow: fn(&M::Error) -> bool,
     usage_parent: Option<UsageSink>,
+    ledger: Option<ResumeLedger>,
 ) -> EngineStream<'a, M::Error> {
     // A resumed run starts by finishing the suspended step instead of
     // asking the model; `resumed_from` lets observers correlate it.
@@ -932,6 +1027,8 @@ fn run_engine<'a, M: CompletionModel>(
             // its siblings. A call is registered from its
             // `ToolCallStarted` on, while the turn still streams.
             let mut call_tokens: HashMap<String, CancellationToken> = HashMap::new();
+            // Set only in the resumed step: what becomes of its calls.
+            let record = if resuming.is_some() { ledger.clone() } else { None };
 
             if let Some(resume) = resuming.take() {
                 // Finishing a suspended step: its assistant message is
@@ -1306,13 +1403,16 @@ fn run_engine<'a, M: CompletionModel>(
                                 .cloned()
                                 .unwrap_or_else(|| tool_cancellation.child_token());
                             let call = ToolCallInfo::new(run_id.clone(), step_id.clone(), id.clone(), name.clone());
+                            let given = matches!(decision, ResumeDecision::Answer { .. });
                             let content = match decision {
+                                // Nothing to run, so a cancelled token changes nothing.
+                                ResumeDecision::Answer { content } => Some(content),
                                 ResumeDecision::Approve if token.is_cancelled() => Some(cancelled_before_run()),
                                 ResumeDecision::Approve => None,
                                 ResumeDecision::Deny { reason } => Some(denied_result(&reason)),
                                 _ => Some(ToolResultContent::error("unsupported ResumeDecision variant")),
                             };
-                            slots.push(Slot::Gated { id, name, args, call, token, content, moved: false });
+                            slots.push(Slot::Gated { id, name, args, call, token, content, moved: false, given });
                             continue;
                         }
                     };
@@ -1382,7 +1482,7 @@ fn run_engine<'a, M: CompletionModel>(
                             return;
                         }
                     };
-                    slots.push(Slot::Gated { id, name, args, call, token, content, moved: false });
+                    slots.push(Slot::Gated { id, name, args, call, token, content, moved: false, given: false });
                 }
 
                 // Phase 2: run the calls that passed, together. Each
@@ -1426,12 +1526,14 @@ fn run_engine<'a, M: CompletionModel>(
                         )
                         .with_usage_sink(delegated.clone())
                         .with_progress_sink(progress.clone());
+                        let record = record.clone();
                         if let Some(task) = background {
                             return Some(async move {
                                 let _close = CloseOnDrop(progress);
                                 if token.is_cancelled() {
                                     return (index, CallOutput::NotStarted);
                                 }
+                                if let Some(ledger) = &record { ledger.started(id); }
                                 let control = task.control.clone();
                                 let (key, on_moved) = control
                                     .register_background(id.clone(), ctx.cancellation().clone());
@@ -1472,6 +1574,7 @@ fn run_engine<'a, M: CompletionModel>(
                             if token.is_cancelled() {
                                 return (index, CallOutput::NotStarted);
                             }
+                            if let Some(ledger) = &record { ledger.started(id); }
                             let output = tokio::select! {
                                 biased;
                                 _ = token.cancelled() => CallOutput::Cancelled,
@@ -1643,6 +1746,7 @@ fn run_engine<'a, M: CompletionModel>(
                     // Too late to cancel once the result is decided, before
                     // anyone sees it.
                     if let Some(control) = &config.control { control.unregister_call(&id); }
+                    if let Some(ledger) = &record { ledger.answered(&id, content.clone()); }
                     if moved {
                         let mut chunk = StreamChunk::tool_backgrounded(run_id.clone(), step_id.clone(), id.clone());
                         for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
@@ -1751,7 +1855,16 @@ fn run_engine<'a, M: CompletionModel>(
             // ends (`RunGuard::close_background`), which hands those
             // that came too late to the callback; the guard reports the
             // ones it took once the run is over.
-            let drained = guard.drain();
+            //
+            // A run does not take what it cannot answer: on the last
+            // step the cap allows, nothing is drained. The run ends as
+            // it would have, messages stay queued for the next run, and
+            // background results go to the callback as not delivered.
+            let drained = if iteration + 1 >= config.max_iterations {
+                Drained::default()
+            } else {
+                guard.drain()
+            };
             let mut background_finished = Vec::new();
             let mut inbound = Vec::with_capacity(drained.results.len() + drained.messages.len());
             for (message, result) in drained.results {
@@ -2040,15 +2153,25 @@ enum Slot {
         token: CancellationToken,
         content: Option<ToolResultContent>,
         moved: bool,
+        /// `content` was given on resume ([`ResumeDecision::Answer`]):
+        /// an abort keeps it instead of answering the call as not run.
+        given: bool,
     },
 }
 
 impl Slot {
     /// The call as `abort_step` takes it: an answered call keeps its
-    /// result, a moved one its provisional result, and any other gated
-    /// one is answered as not run.
+    /// result, a moved one its provisional result, one answered on
+    /// resume its given result, and any other gated one is answered as
+    /// not run.
     fn into_unanswered(self) -> PendingCall {
         match self {
+            Slot::Gated {
+                id,
+                content: Some(content),
+                given: true,
+                ..
+            } => PendingCall::Rejected { id, content },
             Slot::Answered {
                 id,
                 content,

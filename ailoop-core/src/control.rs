@@ -64,6 +64,12 @@ impl Inbound {
 ///   delivered, the run continues instead of finishing, without
 ///   consulting `ChatMiddleware::on_turn_end` for that turn. The
 ///   continuation counts against `RunConfig::max_iterations`.
+/// - A run does not take what it cannot answer: the turn of the last
+///   step `RunConfig::max_iterations` allows drains nothing, whether it
+///   ends in tool calls or not. The run ends as it would have without
+///   the queue (`on_turn_end` runs as usual), queued messages stay with
+///   this handle for the next run, and background results waiting for
+///   the run go to `BackgroundConfig::on_result` as not delivered.
 /// - A message queued before the run starts is delivered when the
 ///   first turn closes, not in the first request; put it in the
 ///   kickoff message if it must be there.
@@ -359,7 +365,8 @@ impl RunControl {
     ///   run still takes it: delivered at the next turn close like any
     ///   queued message, ahead of them, with a
     ///   [`crate::StreamChunk::BackgroundToolFinished`]. A run takes
-    ///   results until it ends. Either way the result also
+    ///   results until it ends, except at the close of its last allowed
+    ///   step (see "Delivery" above). Either way the result also
     ///   goes to `BackgroundConfig::on_result`, whose
     ///   [`BackgroundToolResult::delivered`] says whether the run took
     ///   it; a result is never left in a queue no run will drain.
