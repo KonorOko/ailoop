@@ -1342,3 +1342,53 @@ async fn timeout_still_applies_to_a_moved_call() {
     );
     assert!(!job.finished());
 }
+
+/// Asks for one more turn the first time a turn would end the run.
+#[derive(Default)]
+struct ContinueOnce(AtomicBool);
+
+#[async_trait::async_trait]
+impl ChatMiddleware for ContinueOnce {
+    async fn on_turn_end(&self, _turn: &ailoop::TurnEndInfo<'_>) -> ailoop::ContinueDecision {
+        if self.0.swap(true, Ordering::SeqCst) {
+            ailoop::ContinueDecision::Stop
+        } else {
+            ailoop::ContinueDecision::Continue {
+                blocks: vec![UserBlock::text("go on")],
+            }
+        }
+    }
+}
+
+/// A turn that would end the run and finds nothing to deliver does not
+/// stop the run taking background results when `on_turn_end` keeps it
+/// going: a result arriving in a later turn enters the run.
+#[tokio::test(start_paused = true)]
+async fn run_kept_going_by_on_turn_end_still_takes_background_results() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 5));
+    let mut wait = Job::new("wait", 10);
+    wait.background = false;
+    let registry = tools([job.clone(), Arc::new(wait)]);
+    let model = ScriptedModel::new([
+        tool_calls_turn(&[("t1", "job")]),
+        // Would end the run, with `t1` still running.
+        text_turn("waiting"),
+        tool_calls_turn(&[("t2", "wait")]),
+        text_turn("done"),
+    ]);
+    let (background, mut results) = callback();
+    let mut cfg = config(&control, background);
+    cfg.middlewares = vec![Arc::new(ContinueOnce::default())];
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    let chunks = collect(&model, &registry, cfg).await;
+    mover.await.unwrap();
+
+    assert!(chunks.iter().any(|c| matches!(
+        c,
+        StreamChunk::InboundDelivered { ids, .. } if ids == &["t1"]
+    )));
+    let result = results.try_recv().expect("reported when the run ended");
+    assert!(result.delivered);
+    assert_eq!(result.content.as_text(), Some("job done"));
+}

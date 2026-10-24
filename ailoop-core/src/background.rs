@@ -137,8 +137,8 @@ pub struct BackgroundToolResult {
     /// then part of that run's messages, as an [`crate::Inbound`] whose
     /// id is [`Self::call_id`], reported on
     /// [`crate::StreamChunk::InboundDelivered`]. When `false` that run
-    /// had stopped taking results (it ended, or its last turn closed
-    /// before the result arrived), or took it but was rolled back (its
+    /// had ended before its last turn close took the result, or took it
+    /// but was rolled back (its
     /// stream dropped before it handed `RunFinished` over), and nothing
     /// delivered it: it is the caller's to deliver, for instance by
     /// pushing [`Self::to_inbound`] on the next run's

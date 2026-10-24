@@ -136,7 +136,7 @@ impl BackgroundCalls {
 
 /// The queue and what the run in flight still takes besides it, under
 /// one lock: deciding that a run takes no more background results and
-/// draining what it took are one step.
+/// handing back those it did not drain are one step.
 #[derive(Default)]
 struct Inbox {
     queue: VecDeque<Inbound>,
@@ -359,8 +359,7 @@ impl RunControl {
     ///   run still takes it: delivered at the next turn close like any
     ///   queued message, ahead of them, with a
     ///   [`crate::StreamChunk::BackgroundToolFinished`]. A run takes
-    ///   results until it ends, or until a turn that would end it
-    ///   closes with nothing to deliver. Either way the result also
+    ///   results until it ends. Either way the result also
     ///   goes to `BackgroundConfig::on_result`, whose
     ///   [`BackgroundToolResult::delivered`] says whether the run took
     ///   it; a result is never left in a queue no run will drain.
@@ -548,15 +547,13 @@ impl RunControl {
         None
     }
 
-    /// Take the queue and `run`'s background results in one step. With
-    /// `close_if_empty`, a drain that finds neither also stops `run`
-    /// taking results, in the same step, so a result arriving after it
-    /// is refused rather than left behind.
+    /// Take the queue and `run`'s background results in one step. `run`
+    /// goes on taking results until [`Self::close_run`].
     ///
     /// Engine plumbing, hidden from the docs and not covered by semver:
     /// its signature may change in any release.
     #[doc(hidden)]
-    pub fn drain(&self, run: u64, close_if_empty: bool) -> Drained {
+    pub fn drain(&self, run: u64) -> Drained {
         let mut inbox = self.lock();
         let open = inbox.open == Some(run);
         let results = if open {
@@ -565,14 +562,13 @@ impl RunControl {
             Vec::new()
         };
         let messages: Vec<Inbound> = inbox.queue.drain(..).collect();
-        if open && close_if_empty && messages.is_empty() && results.is_empty() {
-            inbox.open = None;
-        }
         Drained { messages, results }
     }
 
     /// Stop `run` taking background results; returns those it took but
-    /// never drained, for the caller to report as not delivered.
+    /// never drained, for the caller to report as not delivered. Both in
+    /// one step, so a result offered at the same time is either handed
+    /// back here or refused, never left where no drain will take it.
     ///
     /// Engine plumbing, hidden from the docs and not covered by semver:
     /// its signature may change in any release.
@@ -877,8 +873,8 @@ mod tests {
         control.push(Inbound::text("m", "m"));
         assert_eq!(control.len(), 1, "results are not queued messages");
         assert_eq!(ids(&control.take_pending()), ["m"]);
-        // A drain that takes something keeps the run open.
-        let drained = control.drain(run, true);
+        // Draining keeps the run open.
+        let drained = control.drain(run);
         assert_eq!(drained.results.len(), 1);
         assert!(
             control
@@ -895,70 +891,86 @@ mod tests {
                 .is_some()
         );
         assert!(control.close_run(run).is_empty());
-        // An empty closing drain stops taking results.
+        // So does a drain that finds nothing: only `close_run` stops it.
         let run = control.open_run();
-        assert!(control.drain(run, true).results.is_empty());
+        assert!(control.drain(run).results.is_empty());
         assert!(
             control
                 .offer_background_result(run, Inbound::text("d", "d"), background_result("d"))
-                .is_some()
+                .is_none()
         );
+        assert_eq!(control.close_run(run).len(), 1);
     }
 
-    /// A result offered while the run's last drain closes it is either
-    /// in that drain or refused: never left where nothing will take it.
+    /// A result offered while the run closes is either handed back by
+    /// the close or refused: never left where nothing will take it.
     #[test]
-    fn closing_drain_and_offer_never_strand_a_result() {
+    fn closing_and_offer_never_strand_a_result() {
         use std::sync::Barrier;
         use std::thread;
 
-        // The offerer offers results back to back while the run drains
-        // until a closing drain finds nothing, so offers keep landing
-        // around that drain: one landing between finding nothing and
-        // closing (were they two steps) would be left behind.
-        let mut rounds_with_results = 0;
-        for round in 0..2000 {
-            let control = RunControl::new();
-            let run = control.open_run();
-            let barrier = Arc::new(Barrier::new(2));
-            let offerer = {
-                let (control, barrier) = (control.clone(), barrier.clone());
-                thread::spawn(move || {
-                    barrier.wait();
-                    let mut accepted = 0;
-                    while control
-                        .offer_background_result(
-                            run,
-                            Inbound::text("a", "a"),
-                            background_result("a"),
-                        )
-                        .is_none()
-                    {
-                        accepted += 1;
-                    }
-                    accepted
+        // Each round, the offerer offers results back to back while the
+        // run drains and then closes, so offers keep landing around the
+        // close: one landing between handing back the results and
+        // refusing more (were they two steps) would be left behind. The
+        // window is narrow, so there are many rounds, made cheap by two
+        // long-lived threads meeting at a barrier.
+        const ROUNDS: usize = 50_000;
+        let runs: Arc<Vec<(RunControl, u64)>> = Arc::new(
+            (0..ROUNDS)
+                .map(|_| {
+                    let control = RunControl::new();
+                    let run = control.open_run();
+                    (control, run)
                 })
-            };
-            barrier.wait();
-            let mut drained = 0;
-            loop {
-                let taken = control.drain(run, true).results.len();
-                drained += taken;
-                if taken == 0 {
-                    break;
+                .collect(),
+        );
+        let barrier = Arc::new(Barrier::new(2));
+        let offerer = {
+            let (runs, barrier) = (runs.clone(), barrier.clone());
+            thread::spawn(move || {
+                runs.iter()
+                    .map(|(control, run)| {
+                        barrier.wait();
+                        let mut accepted = 0;
+                        while control
+                            .offer_background_result(
+                                *run,
+                                Inbound::text("a", "a"),
+                                background_result("a"),
+                            )
+                            .is_none()
+                        {
+                            accepted += 1;
+                        }
+                        accepted
+                    })
+                    .collect::<Vec<usize>>()
+            })
+        };
+        let taken: Vec<usize> = runs
+            .iter()
+            .enumerate()
+            .map(|(round, (control, run))| {
+                barrier.wait();
+                // Close only once the offerer is under way.
+                let mut taken = 0;
+                while taken == 0 {
+                    taken += control.drain(*run).results.len();
                 }
-            }
-            let accepted = offerer.join().unwrap();
-            let left = control.close_run(run).len();
+                for _ in 0..(round % 4) {
+                    taken += control.drain(*run).results.len();
+                }
+                taken + control.close_run(*run).len()
+            })
+            .collect();
+        let accepted = offerer.join().unwrap();
+        for (round, (control, _)) in runs.iter().enumerate() {
             assert_eq!(
-                (drained, left),
-                (accepted, 0),
-                "round {round}: a result accepted after the closing drain was left behind"
+                taken[round], accepted[round],
+                "round {round}: a result accepted before the close was left behind"
             );
-            if accepted > 0 {
-                rounds_with_results += 1;
-            }
+            assert!(control.lock().results.is_empty(), "round {round}");
         }
-        assert!(rounds_with_results > 0, "the race was never exercised");
     }
 }

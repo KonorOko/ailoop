@@ -41,9 +41,8 @@ and this project adheres to
   call id, reported with `StreamChunk::BackgroundToolFinished` and on
   `InboundDelivered`, if the run still takes it, and always to the
   `BackgroundConfig::on_result` callback. A run takes results until it
-  ends or until a turn that would end it closes with nothing to
-  deliver; deciding that and draining happen under one lock, and the
-  callback's `BackgroundToolResult::delivered` says which happened, so
+  ends; deciding that and handing back the results it did not drain
+  happen under one lock, and the callback's `BackgroundToolResult::delivered` says which happened, so
   a result is never delivered twice nor left in a queue no run will
   drain. A run whose stream is dropped before it hands `RunFinished`
   over is rolled back: the results it took are reported as not

@@ -154,14 +154,12 @@ impl RunGuard {
     /// Drains the run's [`RunControl`]: queued messages and the
     /// background results waiting for this run, remembering what it
     /// took so a drop can put the messages back and the results can be
-    /// reported when the run is over. With `close_if_empty`, finding
-    /// nothing also stops the run taking background results, in the
-    /// same step. Empty without a control.
-    fn drain(&self, close_if_empty: bool) -> Drained {
+    /// reported when the run is over. Empty without a control.
+    fn drain(&self) -> Drained {
         let (Some(control), Some(run)) = (&self.control, self.background_run) else {
             return Drained::default();
         };
-        let drained = control.drain(run, close_if_empty);
+        let drained = control.drain(run);
         if !drained.messages.is_empty() {
             self.taken
                 .lock()
@@ -1749,12 +1747,11 @@ fn run_engine<'a, M: CompletionModel>(
             // every call of the turn is done: after the tool results, in
             // arrival order, behind the real results of calls this run
             // moved to the background. Aborts never get here, so they
-            // stay queued. A turn that would end the run and finds
-            // nothing to deliver also stops it taking background
-            // results, so none arrives after its last drain.
-            // The guard reports the background results to the callback
-            // once the run is over.
-            let drained = guard.drain(!matches!(finish_reason, FinishReason::ToolUse));
+            // stay queued. The run takes background results until it
+            // ends (`RunGuard::close_background`), which hands those
+            // that came too late to the callback; the guard reports the
+            // ones it took once the run is over.
+            let drained = guard.drain();
             let mut background_finished = Vec::new();
             let mut inbound = Vec::with_capacity(drained.results.len() + drained.messages.len());
             for (message, result) in drained.results {
