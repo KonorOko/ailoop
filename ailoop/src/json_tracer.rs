@@ -408,6 +408,32 @@ impl ChatMiddleware for JsonTracer {
                 }
                 self.emit("inbound_delivered", p).await;
             }
+            StreamChunk::ToolBackgrounded {
+                run_id,
+                step_id,
+                call_id,
+                ..
+            } => {
+                let mut p = serde_json::Map::new();
+                p.insert("run_id".into(), json!(run_id.to_string()));
+                p.insert("step_id".into(), json!(step_id.to_string()));
+                p.insert("call_id".into(), json!(call_id));
+                self.emit("tool_backgrounded", p).await;
+            }
+            StreamChunk::BackgroundToolFinished {
+                run_id,
+                step_id,
+                call_id,
+                content,
+                ..
+            } => {
+                let mut p = serde_json::Map::new();
+                p.insert("run_id".into(), json!(run_id.to_string()));
+                p.insert("step_id".into(), json!(step_id.to_string()));
+                p.insert("call_id".into(), json!(call_id));
+                p.insert("is_error".into(), json!(content.is_error));
+                self.emit("background_tool_finished", p).await;
+            }
             // RunStarted / RunFinished have dedicated hooks with richer
             // context (config, messages, usage) — log there, not here.
             // Wildcard covers the `#[non_exhaustive]` future variants.

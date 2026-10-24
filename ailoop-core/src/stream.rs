@@ -17,7 +17,8 @@ use crate::{Message, RunId, StepId, ToolResultContent};
 /// 2. **Engine lifecycle events**, synthesized by the engine itself
 ///    around the provider stream — `RunStarted`, `StepStarted`,
 ///    `StepFinished`, `ToolResult`, `RunFinished`, `HistoryCompacted`,
-///    `InboundDelivered`, `RunSuspended`, `ToolProgress`.
+///    `InboundDelivered`, `RunSuspended`, `ToolProgress`,
+///    `ToolBackgrounded`, `BackgroundToolFinished`.
 ///
 /// Every chunk reaches every [`crate::ChatMiddleware::on_chunk`]; the
 /// engine also drives its own assistant-history reconstruction off
@@ -296,6 +297,35 @@ pub enum StreamChunk {
         /// [`crate::Inbound::id`] of each message, in delivery order.
         ids: Vec<String>,
     },
+    /// A running tool call was moved to the background with
+    /// [`crate::RunControl::background_tool`]. Emitted right before the
+    /// call's [`Self::ToolResult`], which carries the provisional
+    /// result; the tool goes on running outside the run.
+    #[non_exhaustive]
+    ToolBackgrounded {
+        /// Run that moved the call.
+        run_id: RunId,
+        /// Step the call belongs to.
+        step_id: StepId,
+        /// The call, as on its `ToolCallStarted`.
+        call_id: String,
+    },
+    /// The real result of a call this run moved to the background
+    /// entered the run, at a turn close. Emitted before that turn's
+    /// [`Self::InboundDelivered`], which lists the `call_id` among the
+    /// delivered ids. A result the run did not take has no chunk: it
+    /// only reaches `BackgroundConfig::on_result`.
+    #[non_exhaustive]
+    BackgroundToolFinished {
+        /// Run that moved the call and took the result.
+        run_id: RunId,
+        /// Step whose closing user message carries the result.
+        step_id: StepId,
+        /// The call, as on its `ToolCallStarted`.
+        call_id: String,
+        /// The result, after the run's `on_after_tool_call_mut` hooks.
+        content: ToolResultContent,
+    },
 }
 
 impl StreamChunk {
@@ -372,6 +402,30 @@ impl StreamChunk {
             run_id,
             step_id,
             ids,
+        }
+    }
+
+    /// Build a [`StreamChunk::ToolBackgrounded`].
+    pub fn tool_backgrounded(run_id: RunId, step_id: StepId, call_id: impl Into<String>) -> Self {
+        Self::ToolBackgrounded {
+            run_id,
+            step_id,
+            call_id: call_id.into(),
+        }
+    }
+
+    /// Build a [`StreamChunk::BackgroundToolFinished`].
+    pub fn background_tool_finished(
+        run_id: RunId,
+        step_id: StepId,
+        call_id: impl Into<String>,
+        content: ToolResultContent,
+    ) -> Self {
+        Self::BackgroundToolFinished {
+            run_id,
+            step_id,
+            call_id: call_id.into(),
+            content,
         }
     }
 

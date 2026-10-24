@@ -55,6 +55,10 @@ pub trait Tool: Send + Sync + Sized {
     /// sets it to `true`.
     const CONCURRENCY_SAFE: bool = false;
 
+    /// See [`ToolDyn::backgroundable`]. `#[ailoop_tool(backgroundable)]`
+    /// sets it to `true`.
+    const BACKGROUNDABLE: bool = false;
+
     /// Argument struct deserialized from the model's JSON `input`.
     type Args: for<'a> serde::Deserialize<'a> + Send;
     /// Successful return value. Serialized back as the tool result;
@@ -131,6 +135,23 @@ pub trait ToolDyn: Send + Sync {
     fn concurrency_safe(&self) -> bool {
         false
     }
+
+    /// Whether a running call to this tool may be moved to the
+    /// background with `RunControl::background_tool`: answered at once
+    /// with a provisional result while the tool keeps running in a task
+    /// of its own, outside the run, its real result delivered later.
+    /// Defaults to `false`. Return `true` only when the tool can finish
+    /// on its own after the run moves on or ends, holds no state tied
+    /// to the run, and its result still makes sense to the model a
+    /// few turns later (a long command, an image generation).
+    ///
+    /// With a `RunControl` on the run, every call to such a tool runs
+    /// in a `tokio` task from the start (so it can be moved without
+    /// being restarted), with a cancellation token the engine fires
+    /// on the run's behalf until the call is moved.
+    fn backgroundable(&self) -> bool {
+        false
+    }
 }
 
 #[async_trait::async_trait]
@@ -141,6 +162,10 @@ impl<T: Tool> ToolDyn for T {
 
     fn concurrency_safe(&self) -> bool {
         T::CONCURRENCY_SAFE
+    }
+
+    fn backgroundable(&self) -> bool {
+        T::BACKGROUNDABLE
     }
 
     fn tool_definition(&self) -> ToolDefinition {

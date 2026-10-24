@@ -1,8 +1,8 @@
 use ailoop_core::{
-    AssistantBlock, CallState, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
-    FinishReason, Message, ProviderError, ReasoningEffort, Resume, ResumeDecision, ResumeError,
-    RunConfig, RunControl, RunId, StreamChunk, Suspension, ToolChoice, ToolResultContent, ToolTag,
-    Usage, UserBlock,
+    AssistantBlock, BackgroundConfig, CallState, CancellationToken, ChatMiddleware, ChatRequest,
+    CompletionModel, FinishReason, Message, ProviderError, ReasoningEffort, Resume, ResumeDecision,
+    ResumeError, RunConfig, RunControl, RunId, StreamChunk, Suspension, ToolChoice,
+    ToolResultContent, ToolTag, Usage, UserBlock,
 };
 use ailoop_history::{ConversationSnapshot, History, HistoryBuilder};
 use ailoop_prompts::{Prompt, PromptSection};
@@ -195,6 +195,13 @@ pub struct RunOptions {
     /// see [`RunControl`](crate::RunControl). The handle can outlive the
     /// run: what it did not deliver stays queued for the next one.
     pub control: Option<RunControl>,
+    /// How this run handles tool calls moved to the background with
+    /// [`RunControl::background_tool`]: the provisional result a moved
+    /// call gets and the callback its real result goes to. Same
+    /// semantics as [`ailoop_core::RunConfig::background`]; `None`
+    /// uses [`BackgroundConfig::default`]. The callback is kept by each
+    /// moved call's task, so it outlives the run.
+    pub background: Option<BackgroundConfig>,
     /// Run-scoped middlewares appended after the builder's chain
     /// (after `ApprovalMiddleware`). Internal: used by
     /// [`crate::SubAgentTool`] to install its wrap-up middleware for a
@@ -253,6 +260,13 @@ impl RunOptions {
     /// semantics.
     pub fn control(mut self, control: RunControl) -> Self {
         self.control = Some(control);
+        self
+    }
+
+    /// Set how this run handles calls moved to the background. See
+    /// [`Self::background`] for semantics.
+    pub fn background(mut self, background: BackgroundConfig) -> Self {
+        self.background = Some(background);
         self
     }
 }
@@ -662,6 +676,7 @@ where
         config.timeout = options.timeout;
         config.cancellation = options.cancellation;
         config.control = options.control;
+        config.background = options.background.unwrap_or_default();
         config.tool_concurrency = self.tool_concurrency;
         // A resumed run takes the suspension; the stream puts it back if
         // the run fails or is dropped, since the history is rolled back.

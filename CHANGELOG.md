@@ -21,6 +21,43 @@ and this project adheres to
   no longer queued (delivered, retracted, or never queued) changes
   nothing: `retract` returns `None`, and `replace` returns `Err` with
   the message handed back so the caller can push it or drop it.
+- `RunControl::background_tool(call_id)` moves a running tool call to
+  the background. Before, a long tool held its step (and every message
+  queued on the inbox) until it finished, and the only way out,
+  `cancel_tool`, threw its work away. A moved call is answered at once
+  with a provisional result (`"Moved to the background while running
+  …"`, or the text set with `BackgroundConfig::notice`), which stays
+  in the history as its tool result; the step goes on, so a message
+  pushed while the tool ran enters at that turn close, and a moved call
+  in a parallel batch stops holding the batch. The tool keeps running
+  in a task of its own, with a cancellation token no longer tied to the
+  run: ending, aborting or cancelling the run does not stop it, and
+  `cancel_tool` no longer applies; `RunControl::cancel_background`
+  does, even for a tool that ignores its token. Its real result goes
+  through the run's `on_after_tool_call_mut` hooks (so `Sanitize`
+  applies), then into the same run as an inbox message whose id is the
+  call id, reported with `StreamChunk::BackgroundToolFinished` and on
+  `InboundDelivered`, if the run still takes it, and always to the
+  `BackgroundConfig::on_result` callback. A run takes results until it
+  ends or until a turn that would end it closes with nothing to
+  deliver; deciding that and draining happen under one lock, and the
+  callback's `BackgroundToolResult::delivered` says which happened, so
+  a result is never delivered twice nor left in a queue no run will
+  drain. Configure it per run with `RunConfig::background` or
+  `RunOptions::background`. Only tools that opt in can be moved:
+  `ToolDyn::backgroundable` (default `false`), `Tool::BACKGROUNDABLE`,
+  `#[ailoop_tool(backgroundable)]`, and
+  `McpConnectionBuilder::backgroundable` for every tool of an MCP
+  server; `TimeoutTool` forwards the flag (its timeout still applies)
+  and `SubAgentTool` does not opt in. With a `RunControl` on the run,
+  calls to such tools run in a `tokio` task from the start, so they can
+  be moved without restarting; until moved they behave as before
+  (aborts and `cancel_tool` stop them, a panic reaches the run). A
+  moved call's progress updates are dropped, and a call moved in a
+  step that suspends is answered in the suspension with its
+  provisional result, its real result going to the callback. Also new:
+  `StreamChunk::ToolBackgrounded`, emitted before the provisional
+  `ToolResult`, and matching `JsonTracer` / `TracingMiddleware` events.
 
 ## [1.0.0-rc.5] — 2026-10-23
 

@@ -7,18 +7,19 @@ use std::time::Duration;
 
 use crate::errors::{EngineError, RunError};
 use ailoop_core::{
-    AbortReason, AssistantBlock, CallState, CancellationToken, ChatMiddleware, ChatRequest,
-    CompletionModel, ContinueDecision, FinishReason, HookAction, Inbound, Message, Resume,
-    ResumeDecision, RunConfig, RunControl, RunErrorInfo, RunFinishedInfo, RunId, RunStartInfo,
-    StepId, StepInfo, StreamChunk, SuspendedCall, Suspension, ToolCallInfo, ToolDecision,
-    ToolProgress, ToolResultContent, TurnEndInfo, Usage, UserBlock,
+    AbortReason, AssistantBlock, BackgroundConfig, BackgroundEnd, BackgroundToolResult, CallState,
+    CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, ContinueDecision, Drained,
+    FinishReason, HookAction, Inbound, Message, Resume, ResumeDecision, RunConfig, RunControl,
+    RunErrorInfo, RunFinishedInfo, RunId, RunStartInfo, StepId, StepInfo, StreamChunk,
+    SuspendedCall, Suspension, ToolCallInfo, ToolDecision, ToolProgress, ToolResultBlock,
+    ToolResultContent, TurnEndInfo, Usage, UserBlock,
 };
 use ailoop_history::{CompactionError, CompactionStats, History};
 use ailoop_tools::{
-    ProgressSink, ToolActivation, ToolContext, ToolRegistry, ToolRegistryError, UsageSink,
+    ProgressSink, ToolActivation, ToolContext, ToolDyn, ToolRegistry, ToolRegistryError, UsageSink,
 };
 use async_stream::try_stream;
-use futures::{StreamExt, stream::BoxStream};
+use futures::{FutureExt, StreamExt, stream::BoxStream};
 use serde_json::Value;
 
 /// Stream of engine chunks for one run.
@@ -111,6 +112,12 @@ struct RunGuard {
     /// travel in its partial messages instead of going back in the
     /// queue.
     errored: AtomicBool,
+    /// Where the real results of calls this run moves to the
+    /// background go when the run does not take them.
+    background: BackgroundConfig,
+    /// The id under which `control` hands this run background results,
+    /// while it takes them.
+    background_run: Option<u64>,
 }
 
 impl RunGuard {
@@ -120,7 +127,9 @@ impl RunGuard {
         tool_cancellation: CancellationToken,
         control: Option<RunControl>,
         handed_over: Arc<AtomicBool>,
+        background: BackgroundConfig,
     ) -> Self {
+        let background_run = control.as_ref().map(RunControl::open_run);
         Self {
             middlewares,
             run_id,
@@ -131,23 +140,41 @@ impl RunGuard {
             taken: std::sync::Mutex::default(),
             handed_over,
             errored: AtomicBool::new(false),
+            background,
+            background_run,
         }
     }
 
-    /// Drains the run's [`RunControl`] queue, remembering what it took
-    /// so a drop can put it back. Empty without a control.
-    fn take_inbound(&self) -> Vec<Inbound> {
-        let Some(control) = &self.control else {
-            return Vec::new();
+    /// Drains the run's [`RunControl`]: queued messages and the
+    /// background results waiting for this run, remembering what it
+    /// took so a drop can put it back. With `close_if_empty`, finding
+    /// nothing also stops the run taking background results, in the
+    /// same step. Empty without a control.
+    fn drain(&self, close_if_empty: bool) -> Drained {
+        let (Some(control), Some(run)) = (&self.control, self.background_run) else {
+            return Drained::default();
         };
-        let messages = control.take_pending();
-        if !messages.is_empty() {
-            self.taken
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(messages.iter().cloned());
+        let drained = control.drain(run, close_if_empty);
+        if !drained.messages.is_empty() || !drained.results.is_empty() {
+            self.taken.lock().unwrap_or_else(|e| e.into_inner()).extend(
+                drained
+                    .results
+                    .iter()
+                    .map(|(message, _)| message.clone())
+                    .chain(drained.messages.iter().cloned()),
+            );
         }
-        messages
+        drained
+    }
+
+    /// Stops the run taking background results; those it took but did
+    /// not drain go to the callback as not delivered. Idempotent.
+    fn close_background(&self) {
+        if let (Some(control), Some(run)) = (&self.control, self.background_run) {
+            for result in control.close_run(run) {
+                self.background.report(result);
+            }
+        }
     }
 
     /// Unregisters every call from the run's [`RunControl`]: none of
@@ -175,6 +202,7 @@ impl RunGuard {
 
     async fn finished(&self, reason: &FinishReason, usage: &Usage, new_messages: &[Message]) {
         self.ended.store(true, Ordering::Relaxed);
+        self.close_background();
         for mw in self.pending() {
             mw.on_run_finished(&RunFinishedInfo::new(
                 &self.run_id,
@@ -194,6 +222,7 @@ impl RunGuard {
     ) {
         self.ended.store(true, Ordering::Relaxed);
         self.errored.store(true, Ordering::Relaxed);
+        self.close_background();
         for mw in self.pending() {
             mw.on_run_error(&RunErrorInfo::new(
                 &self.run_id,
@@ -208,8 +237,10 @@ impl RunGuard {
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
-        // However the run ended, none of its calls can be cancelled now.
+        // However the run ended, none of its calls can be cancelled now,
+        // and it takes no more background results.
         self.clear_calls();
+        self.close_background();
         if !self.ended.load(Ordering::Relaxed) {
             self.tool_cancellation.cancel();
         }
@@ -302,6 +333,20 @@ async fn abort_step(
                 (id, not_run_result(&reason))
             }
             PendingCall::Rejected { id, content } => (id, content),
+            // Moved to the background: it keeps running, so it keeps
+            // its provisional result rather than "not run".
+            PendingCall::Backgrounded { id, content } => {
+                let mut chunk =
+                    StreamChunk::tool_backgrounded(run_id.clone(), step_id.clone(), id.clone());
+                for mw in middlewares {
+                    mw.on_chunk_mut(&mut chunk).await;
+                }
+                for mw in middlewares {
+                    mw.on_chunk(&chunk).await;
+                }
+                chunks.push(chunk);
+                (id, content)
+            }
             // Its chunk went out in the suspended run.
             PendingCall::Answered { id, content } => {
                 tools_result.push(UserBlock::tool_result(id, content));
@@ -750,6 +795,7 @@ fn run_engine<'a, M: CompletionModel>(
             tool_cancellation.clone(),
             config.control.clone(),
             handed_over.clone(),
+            config.background.clone(),
         );
         // Progress tools report while they run, `(call_id, update)`.
         // Bounded and fed with `try_send`, so a chatty tool never blocks
@@ -1145,7 +1191,9 @@ fn run_engine<'a, M: CompletionModel>(
                 .iter()
                 .filter_map(|call| match call {
                     PendingCall::Run { id, .. } | PendingCall::Decided { id, .. } => Some(id.clone()),
-                    PendingCall::Rejected { .. } | PendingCall::Answered { .. } => None,
+                    PendingCall::Rejected { .. }
+                    | PendingCall::Answered { .. }
+                    | PendingCall::Backgrounded { .. } => None,
                 })
                 .collect();
             call_tokens.retain(|id, _| {
@@ -1221,7 +1269,8 @@ fn run_engine<'a, M: CompletionModel>(
                         PendingCall::Run { id, name, args } => (id, name, args),
                         // Nothing runs, so no tool hook fires: the synthesized
                         // error only goes out as a ToolResult chunk.
-                        PendingCall::Rejected { id, content } => {
+                        PendingCall::Rejected { id, content }
+                        | PendingCall::Backgrounded { id, content } => {
                             slots.push(Slot::Answered { id, content, emit: true });
                             continue;
                         }
@@ -1245,7 +1294,7 @@ fn run_engine<'a, M: CompletionModel>(
                                 ResumeDecision::Deny { reason } => Some(denied_result(&reason)),
                                 _ => Some(ToolResultContent::error("unsupported ResumeDecision variant")),
                             };
-                            slots.push(Slot::Gated { id, name, args, call, token, content });
+                            slots.push(Slot::Gated { id, name, args, call, token, content, moved: false });
                             continue;
                         }
                     };
@@ -1315,7 +1364,7 @@ fn run_engine<'a, M: CompletionModel>(
                             return;
                         }
                     };
-                    slots.push(Slot::Gated { id, name, args, call, token, content });
+                    slots.push(Slot::Gated { id, name, args, call, token, content, moved: false });
                 }
 
                 // Phase 2: run the calls that passed, together. Each
@@ -1323,18 +1372,77 @@ fn run_engine<'a, M: CompletionModel>(
                 // dropped even if the tool ignores the token. A run abort
                 // fires those tokens too, but `race_abort` checks the
                 // run's abort first.
+                //
+                // With a `RunControl`, a call to a backgroundable tool
+                // runs in a task of its own instead, with a token not
+                // tied to the run, so `RunControl::background_tool` can
+                // stop waiting for it without stopping it. Until then the
+                // engine stands in for the run: dropping or cancelling
+                // the call here fires the task's token. Every call the
+                // engine lets go of while it was moved lands in `moved_calls`.
+                let moved_calls: std::sync::Mutex<HashSet<String>> = std::sync::Mutex::default();
+                let moved_calls = &moved_calls;
                 let runs = slots.iter().enumerate().filter_map(|(index, slot)| match slot {
-                    Slot::Gated { id, name, args, token, content: None, .. } => {
+                    Slot::Gated { id, name, args, call, token, content: None, .. } => {
                         let progress = ProgressSink::new(id.clone(), progress_tx.clone());
+                        let background = match (&config.control, guard.background_run, catalog.get(name)) {
+                            (Some(control), Some(background_run), Some(tool)) if tool.backgroundable() => {
+                                Some(BackgroundTask {
+                                    tool: tool.clone(),
+                                    args: args.clone(),
+                                    call: call.clone(),
+                                    control: control.clone(),
+                                    background_run,
+                                    middlewares: config.middlewares.clone(),
+                                    background: config.background.clone(),
+                                })
+                            }
+                            _ => None,
+                        };
                         let ctx = ToolContext::new(
                             run_id.clone(),
                             step_id.clone(),
                             id.clone(),
                             ToolActivation::new(catalog.clone(), active_snapshot.clone()),
-                            token.clone(),
+                            if background.is_some() { CancellationToken::new() } else { token.clone() },
                         )
                         .with_usage_sink(delegated.clone())
                         .with_progress_sink(progress.clone());
+                        if let Some(task) = background {
+                            return Some(async move {
+                                let _close = CloseOnDrop(progress);
+                                if token.is_cancelled() {
+                                    return (index, CallOutput::NotStarted);
+                                }
+                                let control = task.control.clone();
+                                let on_moved = control
+                                    .register_background(id.clone(), ctx.cancellation().clone());
+                                // Whatever ends this wait (a result, a move,
+                                // `cancel_tool`, the run's abort dropping it),
+                                // the engine lets go of the call here.
+                                let _release = ReleaseOnDrop { control: &control, call_id: id, moved: moved_calls };
+                                let mut joined = tokio::spawn(task.run(ctx));
+                                let moved = async {
+                                    // An error means the call finished
+                                    // (or was let go of) unmoved.
+                                    if on_moved.await.is_err() {
+                                        std::future::pending::<()>().await;
+                                    }
+                                };
+                                let output = tokio::select! {
+                                    biased;
+                                    _ = moved => CallOutput::Moved,
+                                    _ = token.cancelled() => CallOutput::Cancelled,
+                                    joined = &mut joined => match joined {
+                                        Ok(Some(content)) => CallOutput::Finished(Ok(content)),
+                                        Ok(None) => CallOutput::Moved,
+                                        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                                        Err(_) => CallOutput::Cancelled,
+                                    },
+                                };
+                                (index, output)
+                            }.boxed());
+                        }
                         Some(async move {
                             // Updates sent once the call is over (it
                             // returned, or its future was dropped) are
@@ -1352,7 +1460,7 @@ fn run_engine<'a, M: CompletionModel>(
                                 result = tools.tool_call_with_ctx(name, args.clone(), &ctx) => CallOutput::Finished(result),
                             };
                             (index, output)
-                        })
+                        }.boxed())
                     }
                     _ => None,
                 }).collect::<Vec<_>>();
@@ -1410,6 +1518,18 @@ fn run_engine<'a, M: CompletionModel>(
                     for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
                     yield chunk;
                 }
+                // Every call the engine let go of while it was moved
+                // answers with its provisional result, here or in an
+                // abort: the tool goes on running either way.
+                let moved_calls = std::mem::take(&mut *moved_calls.lock().unwrap_or_else(|e| e.into_inner()));
+                for slot in &mut slots {
+                    if let Slot::Gated { id, call, content, moved, .. } = slot
+                        && moved_calls.contains(id)
+                    {
+                        *moved = true;
+                        *content = Some(config.background.notice_for(call));
+                    }
+                }
                 let outputs = match outputs {
                     Ok(outputs) => outputs,
                     Err(reason) => {
@@ -1424,10 +1544,12 @@ fn run_engine<'a, M: CompletionModel>(
                     }
                 };
                 for (index, output) in outputs {
-                    let Slot::Gated { name, content, .. } = &mut slots[index] else {
+                    let Slot::Gated { name, content, moved: false, .. } = &mut slots[index] else {
                         continue;
                     };
                     *content = Some(match output {
+                        // Recorded with the moved calls above.
+                        CallOutput::Moved => continue,
                         CallOutput::NotStarted => cancelled_before_run(),
                         CallOutput::Cancelled => cancelled_while_running(),
                         CallOutput::Finished(Ok(content)) => content,
@@ -1446,13 +1568,13 @@ fn run_engine<'a, M: CompletionModel>(
                 let mut held = Vec::new();
                 let mut answering = slots.into_iter();
                 while let Some(slot) = answering.next() {
-                    let (id, content, emit) = match slot {
-                        Slot::Answered { id, content, emit } => (id, content, emit),
+                    let (id, content, emit, moved) = match slot {
+                        Slot::Answered { id, content, emit } => (id, content, emit, false),
                         slot @ Slot::Deferred { .. } => {
                             held.push(slot.into_unanswered());
                             continue;
                         }
-                        Slot::Gated { id, args, call, content, .. } => {
+                        Slot::Gated { id, args, call, content, moved, .. } => {
                             let mut content = content.unwrap_or_else(|| {
                                 ToolResultContent::error("Tool not run: no result was recorded")
                             });
@@ -1496,13 +1618,19 @@ fn run_engine<'a, M: CompletionModel>(
                                 for chunk in chunks { yield chunk; }
                                 return;
                             }
-                            (id, content, true)
+                            (id, content, true, moved)
                         }
                     };
 
                     // Too late to cancel once the result is decided, before
                     // anyone sees it.
                     if let Some(control) = &config.control { control.unregister_call(&id); }
+                    if moved {
+                        let mut chunk = StreamChunk::tool_backgrounded(run_id.clone(), step_id.clone(), id.clone());
+                        for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
+                        for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                        yield chunk;
+                    }
                     if emit {
                         let mut chunk = StreamChunk::tool_result(
                             run_id.clone(),
@@ -1599,8 +1727,23 @@ fn run_engine<'a, M: CompletionModel>(
 
             // Messages queued on the run's `RunControl` enter here, once
             // every call of the turn is done: after the tool results, in
-            // arrival order. Aborts never get here, so they stay queued.
-            let inbound = guard.take_inbound();
+            // arrival order, behind the real results of calls this run
+            // moved to the background. Aborts never get here, so they
+            // stay queued. A turn that would end the run and finds
+            // nothing to deliver also stops it taking background
+            // results, so none arrives after its last drain.
+            let drained = guard.drain(!matches!(finish_reason, FinishReason::ToolUse));
+            let mut background_finished = Vec::new();
+            let mut inbound = Vec::with_capacity(drained.results.len() + drained.messages.len());
+            for (message, mut result) in drained.results {
+                // Reported as soon as it is the run's, before anything
+                // is yielded: a stream dropped at a `yield` would skip it.
+                result.delivered = true;
+                config.background.report(result.clone());
+                background_finished.push(result);
+                inbound.push(message);
+            }
+            inbound.extend(drained.messages);
             let inbound_ids: Vec<String> = inbound.iter().map(|m| m.id.clone()).collect();
             let inbound_blocks: Vec<UserBlock> =
                 inbound.into_iter().flat_map(|m| m.blocks).collect();
@@ -1649,6 +1792,18 @@ fn run_engine<'a, M: CompletionModel>(
                 run_msgs.push(Message::User { blocks: user_blocks });
             }
             run_msgs.complete_step();
+
+            for result in background_finished {
+                let mut chunk = StreamChunk::background_tool_finished(
+                    run_id.clone(),
+                    step_id.clone(),
+                    result.call_id,
+                    result.content,
+                );
+                for mw in &config.middlewares { mw.on_chunk_mut(&mut chunk).await; }
+                for mw in &config.middlewares { mw.on_chunk(&chunk).await; }
+                yield chunk;
+            }
 
             if !inbound_ids.is_empty() {
                 let mut chunk = StreamChunk::inbound_delivered(
@@ -1710,6 +1865,136 @@ impl Drop for CloseOnDrop {
     }
 }
 
+/// Lets go of a backgroundable call when the engine stops waiting for
+/// it, recording it in `moved` if it was moved by then.
+struct ReleaseOnDrop<'a> {
+    control: &'a RunControl,
+    call_id: &'a String,
+    moved: &'a std::sync::Mutex<HashSet<String>>,
+}
+
+impl Drop for ReleaseOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.control.release_background(self.call_id) {
+            self.moved
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(self.call_id.clone());
+        }
+    }
+}
+
+/// A call to a backgroundable tool, with what its task needs to deliver
+/// the result on its own once it is moved.
+struct BackgroundTask {
+    tool: Arc<dyn ToolDyn>,
+    args: Value,
+    call: ToolCallInfo,
+    control: RunControl,
+    background_run: u64,
+    middlewares: Vec<Arc<dyn ChatMiddleware>>,
+    background: BackgroundConfig,
+}
+
+impl BackgroundTask {
+    /// Runs the tool. Returns its result when the engine is waiting for
+    /// it; once the call is moved, delivers the result itself and
+    /// returns `None`.
+    async fn run(self, ctx: ToolContext) -> Option<ToolResultContent> {
+        let token = ctx.cancellation().clone();
+        let (content, cancelled, panic) = tokio::select! {
+            biased;
+            _ = token.cancelled() => (cancelled_in_background(), true, None),
+            output = std::panic::AssertUnwindSafe(self.tool.call(self.args.clone(), &ctx)).catch_unwind() => {
+                match output {
+                    Ok(content) => (content, false, None),
+                    Err(panic) => (
+                        ToolResultContent::error("Tool panicked while running in the background"),
+                        false,
+                        Some(panic),
+                    ),
+                }
+            }
+        };
+        match self.control.finish_background(&self.call.call_id) {
+            BackgroundEnd::Engine => {
+                // Not moved: the panic belongs to the run, as with any
+                // other tool.
+                if let Some(panic) = panic {
+                    std::panic::resume_unwind(panic);
+                }
+                Some(content)
+            }
+            BackgroundEnd::Moved => {
+                self.deliver(content, cancelled).await;
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Hands a moved call's result to its run if the run still takes
+    /// it, and to the callback otherwise, after the run's output
+    /// transforms.
+    async fn deliver(self, mut content: ToolResultContent, cancelled: bool) {
+        for mw in &self.middlewares {
+            mw.on_after_tool_call_mut(&self.call, &self.args, &mut content)
+                .await;
+        }
+        let ToolCallInfo {
+            run_id,
+            step_id,
+            call_id,
+            name,
+            ..
+        } = self.call;
+        let mut result =
+            BackgroundToolResult::new(run_id, step_id, call_id, name, self.args, content);
+        result.cancelled = cancelled;
+        let message = background_message(&result);
+        if let Some(result) =
+            self.control
+                .offer_background_result(self.background_run, message, result)
+        {
+            self.background.report(result);
+        }
+    }
+}
+
+/// The real result of a call moved to the background, as stopped by
+/// `RunControl::cancel_background`.
+fn cancelled_in_background() -> ToolResultContent {
+    ToolResultContent::error(
+        "Background tool call cancelled by the caller; it may have partly completed",
+    )
+}
+
+/// The message that delivers a background result to its run: a line
+/// naming the call, then the result's blocks. Its id is the call id.
+fn background_message(result: &BackgroundToolResult) -> Inbound {
+    let BackgroundToolResult {
+        call_id,
+        name,
+        content,
+        cancelled,
+        ..
+    } = result;
+    let header = if *cancelled {
+        format!("Background tool call `{name}` (call id {call_id}) was cancelled:")
+    } else if content.is_error {
+        format!("Background tool call `{name}` (call id {call_id}) failed:")
+    } else {
+        format!("Result of background tool call `{name}` (call id {call_id}):")
+    };
+    let mut blocks = vec![UserBlock::text(header)];
+    blocks.extend(content.blocks.iter().filter_map(|block| match block {
+        ToolResultBlock::Text { text } => Some(UserBlock::text(text.clone())),
+        ToolResultBlock::Image { source } => Some(UserBlock::image(source.clone())),
+        _ => None,
+    }));
+    Inbound::new(call_id.clone(), blocks)
+}
+
 /// How many progress updates a run buffers before dropping new ones.
 const PROGRESS_BUFFER: usize = 64;
 
@@ -1719,6 +2004,9 @@ enum CallOutput {
     NotStarted,
     /// `RunControl::cancel_tool` stopped it while the tool ran.
     Cancelled,
+    /// `RunControl::background_tool` moved it; it runs on without the
+    /// run.
+    Moved,
     /// The tool returned.
     Finished(Result<ToolResultContent, ToolRegistryError>),
 }
@@ -1750,7 +2038,8 @@ enum Slot {
     },
     /// Through its `before` hooks. `content` is set up front when the
     /// tool will not be invoked (skipped, or cancelled during its
-    /// gates), and after execution otherwise.
+    /// gates), and after execution otherwise; for a call moved to the
+    /// background (`moved`) it is the provisional result.
     Gated {
         id: String,
         name: String,
@@ -1758,12 +2047,14 @@ enum Slot {
         call: ToolCallInfo,
         token: CancellationToken,
         content: Option<ToolResultContent>,
+        moved: bool,
     },
 }
 
 impl Slot {
     /// The call as `abort_step` takes it: an answered call keeps its
-    /// result, a gated one is answered as not run.
+    /// result, a moved one its provisional result, and any other gated
+    /// one is answered as not run.
     fn into_unanswered(self) -> PendingCall {
         match self {
             Slot::Answered {
@@ -1772,6 +2063,12 @@ impl Slot {
                 emit: true,
             } => PendingCall::Rejected { id, content },
             Slot::Answered { id, content, .. } => PendingCall::Answered { id, content },
+            Slot::Gated {
+                id,
+                content: Some(content),
+                moved: true,
+                ..
+            } => PendingCall::Backgrounded { id, content },
             Slot::Gated { id, name, args, .. } | Slot::Deferred { id, name, args } => {
                 PendingCall::Run { id, name, args }
             }
@@ -1807,6 +2104,12 @@ enum PendingCall {
         name: String,
         args: Value,
         decision: ResumeDecision,
+    },
+    /// Moved to the background before its `after` hooks ran, in a step
+    /// the run leaves: answered with its provisional result.
+    Backgrounded {
+        id: String,
+        content: ToolResultContent,
     },
 }
 

@@ -495,6 +495,11 @@ fn budget_label(reason: &AbortReason) -> &'static str {
 /// [`ConversationBuilder::tool_concurrency`](crate::ConversationBuilder::tool_concurrency)
 /// a call to it therefore runs alone.
 ///
+/// Nor is it [`backgroundable`](ailoop_tools::ToolDyn::backgroundable):
+/// the child run reports its spend and its suspension to the parent
+/// run, and holds the child conversation's lock until it ends, so it
+/// cannot outlive the parent's step on its own.
+///
 /// A sub-agent cannot suspend on a deferred tool call
 /// ([`ToolDecision::Defer`](ailoop_core::ToolDecision::Defer)): nobody
 /// outside the parent run sees the child's suspension. If the child's
