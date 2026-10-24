@@ -1197,3 +1197,85 @@ async fn dropped_resume_keeps_an_approved_call_that_never_started_deferred() {
         assert_eq!(pending[0].call_id, "t2");
     }
 }
+
+/// The `ToolResult` block for `id` in `history`.
+fn result_content(history: &[Message], id: &str) -> Option<ToolResultContent> {
+    history.iter().find_map(|m| match m {
+        Message::User { blocks } => blocks.iter().find_map(|b| match b {
+            UserBlock::ToolResult {
+                call_id, content, ..
+            } if call_id == id => Some(content.clone()),
+            _ => None,
+        }),
+        _ => None,
+    })
+}
+
+/// Answering a deferred call gives the model exactly the given result,
+/// error flag included, without invoking the tool: its `after` hooks
+/// run, its `before` hooks do not, and its `ToolResult` goes out.
+#[tokio::test]
+async fn answer_gives_the_model_the_content_without_running_the_tool() {
+    for content in [
+        ToolResultContent::text("the user said yes"),
+        ToolResultContent::error("the user declined"),
+    ] {
+        let mut s = setup(
+            vec![calls_turn(&[("t1", "delete")]), text_turn("ok")],
+            &["delete"],
+            1,
+        );
+        s.chat.run("clean up").await.expect("suspends");
+        assert_eq!(s.gate.log(), ["before:t1"]);
+
+        let mut stream = s
+            .chat
+            .resume_stream(
+                [("t1".into(), ResumeDecision::answer(content.clone()))],
+                RunOptions::new(),
+            )
+            .await
+            .expect("starts");
+        let mut emitted = None;
+        while let Some(chunk) = stream.next().await {
+            if let StreamChunk::ToolResult {
+                call_id,
+                content: result,
+                ..
+            } = chunk.expect("no error")
+                && call_id == "t1"
+            {
+                emitted = Some(result);
+            }
+        }
+        drop(stream);
+
+        assert_eq!(s.delete.calls(), 0);
+        assert_eq!(emitted.as_ref(), Some(&content));
+        assert_eq!(s.gate.log(), ["before:t1", "after:t1"]);
+        let requests = s.gate.requests.lock().unwrap();
+        assert_eq!(
+            result_content(requests.last().unwrap(), "t1").as_ref(),
+            Some(&content)
+        );
+        assert!(s.chat.suspension().is_none());
+        assert_no_orphans(s.chat.messages());
+    }
+}
+
+/// An answered call is answered in the suspension put back after a
+/// failed resume, and the next resume gives the model its content.
+#[tokio::test]
+async fn answered_call_stays_answered_after_a_failed_resume() {
+    let mut s = failed_resume(ResumeDecision::answer("42"), vec![text_turn("ok")]).await;
+
+    assert_eq!(s.delete.calls(), 0);
+    assert_eq!(answered_text(&s.chat, "t1").as_deref(), Some("42"));
+    s.chat.resume([]).await.expect("resumes again");
+    assert_eq!(s.delete.calls(), 0);
+    let requests = s.gate.requests.lock().unwrap();
+    assert_eq!(
+        result_text(requests.last().unwrap(), "t1").as_deref(),
+        Some("42")
+    );
+}

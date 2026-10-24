@@ -1379,6 +1379,8 @@ fn run_engine<'a, M: CompletionModel>(
                                 .unwrap_or_else(|| tool_cancellation.child_token());
                             let call = ToolCallInfo::new(run_id.clone(), step_id.clone(), id.clone(), name.clone());
                             let content = match decision {
+                                // Nothing to run, so a cancelled token changes nothing.
+                                ResumeDecision::Answer { content } => Some(content),
                                 ResumeDecision::Approve if token.is_cancelled() => Some(cancelled_before_run()),
                                 ResumeDecision::Approve => None,
                                 ResumeDecision::Deny { reason } => Some(denied_result(&reason)),

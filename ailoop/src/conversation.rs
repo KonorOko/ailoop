@@ -415,6 +415,8 @@ where
     ///   suspended run), then its `after` hooks;
     /// - a denied call gets an error result reading `"Tool denied:
     ///   <reason>"` and goes through its `after` hooks;
+    /// - an answered call ([`ResumeDecision::Answer`]) is not run: its
+    ///   given result goes through its `after` hooks;
     /// - a call that was waiting goes through its gates as usual, and
     ///   may be deferred again, which suspends the new run (since that
     ///   step makes no request, an [`ApprovalRequest`](crate::ApprovalRequest)

@@ -70,6 +70,25 @@ and this project adheres to
   name and whether the call was cancelled, so a consumer of the stream
   alone needs neither the callback nor an earlier chunk), and matching
   `JsonTracer` / `TracingMiddleware` events.
+- `ResumeDecision::Answer { content }` (and `ResumeDecision::answer`)
+  resumes a deferred call with a result given from outside the run,
+  such as a person's answer or a result computed elsewhere, without
+  invoking the tool. Before, the only options were `Approve` (run the
+  tool) and `Deny` (an error result), so a given answer had to be
+  faked with `Approve` and a tool built around the answer, and traces
+  and hooks saw a call approved and run that never ran. The call gets
+  `content` as given (`is_error` included) after its
+  `on_after_tool_call_mut` hooks (so `Sanitize` covers it too), its
+  `after` hooks run and its `ToolResult` goes out; its `before` hooks
+  do not run again, as with `Approve` and `Deny`. Nothing is invoked
+  even if the call was cancelled before its turn came. If the resumed
+  run fails, the suspension put back has the call answered with its
+  content.
+
+### Changed (BREAKING)
+
+- `ResumeDecision` no longer implements `Eq`, since its new `Answer`
+  variant carries a `ToolResultContent`, which is only `PartialEq`.
 
 ### Changed
 
@@ -124,6 +143,27 @@ and this project adheres to
   `delivered: false`, no `InboundDelivered` or `BackgroundToolFinished`
   being emitted. The rule: a run does not take what it cannot answer.
   The cap stays strict; runs with steps to spare are unchanged.
+
+### Migration
+
+- `ResumeDecision` without `Eq`: comparisons with `==` and
+  `assert_eq!` keep working through `PartialEq`. A type of yours that
+  holds one and derives `Eq` derives only `PartialEq` instead:
+
+  ```rust
+  // Before
+  #[derive(Debug, Clone, PartialEq, Eq)]
+  struct PendingApproval {
+      call_id: String,
+      decision: ResumeDecision,
+  }
+  // After
+  #[derive(Debug, Clone, PartialEq)]
+  struct PendingApproval {
+      call_id: String,
+      decision: ResumeDecision,
+  }
+  ```
 
 ## [1.0.0-rc.5] — 2026-10-23
 
