@@ -92,8 +92,10 @@ impl SuspendedCall {
 #[non_exhaustive]
 pub enum CallState {
     /// Already has its result: it ran (and went through its `after`
-    /// hooks) or was answered without running. Resuming keeps the
-    /// result and never runs it again.
+    /// hooks), was answered without running, or, in a suspension put
+    /// back after a failed or dropped resume, was interrupted while it
+    /// ran (an error result saying it may have partly completed).
+    /// Resuming keeps the result and never runs it again.
     Answered {
         /// The recorded result.
         content: ToolResultContent,
@@ -110,7 +112,11 @@ pub enum CallState {
 }
 
 /// The decision for one deferred call when a run is resumed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Whatever the decision, the call's `before` hooks do not run again
+/// (they ran in the suspended run); its `after` hooks run on its
+/// result, which goes out as a `ToolResult` like any other.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ResumeDecision {
     /// Run the call with the arguments stored in the suspension.
@@ -120,6 +126,16 @@ pub enum ResumeDecision {
         /// Why it was denied, shown to the model.
         reason: String,
     },
+    /// Do not run it; the model gets `content` as the call's result,
+    /// as given (`is_error` included), after the call's
+    /// `on_after_tool_call_mut` hooks (so a `Sanitize` covers it too).
+    /// For a result that comes from outside the run: a person's answer,
+    /// or one computed elsewhere. The tool is never invoked, even if the
+    /// call was cancelled before its turn came.
+    Answer {
+        /// The call's result.
+        content: ToolResultContent,
+    },
 }
 
 impl ResumeDecision {
@@ -127,6 +143,13 @@ impl ResumeDecision {
     pub fn deny(reason: impl Into<String>) -> Self {
         Self::Deny {
             reason: reason.into(),
+        }
+    }
+
+    /// Shorthand for [`Self::Answer`].
+    pub fn answer(content: impl Into<ToolResultContent>) -> Self {
+        Self::Answer {
+            content: content.into(),
         }
     }
 }
@@ -239,6 +262,18 @@ mod tests {
             ResumeError::NotDeferred("c".into())
         );
         assert!(Resume::new(suspension(), [("b".into(), ResumeDecision::deny("no"))]).is_ok());
+    }
+
+    #[test]
+    fn answer_decision_round_trips_through_json() {
+        for decision in [
+            ResumeDecision::answer("42"),
+            ResumeDecision::answer(ToolResultContent::error("nope")),
+        ] {
+            let json = serde_json::to_string(&decision).unwrap();
+            let back: ResumeDecision = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, decision);
+        }
     }
 
     #[test]

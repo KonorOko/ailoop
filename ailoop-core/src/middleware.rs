@@ -161,7 +161,9 @@ pub trait ChatMiddleware: Send + Sync {
     /// Never fired for [`FinishReason::Aborted`], nor for a turn whose
     /// close delivered messages from the run's [`crate::RunControl`]:
     /// the run continues to answer them, and the hook fires when the
-    /// model stops again with nothing queued. `turn.new_messages` is
+    /// model stops again with nothing queued. On the last step
+    /// `RunConfig::max_iterations` allows, nothing is delivered, so the
+    /// hook fires as usual. `turn.new_messages` is
     /// everything the run has added so far, including this turn's
     /// assistant message.
     ///

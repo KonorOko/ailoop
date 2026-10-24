@@ -17,7 +17,7 @@ use std::{
 };
 
 use crate::{
-    engine::{ContextOptions, run_with_history},
+    engine::{ContextOptions, ResumeLedger, run_with_history},
     errors::{BuildError, EngineError, RunError},
     middleware::{
         ApprovalCallback, ApprovalMiddleware, ApprovalRequest, RequestDefaults,
@@ -415,6 +415,8 @@ where
     ///   suspended run), then its `after` hooks;
     /// - a denied call gets an error result reading `"Tool denied:
     ///   <reason>"` and goes through its `after` hooks;
+    /// - an answered call ([`ResumeDecision::Answer`]) is not run: its
+    ///   given result goes through its `after` hooks;
     /// - a call that was waiting goes through its gates as usual, and
     ///   may be deferred again, which suspends the new run (since that
     ///   step makes no request, an [`ApprovalRequest`](crate::ApprovalRequest)
@@ -427,12 +429,22 @@ where
     /// and no pre-run compaction runs (the history ends on the suspended
     /// step's tool calls). If the resumed run ends in `Err` or its
     /// stream is dropped, the history is rolled back and the suspension
-    /// is put back, so it can be resumed again. That includes the
-    /// suspended step's results, so resuming again runs an approved call
-    /// a second time if it already ran before the failure (a model error
-    /// on the next turn, for instance): make approved tools idempotent,
-    /// or record what ran in `on_after_tool_call` and deny it on the
-    /// retry. If the resumed run aborts (timeout, cancellation,
+    /// is put back, updated so it can be resumed again without repeating
+    /// anything (at most once):
+    ///
+    /// - every call of the step that got its result (it ran, was
+    ///   denied, or went through its gates and ran) is
+    ///   [`CallState::Answered`] with that result, as it came out of its
+    ///   `after` hooks;
+    /// - a call that was running when the run ended is `Answered` with an
+    ///   error result saying it was interrupted and may have partly
+    ///   completed;
+    /// - a call that never started keeps its state: a deferred one still
+    ///   needs a decision, a waiting one takes its gates again.
+    ///
+    /// The next resume's `decisions` name only the calls still deferred
+    /// ([`Suspension::pending`]); naming an answered one fails with
+    /// [`ResumeError::NotDeferred`]. If the resumed run aborts (timeout, cancellation,
     /// `Terminate`), the step is closed instead: calls without a result
     /// are answered as not run, and the suspension is gone.
     ///
@@ -688,6 +700,7 @@ where
         // A resumed run takes the suspension; the stream puts it back if
         // the run fails or is dropped, since the history is rolled back.
         let restore = resume.as_ref().map(|r| r.suspension.clone());
+        let ledger = resume.as_ref().map(|_| ResumeLedger::default());
         config.resume = resume;
         self.suspension = None;
         if let Some(n) = options.max_iterations.or(self.max_iterations) {
@@ -705,6 +718,7 @@ where
             self.context_options,
             M::Error::is_context_overflow,
             options.usage_parent,
+            ledger.clone(),
         );
 
         let prelude: BoxStream<'_, Result<StreamChunk, RunError<M::Error>>> = match report {
@@ -729,6 +743,7 @@ where
             inner: Box::pin(prelude.chain(inner)),
             suspension: &mut self.suspension,
             restore,
+            ledger,
             pending: None,
             done: false,
         })
@@ -1489,9 +1504,11 @@ pub struct RunStream<'a, M: CompletionModel> {
     inner: BoxStream<'a, Result<StreamChunk, RunError<M::Error>>>,
     /// The conversation's suspension slot, committed together with the
     /// history: set from `RunSuspended` when the run finishes, put back
-    /// to `restore` when it fails or is dropped.
+    /// to `restore` when it fails or is dropped, updated by `ledger`.
     suspension: &'a mut Option<Suspension>,
     restore: Option<Suspension>,
+    /// For a resumed run, what became of the resumed step's calls.
+    ledger: Option<ResumeLedger>,
     pending: Option<Suspension>,
     done: bool,
 }
@@ -1515,7 +1532,7 @@ impl<'a, M: CompletionModel> Stream for RunStream<'a, M> {
                 this.done = true;
             }
             Some(Err(_)) => {
-                *this.suspension = this.restore.take();
+                *this.suspension = this.restored();
                 this.done = true;
             }
             _ => {}
@@ -1524,10 +1541,24 @@ impl<'a, M: CompletionModel> Stream for RunStream<'a, M> {
     }
 }
 
+impl<M: CompletionModel> RunStream<'_, M> {
+    /// The suspension to put back when the run fails or is dropped: the
+    /// one it resumed, with every call of the resumed step that has a
+    /// result (or was running) answered, so resuming again does not
+    /// repeat it.
+    fn restored(&mut self) -> Option<Suspension> {
+        let suspension = self.restore.take()?;
+        Some(match &self.ledger {
+            Some(ledger) => ledger.apply(suspension),
+            None => suspension,
+        })
+    }
+}
+
 impl<M: CompletionModel> Drop for RunStream<'_, M> {
     fn drop(&mut self) {
         if !self.done {
-            *self.suspension = self.restore.take();
+            *self.suspension = self.restored();
         }
     }
 }

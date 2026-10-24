@@ -1450,3 +1450,57 @@ async fn builder_background_config_is_the_default_run_options_override() {
     tokio::time::sleep(Duration::from_secs(60)).await;
     assert!(results.try_recv().is_err());
 }
+
+/// Holds the model's request for the step with `iteration` for
+/// `delay`, so something can arrive while that turn is in flight.
+struct SlowRequest {
+    iteration: usize,
+    delay: Duration,
+}
+
+#[async_trait::async_trait]
+impl ChatMiddleware for SlowRequest {
+    async fn on_chat_request(&self, step: &ailoop::StepInfo, _req: &mut ailoop::ChatRequest) {
+        if step.iteration == self.iteration {
+            tokio::time::sleep(self.delay).await;
+        }
+    }
+}
+
+/// A background result that arrives during the last step the cap
+/// allows is not taken: the run ends as it would have, and the result
+/// goes to the callback as not delivered.
+#[tokio::test(start_paused = true)]
+async fn result_arriving_in_the_last_allowed_step_is_not_taken() {
+    for _ in 0..20 {
+        let control = RunControl::new();
+        let job = Arc::new(Job::new("job", 5));
+        let registry = tools([job.clone()]);
+        let model = ScriptedModel::new([tool_calls_turn(&[("t1", "job")]), text_turn("done")]);
+        let (background, mut results) = callback();
+        let mut cfg = config(&control, background);
+        cfg.max_iterations = 2;
+        cfg.middlewares = vec![Arc::new(SlowRequest {
+            iteration: 1,
+            delay: Duration::from_secs(10),
+        })];
+        let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+
+        let chunks = collect(&model, &registry, cfg).await;
+        mover.await.unwrap();
+
+        let (reason, _) = finish(&chunks);
+        assert_eq!(reason, FinishReason::EndTurn);
+        assert!(
+            position(&chunks, |c| matches!(
+                c,
+                StreamChunk::BackgroundToolFinished { .. } | StreamChunk::InboundDelivered { .. }
+            ))
+            .is_none()
+        );
+        let result = results.try_recv().expect("reported when the run ended");
+        assert!(!result.delivered);
+        assert_eq!(result.content.as_text(), Some("job done"));
+        assert!(results.try_recv().is_err(), "reported once");
+    }
+}
