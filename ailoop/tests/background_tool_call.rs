@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use ailoop::{
     AbortReason, BackgroundConfig, BackgroundToolResult, CallState, CancellationToken,
-    ChatMiddleware, FinishReason, Inbound, Message, RunConfig, RunControl, Sanitize, StreamChunk,
-    ToolCallInfo, ToolDecision, ToolDefinition, ToolProgress, ToolResultBlock, ToolResultContent,
-    Usage, UserBlock, advanced::run_chat,
+    ChatMiddleware, Conversation, FinishReason, Inbound, Message, RunConfig, RunControl,
+    RunOptions, Sanitize, StreamChunk, ToolCallInfo, ToolDecision, ToolDefinition, ToolProgress,
+    ToolResultBlock, ToolResultContent, Usage, UserBlock, advanced::run_chat,
 };
 use ailoop_core::testing::ScriptedModel;
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
@@ -1186,4 +1186,35 @@ async fn background_results_go_ahead_of_queued_messages() {
             "queued first".into(),
         ]
     );
+}
+
+/// Through `Conversation`, `RunOptions::background` sets the notice
+/// and the callback of the run.
+#[tokio::test(start_paused = true)]
+async fn conversation_takes_the_background_config_from_run_options() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 30));
+    let model = ScriptedModel::new([tool_calls_turn(&[("t1", "job")]), text_turn("ok")]);
+    let mut chat = Conversation::builder(model)
+        .tool_dyn(job.clone())
+        .build()
+        .expect("build");
+    let (background, mut results) = callback();
+    let background = background.notice(|call| format!("moved {}", call.call_id));
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    let outcome = chat
+        .run_with_options(
+            "hi",
+            RunOptions::new()
+                .control(control.clone())
+                .background(background),
+        )
+        .await
+        .expect("run");
+    mover.await.unwrap();
+
+    assert!(user_texts(&outcome.new_messages).contains(&"result t1: moved t1".to_string()));
+    let result = results.recv().await.unwrap();
+    assert_eq!(result.content.as_text(), Some("job done"));
+    assert!(!result.delivered);
 }
