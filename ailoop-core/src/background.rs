@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::control::Inbound;
 use crate::ids::{RunId, StepId};
-use crate::message::ToolResultContent;
+use crate::message::{ToolResultBlock, ToolResultContent, UserBlock};
 use crate::middleware::ToolCallInfo;
 
 type NoticeFn = dyn Fn(&ToolCallInfo) -> String + Send + Sync;
@@ -136,8 +137,9 @@ pub struct BackgroundToolResult {
     /// before the result arrived), or took it but was rolled back (its
     /// stream dropped before it handed `RunFinished` over), and nothing
     /// delivered it: it is the caller's to deliver, for instance by
-    /// pushing it on the next run's [`crate::RunControl`]. A rolled
-    /// back run does not put it back in the queue.
+    /// pushing [`Self::to_inbound`] on the next run's
+    /// [`crate::RunControl`]. A rolled back run does not put it back in
+    /// the queue.
     pub delivered: bool,
 }
 
@@ -161,5 +163,86 @@ impl BackgroundToolResult {
             cancelled: false,
             delivered: false,
         }
+    }
+
+    /// The message that delivers this result to a run, the same one the
+    /// run that moved the call gets when it takes the result: a text
+    /// line naming the call (and saying whether it failed or was
+    /// cancelled), then the result's text and image blocks. Its id is
+    /// [`Self::call_id`].
+    pub fn to_inbound(&self) -> Inbound {
+        let Self {
+            call_id,
+            name,
+            content,
+            cancelled,
+            ..
+        } = self;
+        let header = if *cancelled {
+            format!("Background tool call `{name}` (call id {call_id}) was cancelled:")
+        } else if content.is_error {
+            format!("Background tool call `{name}` (call id {call_id}) failed:")
+        } else {
+            format!("Result of background tool call `{name}` (call id {call_id}):")
+        };
+        let mut blocks = vec![UserBlock::text(header)];
+        blocks.extend(content.blocks.iter().map(|block| match block {
+            ToolResultBlock::Text { text } => UserBlock::text(text.clone()),
+            ToolResultBlock::Image { source } => UserBlock::image(source.clone()),
+        }));
+        Inbound::new(call_id.clone(), blocks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(content: ToolResultContent) -> BackgroundToolResult {
+        BackgroundToolResult::new(
+            RunId::new(),
+            StepId::new(),
+            "t1",
+            "job",
+            Value::Null,
+            content,
+        )
+    }
+
+    fn texts(inbound: &Inbound) -> Vec<&str> {
+        inbound
+            .blocks
+            .iter()
+            .map(|block| match block {
+                UserBlock::Text { text, .. } => text.as_str(),
+                other => panic!("unexpected block {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn to_inbound_names_the_call_and_how_it_ended() {
+        let done = result(ToolResultContent::text("done")).to_inbound();
+        assert_eq!(done.id, "t1");
+        assert_eq!(
+            texts(&done),
+            ["Result of background tool call `job` (call id t1):", "done"]
+        );
+
+        let failed = result(ToolResultContent::error("boom")).to_inbound();
+        assert_eq!(
+            texts(&failed),
+            ["Background tool call `job` (call id t1) failed:", "boom"]
+        );
+
+        let mut cancelled = result(ToolResultContent::error("stopped"));
+        cancelled.cancelled = true;
+        assert_eq!(
+            texts(&cancelled.to_inbound()),
+            [
+                "Background tool call `job` (call id t1) was cancelled:",
+                "stopped"
+            ]
+        );
     }
 }

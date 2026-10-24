@@ -11,8 +11,8 @@ use ailoop_core::{
     CancellationToken, ChatMiddleware, ChatRequest, CompletionModel, ContinueDecision, Drained,
     FinishReason, HookAction, Inbound, Message, Resume, ResumeDecision, RunConfig, RunControl,
     RunErrorInfo, RunFinishedInfo, RunId, RunStartInfo, StepId, StepInfo, StreamChunk,
-    SuspendedCall, Suspension, ToolCallInfo, ToolDecision, ToolProgress, ToolResultBlock,
-    ToolResultContent, TurnEndInfo, Usage, UserBlock,
+    SuspendedCall, Suspension, ToolCallInfo, ToolDecision, ToolProgress, ToolResultContent,
+    TurnEndInfo, Usage, UserBlock,
 };
 use ailoop_history::{CompactionError, CompactionStats, History};
 use ailoop_tools::{
@@ -1970,7 +1970,7 @@ impl BackgroundTask {
         let mut result =
             BackgroundToolResult::new(run_id, step_id, call_id, name, self.args, content);
         result.cancelled = cancelled;
-        let message = background_message(&result);
+        let message = result.to_inbound();
         if let Some(result) =
             self.control
                 .offer_background_result(self.background_run, message, result)
@@ -1986,32 +1986,6 @@ fn cancelled_in_background() -> ToolResultContent {
     ToolResultContent::error(
         "Background tool call cancelled by the caller; it may have partly completed",
     )
-}
-
-/// The message that delivers a background result to its run: a line
-/// naming the call, then the result's blocks. Its id is the call id.
-fn background_message(result: &BackgroundToolResult) -> Inbound {
-    let BackgroundToolResult {
-        call_id,
-        name,
-        content,
-        cancelled,
-        ..
-    } = result;
-    let header = if *cancelled {
-        format!("Background tool call `{name}` (call id {call_id}) was cancelled:")
-    } else if content.is_error {
-        format!("Background tool call `{name}` (call id {call_id}) failed:")
-    } else {
-        format!("Result of background tool call `{name}` (call id {call_id}):")
-    };
-    let mut blocks = vec![UserBlock::text(header)];
-    blocks.extend(content.blocks.iter().filter_map(|block| match block {
-        ToolResultBlock::Text { text } => Some(UserBlock::text(text.clone())),
-        ToolResultBlock::Image { source } => Some(UserBlock::image(source.clone())),
-        _ => None,
-    }));
-    Inbound::new(call_id.clone(), blocks)
 }
 
 /// How many progress updates a run buffers before dropping new ones.
