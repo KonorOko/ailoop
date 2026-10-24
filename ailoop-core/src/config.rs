@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::background::BackgroundConfig;
 use crate::control::RunControl;
 use crate::ids::RunId;
 use crate::message::SystemPrompt;
@@ -96,6 +97,11 @@ pub struct RunConfig {
     /// run. `None` (the default) leaves the run as it would be without
     /// one.
     pub control: Option<RunControl>,
+    /// How the run handles calls moved to the background with
+    /// [`RunControl::background_tool`]: the provisional result a moved
+    /// call gets and the callback its real result goes to. Only
+    /// matters with a [`Self::control`].
+    pub background: BackgroundConfig,
     /// How many tool calls of one step may run at the same time. Only
     /// calls whose tool reports `concurrency_safe` run together: a run
     /// of consecutive such calls forms a batch, and any other call runs
@@ -137,6 +143,7 @@ impl Default for RunConfig {
             timeout: None,
             cancellation: None,
             control: None,
+            background: BackgroundConfig::default(),
             tool_concurrency: 1,
             resume: None,
             resumed_from: None,
@@ -156,6 +163,7 @@ impl std::fmt::Debug for RunConfig {
             .field("timeout", &self.timeout)
             .field("cancellation", &self.cancellation)
             .field("control", &self.control)
+            .field("background", &self.background)
             .field("tool_concurrency", &self.tool_concurrency)
             .field("resume", &self.resume)
             .field("resumed_from", &self.resumed_from)

@@ -42,6 +42,8 @@ pub struct McpTool {
     /// `tools/call`.
     pub(crate) name_at_server: String,
     pub(crate) definition: ToolDefinition,
+    /// Set per connection with `McpConnectionBuilder::backgroundable`.
+    pub(crate) backgroundable: bool,
 }
 
 #[async_trait::async_trait]
@@ -52,6 +54,10 @@ impl ToolDyn for McpTool {
 
     fn tool_definition(&self) -> ToolDefinition {
         self.definition.clone()
+    }
+
+    fn backgroundable(&self) -> bool {
+        self.backgroundable
     }
 
     async fn call(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolResultContent {
@@ -224,6 +230,7 @@ mod tests {
             name_for_engine: "mcp__test__work".into(),
             name_at_server: "work".into(),
             definition: ToolDefinition::new("mcp__test__work", "", serde_json::json!({}), vec![]),
+            backgroundable: false,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);

@@ -290,6 +290,14 @@ pub trait ChatMiddleware: Send + Sync {
     /// (PII scrubbing, truncation-with-marker) run as a phase ahead of
     /// observers. The mutated `result` is what the model sees on the
     /// next turn and what the engine emits in `StreamChunk::ToolResult`.
+    ///
+    /// For a call moved to the background
+    /// (`RunControl::background_tool`) it runs twice: once on the
+    /// provisional result, like `on_after_tool_call`, and once more, from
+    /// the call's own task, on the real result before it is delivered.
+    /// That second time may come after the run has finished
+    /// (`on_run_finished` already called), so a transform that keeps
+    /// per-run state must cope with a call it no longer tracks.
     async fn on_after_tool_call_mut(
         &self,
         call: &ToolCallInfo,

@@ -180,6 +180,36 @@ impl ChatMiddleware for TracingMiddleware {
                     "inbound messages delivered",
                 );
             }
+            StreamChunk::ToolBackgrounded {
+                run_id,
+                step_id,
+                call_id,
+                ..
+            } => {
+                tracing::info!(
+                    target: "ailoop.tool",
+                    run_id = %run_id,
+                    step_id = %step_id,
+                    call_id = %call_id,
+                    "tool call moved to the background",
+                );
+            }
+            StreamChunk::BackgroundToolFinished {
+                run_id,
+                step_id,
+                call_id,
+                content,
+                ..
+            } => {
+                tracing::info!(
+                    target: "ailoop.tool",
+                    run_id = %run_id,
+                    step_id = %step_id,
+                    call_id = %call_id,
+                    is_error = content.is_error,
+                    "background tool call result delivered",
+                );
+            }
             StreamChunk::StepFinished {
                 run_id,
                 step_id,

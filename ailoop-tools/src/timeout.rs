@@ -60,6 +60,12 @@ impl<T: ToolDyn> ToolDyn for TimeoutTool<T> {
         self.inner.concurrency_safe()
     }
 
+    /// Forwarded: a moved call still stops at `timeout`, counted from
+    /// when it started.
+    fn backgroundable(&self) -> bool {
+        self.inner.backgroundable()
+    }
+
     async fn call(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolResultContent {
         match tokio::time::timeout(self.timeout, self.inner.call(args, ctx)).await {
             Ok(content) => content,
@@ -94,6 +100,9 @@ mod tests {
             )
         }
         fn concurrency_safe(&self) -> bool {
+            true
+        }
+        fn backgroundable(&self) -> bool {
             true
         }
         async fn call(&self, _: serde_json::Value, _: &ToolContext) -> ToolResultContent {
@@ -141,6 +150,15 @@ mod tests {
         assert!(safe.concurrency_safe());
         let unsafe_tool = TimeoutTool::new(SlowTool, Duration::from_millis(10));
         assert!(!unsafe_tool.concurrency_safe());
+    }
+
+    /// The wrapper keeps the inner tool's opt-in to being moved to the
+    /// background, so wrapping it does not make its calls stick to the
+    /// run.
+    #[test]
+    fn delegates_backgroundable() {
+        assert!(TimeoutTool::new(InstantTool, Duration::from_millis(10)).backgroundable());
+        assert!(!TimeoutTool::new(SlowTool, Duration::from_millis(10)).backgroundable());
     }
 
     /// A call that resolves inside the budget passes through untouched.

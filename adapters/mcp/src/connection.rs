@@ -20,6 +20,7 @@ pub struct McpConnection {
     server_label: String,
     inner: Arc<RunningService<RoleClient, ProgressRouter>>,
     progress: ProgressRouter,
+    backgroundable: bool,
 }
 
 impl McpConnection {
@@ -34,6 +35,7 @@ impl McpConnection {
             command: None,
             args: Vec::new(),
             envs: Vec::new(),
+            backgroundable: false,
         }
     }
 
@@ -67,6 +69,10 @@ impl McpConnection {
     /// Every tool is tagged with `[Network, Custom("mcp")]`. Use the
     /// `Custom("mcp")` tag with `approval_for_tags` if you want
     /// to gate every MCP call through a single approval callback.
+    ///
+    /// Every tool reports
+    /// [`ToolDyn::backgroundable`](ailoop_tools::ToolDyn::backgroundable)
+    /// as set with [`McpConnectionBuilder::backgroundable`].
     pub async fn list_tools(&self) -> Result<Vec<Arc<dyn ToolDyn>>, McpError> {
         let tools = self
             .inner
@@ -93,6 +99,7 @@ impl McpConnection {
                     name_for_engine,
                     name_at_server,
                     definition,
+                    backgroundable: self.backgroundable,
                 }) as Arc<dyn ToolDyn>
             })
             .collect();
@@ -101,14 +108,16 @@ impl McpConnection {
     }
 }
 
-/// Fluent builder for [`McpConnection`]. Spawn-time configuration only —
-/// every option here goes into the [`tokio::process::Command`] that
-/// launches the MCP server.
+/// Fluent builder for [`McpConnection`]. Most options go into the
+/// [`tokio::process::Command`] that launches the MCP server;
+/// [`Self::backgroundable`] applies to the tools the connection
+/// discovers.
 pub struct McpConnectionBuilder {
     server_label: String,
     command: Option<String>,
     args: Vec<String>,
     envs: Vec<(String, String)>,
+    backgroundable: bool,
 }
 
 impl McpConnectionBuilder {
@@ -133,6 +142,18 @@ impl McpConnectionBuilder {
     /// environment. Calls accumulate.
     pub fn env(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
         self.envs.push((key.into(), val.into()));
+        self
+    }
+
+    /// Whether calls to this server's tools may be moved to the
+    /// background (`RunControl::background_tool`); see
+    /// [`ToolDyn::backgroundable`](ailoop_tools::ToolDyn::backgroundable).
+    /// Applies to every tool [`McpConnection::list_tools`] returns.
+    /// Defaults to `false`: turn it on only for a server whose calls
+    /// can finish on their own after the run moves on (MCP has no
+    /// per-tool hint for this).
+    pub fn backgroundable(mut self, backgroundable: bool) -> Self {
+        self.backgroundable = backgroundable;
         self
     }
 
@@ -166,6 +187,7 @@ impl McpConnectionBuilder {
             server_label: self.server_label,
             inner: Arc::new(inner),
             progress,
+            backgroundable: self.backgroundable,
         })
     }
 }
@@ -178,6 +200,16 @@ mod tests {
     fn builder_stores_label() {
         let b = McpConnection::builder("time");
         assert_eq!(b.server_label, "time");
+    }
+
+    #[test]
+    fn builder_backgroundable_defaults_to_false() {
+        assert!(!McpConnection::builder("x").backgroundable);
+        assert!(
+            McpConnection::builder("x")
+                .backgroundable(true)
+                .backgroundable
+        );
     }
 
     #[tokio::test]

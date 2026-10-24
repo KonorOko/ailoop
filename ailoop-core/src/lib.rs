@@ -33,6 +33,7 @@
 
 #![deny(missing_docs)]
 
+mod background;
 mod config;
 mod control;
 mod ids;
@@ -48,8 +49,9 @@ pub mod testing;
 mod tokenizer;
 mod traits;
 
+pub use background::{BackgroundConfig, BackgroundToolResult};
 pub use config::{DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_TOKENS, RunConfig};
-pub use control::{Inbound, RunControl};
+pub use control::{BackgroundEnd, Drained, Inbound, RunControl};
 pub use ids::{RunId, StepId};
 pub use message::{
     AssistantBlock, CacheControl, Message, Source, SystemBlock, SystemPrompt, ToolResultBlock,

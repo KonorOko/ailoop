@@ -54,3 +54,17 @@ fn derive_sets_concurrency_safe_only_when_asked() {
         [ToolTag::ReadOnly]
     ));
 }
+
+#[ailoop_tool(description = "render an image", backgroundable)]
+async fn render(prompt: String) -> String {
+    prompt
+}
+
+#[test]
+fn derive_sets_backgroundable_only_when_asked() {
+    use ailoop::ToolDyn;
+    assert!(Render.backgroundable());
+    const { assert!(<Render as Tool>::BACKGROUNDABLE) };
+    assert!(!ReadFile.backgroundable());
+    assert!(!Render.concurrency_safe());
+}
