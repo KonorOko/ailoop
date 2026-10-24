@@ -10,8 +10,8 @@ use std::time::Duration;
 use ailoop::{
     AbortReason, BackgroundConfig, BackgroundToolResult, CallState, CancellationToken,
     ChatMiddleware, Conversation, FinishReason, Inbound, Message, RunConfig, RunControl,
-    RunOptions, Sanitize, StreamChunk, ToolCallInfo, ToolDecision, ToolDefinition, ToolProgress,
-    ToolResultBlock, ToolResultContent, Usage, UserBlock, advanced::run_chat,
+    RunOptions, Sanitize, StreamChunk, TimeoutTool, ToolCallInfo, ToolDecision, ToolDefinition,
+    ToolProgress, ToolResultBlock, ToolResultContent, Usage, UserBlock, advanced::run_chat,
 };
 use ailoop_core::testing::ScriptedModel;
 use ailoop_tools::{ToolContext, ToolDyn, ToolRegistry};
@@ -1217,4 +1217,128 @@ async fn conversation_takes_the_background_config_from_run_options() {
     let result = results.recv().await.unwrap();
     assert_eq!(result.content.as_text(), Some("job done"));
     assert!(!result.delivered);
+}
+
+/// Reports usage when it starts and again when it ends, `secs` later.
+struct Spender {
+    secs: u64,
+    started: Notify,
+}
+
+#[async_trait::async_trait]
+impl ToolDyn for Spender {
+    fn name(&self) -> &str {
+        "spend"
+    }
+    fn tool_definition(&self) -> ToolDefinition {
+        ToolDefinition::new("spend", "test spender", json!({"type": "object"}), vec![])
+    }
+    fn backgroundable(&self) -> bool {
+        true
+    }
+    async fn call(&self, _: Value, ctx: &ToolContext) -> ToolResultContent {
+        ctx.report_usage(Usage::new(10, 1));
+        self.started.notify_one();
+        tokio::time::sleep(Duration::from_secs(self.secs)).await;
+        ctx.report_usage(Usage::new(100, 10));
+        ToolResultContent::text("spent")
+    }
+}
+
+/// A moved call's usage counts towards its run while the run lasts:
+/// what it reports after the run finished is not in the run's usage.
+#[tokio::test(start_paused = true)]
+async fn moved_call_usage_counts_until_the_run_finishes() {
+    for (secs, expected) in [(2, Usage::new(110, 11)), (30, Usage::new(10, 1))] {
+        let control = RunControl::new();
+        let spender = Arc::new(Spender {
+            secs,
+            started: Notify::new(),
+        });
+        let mut wait = Job::new("wait", 10);
+        wait.background = false;
+        let mut registry = tools([Arc::new(wait)]);
+        registry.register(spender.clone()).unwrap();
+        let model = ScriptedModel::new([
+            tool_calls_turn(&[("t1", "spend")]),
+            tool_calls_turn(&[("t2", "wait")]),
+            text_turn("done"),
+        ]);
+        let (background, mut results) = callback();
+        let mover = {
+            let (control, spender) = (control.clone(), spender.clone());
+            tokio::spawn(async move {
+                spender.started.notified().await;
+                assert!(control.background_tool("t1"));
+            })
+        };
+        let chunks = collect(&model, &registry, config(&control, background)).await;
+        mover.await.unwrap();
+        let usage = match chunks.last() {
+            Some(StreamChunk::RunFinished { usage, .. }) => *usage,
+            other => panic!("expected RunFinished, got {other:?}"),
+        };
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens),
+            (expected.input_tokens, expected.output_tokens),
+            "tool running {secs} s"
+        );
+        assert_eq!(
+            results.recv().await.unwrap().content.as_text(),
+            Some("spent")
+        );
+    }
+}
+
+/// Shares a [`Job`] with the test while another wrapper owns the tool.
+struct Shared(Arc<Job>);
+
+#[async_trait::async_trait]
+impl ToolDyn for Shared {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn tool_definition(&self) -> ToolDefinition {
+        self.0.tool_definition()
+    }
+    fn backgroundable(&self) -> bool {
+        self.0.backgroundable()
+    }
+    async fn call(&self, args: Value, ctx: &ToolContext) -> ToolResultContent {
+        self.0.call(args, ctx).await
+    }
+}
+
+/// A `TimeoutTool` can be moved, and its timeout still stops the call
+/// once it is in the background.
+#[tokio::test(start_paused = true)]
+async fn timeout_still_applies_to_a_moved_call() {
+    let control = RunControl::new();
+    let job = Arc::new(Job::new("job", 60));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(TimeoutTool::new(
+            Shared(job.clone()),
+            Duration::from_secs(5),
+        )))
+        .unwrap();
+    let model = ScriptedModel::new([tool_calls_turn(&[("t1", "job")]), text_turn("ok")]);
+    let (background, mut results) = callback();
+    let mover = move_when_started(&control, &job, "t1", Duration::ZERO);
+    let start = Instant::now();
+    let chunks = collect(&model, &registry, config(&control, background)).await;
+    mover.await.unwrap();
+    assert_eq!(
+        result_of(&chunks, "t1").as_text(),
+        Some(notice("t1").as_str())
+    );
+
+    let result = results.recv().await.unwrap();
+    assert_eq!(Instant::now() - start, Duration::from_secs(5));
+    assert!(result.content.is_error && !result.cancelled && !result.delivered);
+    assert_eq!(
+        result.content.as_text(),
+        Some("Tool 'job' timed out after 5s")
+    );
+    assert!(!job.finished());
 }
