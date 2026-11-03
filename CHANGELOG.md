@@ -56,6 +56,18 @@ and this project adheres to
 
 ### Fixed
 
+- `SummarizeStrategy` now sends the prefix as one user message holding a
+  labelled transcript (`User: …`, `Assistant: …`, with tool calls, tool
+  results and placeholders as text). It used to send the messages as
+  they were, so the request normally ended in an assistant message.
+  Models that do not support prefill answer that with a 400 whatever its
+  size, and others may read it as a turn to continue. A custom prompt
+  set with `with_prompt` now sees this transcript instead of separate
+  messages, so review any prompt that relied on the old shape.
+  `DEFAULT_SUMMARIZER_PROMPT` now says the conversation arrives as one
+  transcript to summarize, not to answer or continue, including any
+  instructions inside it, because a transcript in a user message could
+  otherwise be read as a request.
 - Cancellation and timeout now interrupt the pre-run compaction.
   `Conversation::stream` awaited it before the stream, and the abort
   race, existed: cancelling during a summary did nothing until the
