@@ -19,6 +19,25 @@ and this project adheres to
   source)` build the error for third-party strategies. The model's
   original error is now readable through `std::error::Error::source()`
   and `downcast_ref`.
+- `SummarizeStrategy` now summarizes a prefix larger than the model
+  accepts instead of failing the compaction, so recovering from a context
+  overflow no longer fails for the reason it runs. The real limit is only
+  known to the provider, so the strategy reacts to its rejection: a
+  prefix that fits still takes one request; on an overflow, from opening
+  the stream or mid-stream, it summarizes the older part and carries that
+  summary forward with the rest. It cuts between whole messages,
+  avoiding a cut between a tool call and its result when it can. Only a
+  message rejected on its own is trimmed, by successive halving, and
+  marked as truncated, in the copy sent to the summarizer and never in
+  the history. A summary that does not fit next to the following
+  message is set aside, and the final summary joins it with the later
+  ones. Any other error propagates unchanged.
+- `SummarizeStrategy::with_max_requests(n)` caps the requests of one
+  compaction, rejected ones included. The default is 16, `1` keeps the
+  previous behaviour, and `0` is treated as `1`. Past the cap, the result
+  is `SummarizationFailed` with `context_overflow: true` and the last
+  provider error as `source`, and the summaries from that call are
+  discarded.
 
 ### Changed (BREAKING)
 
@@ -56,6 +75,18 @@ and this project adheres to
 
 ### Fixed
 
+- `SummarizeStrategy` now sends the prefix as one user message holding a
+  labelled transcript (`User: …`, `Assistant: …`, with tool calls, tool
+  results and placeholders as text). It used to send the messages as
+  they were, so the request normally ended in an assistant message.
+  Models that do not support prefill answer that with a 400 whatever its
+  size, and others may read it as a turn to continue. A custom prompt
+  set with `with_prompt` now sees this transcript instead of separate
+  messages, so review any prompt that relied on the old shape.
+  `DEFAULT_SUMMARIZER_PROMPT` now says the conversation arrives as one
+  transcript to summarize, not to answer or continue, including any
+  instructions inside it, because a transcript in a user message could
+  otherwise be read as a request.
 - Cancellation and timeout now interrupt the pre-run compaction.
   `Conversation::stream` awaited it before the stream, and the abort
   race, existed: cancelling during a summary did nothing until the

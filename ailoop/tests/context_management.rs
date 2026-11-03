@@ -328,7 +328,8 @@ async fn overflow_compacts_and_retries_once() {
 /// model scripted to play `summarizer`, and returns the run's error.
 async fn failed_summary(summarizer: ScriptedTurn) -> RunError<ScriptedError> {
     let (model, _) = RecordingModel::new(vec![overflow_turn(), text_turn("unused")]);
-    let strategy = SummarizeStrategy::new(Arc::new(ScriptedModel::with_turns([summarizer])));
+    let strategy = SummarizeStrategy::new(Arc::new(ScriptedModel::with_turns([summarizer])))
+        .with_max_requests(1);
     let mut chat = Conversation::builder(model)
         .history(
             History::builder(100_000)
@@ -339,6 +340,78 @@ async fn failed_summary(summarizer: ScriptedTurn) -> RunError<ScriptedError> {
         .unwrap();
     seed_prior_turns(&mut chat);
     chat.run("go").await.expect_err("summary fails")
+}
+
+/// A summarizer that, like the main model, rejects what does not fit:
+/// any request longer than `limit` characters gets an overflow error.
+struct LimitedSummarizer {
+    limit: usize,
+    requests: AtomicUsize,
+}
+
+#[async_trait]
+impl CompletionModel for LimitedSummarizer {
+    type Error = ScriptedError;
+
+    fn name(&self) -> &str {
+        "limited"
+    }
+
+    fn model(&self) -> &str {
+        "limited"
+    }
+
+    async fn chat_stream(
+        &self,
+        req: ChatRequest,
+    ) -> Result<BoxStream<'static, Result<StreamChunk, Self::Error>>, Self::Error> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        let size = serde_json::to_string(&req.messages).unwrap().len();
+        if size > self.limit {
+            return Err(ScriptedError("context_overflow: prompt is too long".into()));
+        }
+        ScriptedModel::with_turns([text_turn("compact summary")])
+            .chat_stream(req)
+            .await
+    }
+}
+
+/// The main model overflows and so does the summarizer's first request.
+/// The strategy splits the prefix, so the recovery still succeeds.
+#[tokio::test]
+async fn overflow_recovery_survives_a_summarizer_overflow() {
+    let (model, sizes) = RecordingModel::new(vec![overflow_turn(), text_turn("fits now")]);
+    let summarizer = Arc::new(LimitedSummarizer {
+        limit: 1_000,
+        requests: AtomicUsize::new(0),
+    });
+    let mut chat = Conversation::builder(model)
+        .history(
+            History::builder(100_000)
+                .preserve_n_last(1)
+                .strategy(Box::new(SummarizeStrategy::new(summarizer.clone()))),
+        )
+        .build()
+        .unwrap();
+    seed_prior_turns(&mut chat);
+
+    let chunks = collect(&mut chat, "go").await;
+
+    assert!(matches!(
+        chunks.last(),
+        Some(Ok(StreamChunk::RunFinished {
+            reason: FinishReason::EndTurn,
+            ..
+        }))
+    ));
+    assert_eq!(compacted_counts(&chunks), vec![(5, 2)]);
+    assert!(summarizer.requests.load(Ordering::SeqCst) > 1);
+    assert_eq!(*sizes.lock().unwrap(), vec![5, 2]);
+
+    let history = chat.messages();
+    assert_eq!(history.len(), 3, "summary + kickoff + reply");
+    assert!(matches!(&history[0], Message::User { blocks }
+        if matches!(&blocks[0], UserBlock::Text { text, .. } if text.contains("compact summary"))));
 }
 
 /// The summarizer failing when the stream opens, or after some text.
