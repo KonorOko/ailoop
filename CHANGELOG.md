@@ -19,6 +19,25 @@ and this project adheres to
   source)` build the error for third-party strategies. The model's
   original error is now readable through `std::error::Error::source()`
   and `downcast_ref`.
+- `SummarizeStrategy` now summarizes a prefix larger than the model
+  accepts instead of failing the compaction, so recovering from a context
+  overflow no longer fails for the reason it runs. The real limit is only
+  known to the provider, so the strategy reacts to its rejection: a
+  prefix that fits still takes one request; on an overflow, from opening
+  the stream or mid-stream, it summarizes the older part and carries that
+  summary forward with the rest. It cuts between whole messages,
+  avoiding a cut between a tool call and its result when it can. Only a
+  message rejected on its own is trimmed, by successive halving, and
+  marked as truncated, in the copy sent to the summarizer and never in
+  the history. A summary that does not fit next to the following
+  message is set aside, and the final summary joins it with the later
+  ones. Any other error propagates unchanged.
+- `SummarizeStrategy::with_max_requests(n)` caps the requests of one
+  compaction, rejected ones included. The default is 16, `1` keeps the
+  previous behaviour, and `0` is treated as `1`. Past the cap, the result
+  is `SummarizationFailed` with `context_overflow: true` and the last
+  provider error as `source`, and the summaries from that call are
+  discarded.
 
 ### Changed (BREAKING)
 
