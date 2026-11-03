@@ -182,10 +182,10 @@ async fn failing_first_turn_has_zero_usage() {
     }
 }
 
-/// Compaction before the run starts fails before any hook fires: the
-/// error has zero usage and `on_run_error` is not called.
+/// The pre-run compaction runs inside the run, before the first turn:
+/// its failure has zero usage and `on_run_error` sees it.
 #[tokio::test]
-async fn pre_run_compaction_error_has_zero_usage_and_no_hook() {
+async fn pre_run_compaction_error_has_zero_usage_and_fires_hook() {
     let spy = Arc::new(Spy::default());
     let mut chat = Conversation::builder(ScriptedModel::with_turns([text_turn(
         "never",
@@ -203,5 +203,5 @@ async fn pre_run_compaction_error_has_zero_usage_and_no_hook() {
 
     assert!(matches!(err.kind(), EngineError::Context(_)), "{err:?}");
     assert_eq!(err.usage(), Usage::default());
-    assert!(spy.run_errors.lock().unwrap().is_empty());
+    spy.assert_saw(&err);
 }

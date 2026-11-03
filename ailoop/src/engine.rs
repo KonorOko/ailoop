@@ -606,10 +606,12 @@ pub(crate) struct ContextOptions {
 /// A [`History`] the engine appends to in place for the duration of a
 /// run, with rollback: unless the run handed its `RunFinished` over to
 /// the consumer, dropping this value restores the messages and pin
-/// mask captured at construction. That keeps the contract that a run
+/// mask of the baseline: the history with the kickoff added, moved
+/// forward by a successful pre-run compaction
+/// ([`Self::advance_rollback`]). That keeps the contract that a run
 /// ending in `Err` (or a stream dropped mid-run, closing hooks
-/// included) leaves the history exactly as it was when the run
-/// started, even when the run compacted it along the way. The steps
+/// included) leaves the history as it was when its first step was about
+/// to start, even when the run compacted it along the way. The steps
 /// completed before an `Err` travel in [`RunError`] instead.
 struct ManagedHistory<'a> {
     history: &'a mut History,
@@ -617,6 +619,18 @@ struct ManagedHistory<'a> {
     options: ContextOptions,
     /// The run's [`RunGuard::handed_over`], set by [`run_engine`].
     handed_over: Arc<AtomicBool>,
+}
+
+impl ManagedHistory<'_> {
+    /// Makes the current history the state a rollback restores. Called
+    /// after the pre-run compaction, so an `Err` later in the run does
+    /// not throw away a summary already paid for.
+    fn advance_rollback(&mut self) {
+        self.rollback = Some((
+            self.history.messages().to_vec(),
+            self.history.pinned().to_vec(),
+        ));
+    }
 }
 
 impl Drop for ManagedHistory<'_> {
@@ -799,8 +813,11 @@ pub async fn run_chat<'a, M: CompletionModel>(
 /// [`History`]-backed engine entry used by `Conversation`. The run
 /// appends to `history` in place and commits on `RunFinished`; on `Err`
 /// or when the stream is dropped mid-run, `history` is rolled back to
-/// its state at the call. `is_overflow` classifies model setup errors
-/// for [`ContextOptions::recover_from_overflow`]. `usage_parent`, when
+/// its state at the call, or right after the pre-run compaction if that
+/// succeeded. A run without `config.resume` starts with that compaction,
+/// so `history` must already hold its kickoff. `is_overflow` classifies
+/// model setup errors for [`ContextOptions::recover_from_overflow`].
+/// `usage_parent`, when
 /// set, receives every token this run spends (own turns and tool
 /// reports) as it happens; `SubAgentTool` passes its own
 /// `ToolContext::usage_sink` here. `ledger`, for a resumed run, records
@@ -964,6 +981,33 @@ fn run_engine<'a, M: CompletionModel>(
             .managed()
             .is_some_and(|m| m.options.compact_between_iterations);
 
+        // The pre-run compaction, whatever `compact_between_iterations`
+        // says. A resumed run skips it: its history ends on the suspended
+        // step's tool calls. Unlike the best-effort compaction below, a
+        // failure here ends the run, `NotEnoughHistory` included, and a
+        // success is kept even if the run later fails.
+        if resuming.is_none() && let Some(managed) = run_msgs.managed() {
+            let outcome = match race_abort(compact(managed.history, false), &mut abort_fut).await {
+                Ok(outcome) => outcome,
+                Err(reason) => {
+                    let new_messages = run_msgs.finish();
+                    let chunk = fire_abort_hooks(
+                        &guard, reason, usage_run + delegated.total(), new_messages,
+                    ).await;
+                    yield chunk;
+                    return;
+                }
+            };
+            match outcome {
+                Ok(None) => {}
+                Ok(Some((report, _))) => {
+                    managed.advance_rollback();
+                    yield history_compacted_chunk(&config.middlewares, &run_id, report).await;
+                }
+                Err(e) => bail_with_hooks!(Err::<(), _>(EngineError::Context(e)), &guard, usage_run + delegated.total(), run_msgs)?,
+            }
+        }
+
         loop {
             if iteration >= config.max_iterations {
                 // Every previous iteration pushed its tool results before
@@ -978,8 +1022,7 @@ fn run_engine<'a, M: CompletionModel>(
                 return;
             }
 
-            // Iteration 0 is covered by the compaction `Conversation`
-            // runs before the engine starts.
+            // Iteration 0 is covered by the pre-run compaction above.
             if iteration > 0 && proactive_compaction {
                 let managed = run_msgs.managed().expect("proactive compaction implies a managed history");
                 let outcome = match race_abort(compact(managed.history, false), &mut abort_fut).await {

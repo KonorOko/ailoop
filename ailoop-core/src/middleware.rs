@@ -225,9 +225,9 @@ pub trait ChatMiddleware: Send + Sync {
     /// `partial_messages` does not: one is what was spent, the other
     /// what is safe to keep.
     ///
-    /// Only fired for runs that started. An error raised before the
-    /// run starts, such as `Conversation` compacting the history before
-    /// the first step, reaches the caller without any hook.
+    /// A failed pre-run compaction also fires it, with zero usage and
+    /// no `partial_messages`: `Conversation` compacts the history inside
+    /// the run, after `RunStarted` and before the first step.
     async fn on_run_error(&self, run: &RunErrorInfo<'_>) {}
     /// Fired when the caller drops a run's stream before the run
     /// closed: a `select!` that picks another branch, an outer timeout,
@@ -320,8 +320,10 @@ pub trait ChatMiddleware: Send + Sync {
 pub struct RunStartInfo<'a> {
     /// Id of the run that is starting.
     pub run_id: &'a RunId,
-    /// Messages the first request is built from: the conversation
-    /// history, ending with the kickoff message.
+    /// The conversation history, ending with the kickoff message (on a
+    /// resumed run, with the suspended step's tool calls). `Conversation`
+    /// runs the pre-run compaction after this hook, so the first request
+    /// may carry fewer messages than these.
     pub messages: &'a [Message],
     /// The run's configuration, including
     /// [`RunConfig::max_iterations`].
