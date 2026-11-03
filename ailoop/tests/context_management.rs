@@ -13,11 +13,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ailoop::{
-    AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompletionModel,
-    Conversation, EngineError, FinishReason, History, HookAction, Message, ResumeDecision,
-    RunError, RunErrorInfo, RunFinishedInfo, RunId, RunOptions, RunStartInfo, StepInfo,
-    StreamChunk, SummarizeStrategy, ToolCallInfo, ToolDecision, ToolDefinition, ToolResultContent,
-    Usage, UserBlock,
+    AbortReason, AssistantBlock, CancellationToken, ChatMiddleware, ChatRequest, CompactionError,
+    CompletionModel, Conversation, EngineError, FinishReason, History, HookAction, Message,
+    ResumeDecision, RunError, RunErrorInfo, RunFinishedInfo, RunId, RunOptions, RunStartInfo,
+    StepInfo, StreamChunk, SummarizeStrategy, ToolCallInfo, ToolDecision, ToolDefinition,
+    ToolResultContent, Usage, UserBlock,
 };
 use ailoop_core::testing::{ScriptedError, ScriptedModel, ScriptedTurn};
 use ailoop_tools::{ToolContext, ToolDyn};
@@ -322,6 +322,93 @@ async fn overflow_compacts_and_retries_once() {
     let history = chat.messages();
     assert_eq!(history.len(), 2, "kickoff + reply");
     assert!(matches!(&history[1], Message::Assistant { .. }));
+}
+
+/// Runs into an overflow whose forced compaction calls a summarizer
+/// model scripted to play `summarizer`, and returns the run's error.
+async fn failed_summary(summarizer: ScriptedTurn) -> RunError<ScriptedError> {
+    let (model, _) = RecordingModel::new(vec![overflow_turn(), text_turn("unused")]);
+    let strategy = SummarizeStrategy::new(Arc::new(ScriptedModel::with_turns([summarizer])));
+    let mut chat = Conversation::builder(model)
+        .history(
+            History::builder(100_000)
+                .preserve_n_last(1)
+                .strategy(Box::new(strategy)),
+        )
+        .build()
+        .unwrap();
+    seed_prior_turns(&mut chat);
+    chat.run("go").await.expect_err("summary fails")
+}
+
+/// The summarizer failing when the stream opens, or after some text.
+fn failing_summaries(error: &str) -> [ScriptedTurn; 2] {
+    [
+        Err(ScriptedError(error.into())),
+        Ok(vec![
+            Ok(StreamChunk::TextDelta {
+                delta: "partial".into(),
+            }),
+            Err(ScriptedError(error.into())),
+        ]),
+    ]
+}
+
+/// A summary too large for the model is told apart through
+/// `EngineError::Context`, without comparing text, and the provider's
+/// error can be read back from the source chain.
+#[tokio::test]
+async fn summarizer_overflow_is_typed_through_the_engine_error() {
+    for summarizer in failing_summaries("context_overflow: summary too long") {
+        let err = failed_summary(summarizer).await;
+        let EngineError::Context(compaction) = err.kind() else {
+            panic!("expected EngineError::Context, got {err:?}");
+        };
+        assert!(compaction.is_context_overflow(), "{compaction:?}");
+
+        let CompactionError::SummarizationFailed {
+            context_overflow, ..
+        } = compaction
+        else {
+            panic!("expected SummarizationFailed, got {compaction:?}");
+        };
+        assert!(*context_overflow);
+
+        let source = std::error::Error::source(compaction).expect("source");
+        assert_eq!(
+            source.downcast_ref::<ScriptedError>(),
+            Some(&ScriptedError("context_overflow: summary too long".into())),
+        );
+    }
+}
+
+/// Any other summarizer failure is not reported as an overflow.
+#[tokio::test]
+async fn summarizer_outage_is_not_an_overflow_through_the_engine_error() {
+    for summarizer in failing_summaries("network outage") {
+        let err = failed_summary(summarizer).await;
+        let EngineError::Context(compaction) = err.kind() else {
+            panic!("expected EngineError::Context, got {err:?}");
+        };
+        assert!(!compaction.is_context_overflow(), "{compaction:?}");
+        assert!(
+            std::error::Error::source(compaction)
+                .and_then(|source| source.downcast_ref::<ScriptedError>())
+                .is_some(),
+            "{compaction:?}"
+        );
+    }
+}
+
+/// A third-party strategy builds the error from the facade alone.
+#[test]
+fn compaction_error_is_constructible_from_the_facade() {
+    let err = CompactionError::summarization_failed("too big", true, None);
+    assert!(err.is_context_overflow());
+    assert_eq!(err.to_string(), "Summarization failed: too big");
+
+    let err = CompactionError::summarization_failed_from(ScriptedError("outage".into()));
+    assert!(!err.is_context_overflow());
 }
 
 /// Overflow on the second model call, after a tool ran: the forced
