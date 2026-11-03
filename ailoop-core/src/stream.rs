@@ -221,8 +221,12 @@ pub enum StreamChunk {
         /// Everything the run spent: the sum of its own turns plus
         /// the usage tools reported through
         /// `ToolContext::report_usage` (a `SubAgentTool`'s child run,
-        /// recursively). On aborts, what was spent up to the cutoff.
-        /// See [`Usage`] for how to split own vs. delegated spend.
+        /// recursively) and the history compactions it completed
+        /// (`usage` on [`Self::HistoryCompacted`]). On aborts, what was
+        /// spent up to the cutoff. A compaction cut short by an abort
+        /// or a dropped stream is not counted, nor are its finished
+        /// requests, because its running total is dropped with it. See
+        /// [`Usage`] for how to split own vs. delegated spend.
         usage: Usage,
         /// All messages this run added to history. Every `tool_use` in
         /// it has its `tool_result`, aborts included: calls that
@@ -231,8 +235,9 @@ pub enum StreamChunk {
         new_messages: Vec<Message>,
     },
     /// History compaction ran on behalf of this run. Carries message
-    /// counts from before/after compaction and the strategy's name so
-    /// observability middlewares can report what was dropped.
+    /// counts from before/after compaction, the strategy's name and
+    /// what it cost, so observability middlewares can report what was
+    /// dropped.
     ///
     /// Emitted by the history-backed `Conversation` path (never by
     /// bare `run_chat`) at three points: right after `RunStarted` when
@@ -255,6 +260,13 @@ pub enum StreamChunk {
         /// (`CompactionStrategy::name()`), e.g. `"truncate"` or
         /// `"summarize"`.
         strategy: &'static str,
+        /// What this compaction spent: every request of a summarizing
+        /// strategy, zero for one that calls no model. It is already in
+        /// the run's total (`usage` on [`Self::RunFinished`]). The chunk
+        /// carries it separately because the summarizer can be a
+        /// different model from the run's, so that total can mix
+        /// prices: compute cost per model from this value.
+        usage: Usage,
     },
     /// The run is suspending on deferred tool calls
     /// ([`crate::ToolDecision::Defer`]). Emitted once, right before the
@@ -455,18 +467,38 @@ impl StreamChunk {
         }
     }
 
-    /// Build a [`StreamChunk::HistoryCompacted`].
+    /// Build a [`StreamChunk::HistoryCompacted`] with zero usage, for a
+    /// compaction that called no model.
     pub fn history_compacted(
         run_id: RunId,
         before_count: usize,
         after_count: usize,
         strategy: &'static str,
     ) -> Self {
+        Self::history_compacted_with_usage(
+            run_id,
+            before_count,
+            after_count,
+            strategy,
+            Usage::default(),
+        )
+    }
+
+    /// Build a [`StreamChunk::HistoryCompacted`] for a compaction that
+    /// spent `usage`.
+    pub fn history_compacted_with_usage(
+        run_id: RunId,
+        before_count: usize,
+        after_count: usize,
+        strategy: &'static str,
+        usage: Usage,
+    ) -> Self {
         Self::HistoryCompacted {
             run_id,
             before_count,
             after_count,
             strategy,
+            usage,
         }
     }
 
@@ -684,13 +716,15 @@ impl fmt::Display for AbortReason {
 /// [`StreamChunk::RunFinished::usage`] is **everything the run spent**:
 /// the sum of its own turns plus the usage tools reported through
 /// `ToolContext::report_usage` — which `SubAgentTool` does for its
-/// child run, recursively. Aborted runs report what was spent up to
-/// the cutoff, including tokens a tool reported before it was dropped.
+/// child run, recursively — plus the compactions it completed. Aborted
+/// runs report what was spent up to the cutoff, including tokens a tool
+/// reported before it was dropped.
 ///
 /// To split own vs. delegated spend, sum the per-turn values from
 /// [`StreamChunk::TurnFinished::usage`] in a middleware: that is the
-/// run's own model; the difference to `RunFinished.usage` is what
-/// tools reported. A stream consumer
+/// run's own model. [`StreamChunk::HistoryCompacted::usage`] is what
+/// each compaction spent, possibly on another model. What remains of
+/// `RunFinished.usage` is what tools reported. A stream consumer
 /// iterating `Conversation::stream_with_options` only sees the run
 /// total on [`StreamChunk::RunFinished::usage`]; per-turn `Usage`
 /// rides on [`StreamChunk::TurnFinished::usage`], which is exposed to
@@ -702,7 +736,8 @@ impl fmt::Display for AbortReason {
 /// failure travels in `RunError::usage` and in the `usage` argument of
 /// [`crate::ChatMiddleware::on_run_error`], counted the same way. The
 /// turn that failed is not in it: a response cut off by an error never
-/// reports its usage.
+/// reports its usage. A compaction that failed counts what its earlier
+/// requests reported.
 ///
 /// Use [`StreamChunk::RunFinished::usage`] for end-of-run totals;
 /// reach for the middleware path when per-turn metrics matter — a

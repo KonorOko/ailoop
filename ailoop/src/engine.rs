@@ -715,18 +715,33 @@ impl<'a> RunMessages<'a> {
 /// Runs the history's compaction strategy (forced, or only when over
 /// budget) and reports whether it made progress, i.e. whether
 /// [`History::estimated_tokens`] went down.
+///
+/// Whatever the strategy reports spending, success or failure, goes to
+/// `usage_run` and to `usage_parent`, like the spend of a turn. A call
+/// dropped by an abort reports nothing: the strategy's running total
+/// goes with it.
 async fn compact(
     history: &mut History,
     force: bool,
+    usage_run: &mut Usage,
+    usage_parent: Option<&UsageSink>,
 ) -> Result<Option<(CompactionStats, bool)>, CompactionError> {
     let before = history.estimated_tokens();
-    let report = if force {
-        history.force_compact().await?
+    let result = if force {
+        history.force_compact().await.map(Some)
     } else {
-        match history.compact_if_needed().await? {
-            Some(report) => report,
-            None => return Ok(None),
-        }
+        history.compact_if_needed().await
+    };
+    let spent = match &result {
+        Ok(report) => report.as_ref().map(|r| r.usage).unwrap_or_default(),
+        Err(error) => error.usage(),
+    };
+    *usage_run += spent;
+    if let Some(parent) = usage_parent {
+        parent.report(spent);
+    }
+    let Some(report) = result? else {
+        return Ok(None);
     };
     let progressed = history.estimated_tokens() < before;
     Ok(Some((report, progressed)))
@@ -739,11 +754,12 @@ async fn history_compacted_chunk(
     run_id: &RunId,
     report: CompactionStats,
 ) -> StreamChunk {
-    let mut chunk = StreamChunk::history_compacted(
+    let mut chunk = StreamChunk::history_compacted_with_usage(
         run_id.clone(),
         report.before,
         report.after,
         report.strategy,
+        report.usage,
     );
     for mw in middlewares {
         mw.on_chunk_mut(&mut chunk).await;
@@ -818,8 +834,8 @@ pub async fn run_chat<'a, M: CompletionModel>(
 /// so `history` must already hold its kickoff. `is_overflow` classifies
 /// model setup errors for [`ContextOptions::recover_from_overflow`].
 /// `usage_parent`, when
-/// set, receives every token this run spends (own turns and tool
-/// reports) as it happens; `SubAgentTool` passes its own
+/// set, receives every token this run spends (own turns, compactions
+/// and tool reports) as it happens; `SubAgentTool` passes its own
 /// `ToolContext::usage_sink` here. `ledger`, for a resumed run, records
 /// what becomes of each call of the resumed step.
 #[allow(clippy::too_many_arguments)]
@@ -969,7 +985,7 @@ fn run_engine<'a, M: CompletionModel>(
 
         let mut iteration = 0;
         let mut finish_reason = FinishReason::EndTurn;
-        // Spend of this run's own provider turns. The run total adds
+        // Spend of this run's own turns and compactions. The run total adds
         // `delegated` (tool reports) wherever `RunFinished` is built.
         let mut usage_run = Usage::default();
         // Cleared for the rest of the run once a proactive compaction
@@ -987,7 +1003,7 @@ fn run_engine<'a, M: CompletionModel>(
         // failure here ends the run, `NotEnoughHistory` included, and a
         // success is kept even if the run later fails.
         if resuming.is_none() && let Some(managed) = run_msgs.managed() {
-            let outcome = match race_abort(compact(managed.history, false), &mut abort_fut).await {
+            let outcome = match race_abort(compact(managed.history, false, &mut usage_run, usage_parent.as_ref()), &mut abort_fut).await {
                 Ok(outcome) => outcome,
                 Err(reason) => {
                     let new_messages = run_msgs.finish();
@@ -1025,7 +1041,7 @@ fn run_engine<'a, M: CompletionModel>(
             // Iteration 0 is covered by the pre-run compaction above.
             if iteration > 0 && proactive_compaction {
                 let managed = run_msgs.managed().expect("proactive compaction implies a managed history");
-                let outcome = match race_abort(compact(managed.history, false), &mut abort_fut).await {
+                let outcome = match race_abort(compact(managed.history, false, &mut usage_run, usage_parent.as_ref()), &mut abort_fut).await {
                     Ok(outcome) => outcome,
                     Err(reason) => {
                         let new_messages = run_msgs.finish();
@@ -1166,7 +1182,7 @@ fn run_engine<'a, M: CompletionModel>(
                 overflow_recovered = true;
 
                 let managed = run_msgs.managed().expect("recoverable implies a managed history");
-                let outcome = match race_abort(compact(managed.history, true), &mut abort_fut).await {
+                let outcome = match race_abort(compact(managed.history, true, &mut usage_run, usage_parent.as_ref()), &mut abort_fut).await {
                     Ok(outcome) => outcome,
                     Err(reason) => {
                         let new_messages = run_msgs.finish();

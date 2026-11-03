@@ -353,6 +353,7 @@ impl ChatMiddleware for JsonTracer {
                 before_count,
                 after_count,
                 strategy,
+                usage,
                 ..
             } => {
                 let mut p = serde_json::Map::new();
@@ -360,6 +361,7 @@ impl ChatMiddleware for JsonTracer {
                 p.insert("before".into(), json!(*before_count));
                 p.insert("after".into(), json!(*after_count));
                 p.insert("strategy".into(), json!(*strategy));
+                p.insert("usage".into(), usage_payload(usage));
                 self.emit("history_compacted", p).await;
             }
             StreamChunk::RunSuspended {
@@ -555,12 +557,15 @@ mod tests {
                 &ToolResultContent::text("ok"),
             )
             .await;
+        let mut compaction_usage = Usage::default();
+        compaction_usage.input_tokens = 321;
         tracer
-            .on_chunk(&StreamChunk::history_compacted(
+            .on_chunk(&StreamChunk::history_compacted_with_usage(
                 run_id.clone(),
                 12,
                 4,
-                "truncate",
+                "summarize",
+                compaction_usage,
             ))
             .await;
         tracer
@@ -574,6 +579,7 @@ mod tests {
 
         let lines = close_and_read(tracer, path);
         assert_eq!(lines.len(), 5);
+        assert_eq!(lines[3]["usage"], usage_payload(&compaction_usage));
         for line in &lines {
             let obj = line.as_object().expect("line must be an object");
             assert_eq!(obj.get("schema"), Some(&json!(SCHEMA_VERSION)));

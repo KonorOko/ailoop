@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use ailoop_core::{
     AssistantBlock, ChatRequest, CompletionModel, Message, ProviderError, StreamChunk,
-    SystemPrompt, UserBlock,
+    SystemPrompt, Usage, UserBlock,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -31,16 +31,31 @@ pub struct CompactionOutput {
     /// pinned input message must remain `true` here; new entries
     /// (e.g. summary placeholders) are typically `false`.
     pub pinned: Vec<bool>,
+    /// What producing this output cost: the sum of every model request
+    /// the strategy made. Zero for a strategy that calls no model. Set
+    /// it with [`Self::with_usage`].
+    pub usage: Usage,
 }
 
 impl CompactionOutput {
-    /// Bundle a freshly compacted history with its parallel pin mask.
-    /// `messages.len()` and `pinned.len()` must match — the
-    /// [`History`] asserts this in debug builds.
+    /// Bundle a freshly compacted history with its parallel pin mask,
+    /// reporting zero usage. `messages.len()` and `pinned.len()` must
+    /// match — the [`History`] asserts this in debug builds.
     ///
     /// [`History`]: crate::History
     pub fn new(messages: Vec<Message>, pinned: Vec<bool>) -> Self {
-        Self { messages, pinned }
+        Self {
+            messages,
+            pinned,
+            usage: Usage::default(),
+        }
+    }
+
+    /// Set [`Self::usage`]. A strategy that calls a model reports here
+    /// what its requests spent, so the run that compacted counts it.
+    pub fn with_usage(mut self, usage: Usage) -> Self {
+        self.usage = usage;
+        self
     }
 }
 
@@ -77,6 +92,10 @@ pub trait CompactionStrategy: Send + Sync {
     /// `preserve_n_last` is a hint: at minimum the last N messages
     /// (after walking back to a safe boundary that doesn't strand a
     /// `ToolResult` from its `ToolCall`) should be kept verbatim.
+    ///
+    /// A strategy that calls a model reports what it spent through
+    /// [`CompactionOutput::with_usage`], or through
+    /// [`CompactionError::with_usage`] when it fails after spending.
     async fn compact(
         &self,
         messages: &[Message],
@@ -138,10 +157,7 @@ impl CompactionStrategy for TruncateStrategy {
             out_pinned.push(pinned[i]);
         }
 
-        Ok(CompactionOutput {
-            messages: out_messages,
-            pinned: out_pinned,
-        })
+        Ok(CompactionOutput::new(out_messages, out_pinned))
     }
 }
 
@@ -229,6 +245,12 @@ const TRUNCATION_MARK: &str = "\n[truncated]";
 /// [`CompactionError::is_context_overflow`] reports its
 /// [`ProviderError::is_context_overflow`]. That is why the strategy
 /// needs `M::Error: ProviderError`.
+///
+/// The output's [`usage`](CompactionOutput::usage) sums every request
+/// of the call. A failed compaction carries what its requests spent in
+/// [`CompactionError::usage`]; a caller that falls back to another
+/// strategy should keep that amount. A request rejected or cut off
+/// before the provider reported its usage counts as nothing.
 pub struct SummarizeStrategy<M> {
     model: Arc<M>,
     summarizer_prompt: String,
@@ -289,6 +311,7 @@ where
     async fn summarize_pending(
         &self,
         mut pending: Vec<PendingMessage>,
+        usage: &mut Usage,
     ) -> Result<String, CompactionError>
     where
         M::Error: ProviderError,
@@ -312,7 +335,7 @@ where
             let transcript = render_transcript(&pending[..take], carried.as_deref());
             let size = transcript.len();
 
-            match self.summarize(transcript).await {
+            match self.summarize(transcript, usage).await {
                 Ok(summary) => {
                     pending.drain(..take);
                     if pending.is_empty() {
@@ -344,7 +367,12 @@ where
         Err(last_overflow)
     }
 
-    async fn summarize(&self, transcript: String) -> Result<String, CompactionError>
+    /// Adds what the request reports to `usage`, also when it then fails.
+    async fn summarize(
+        &self,
+        transcript: String,
+        usage: &mut Usage,
+    ) -> Result<String, CompactionError>
     where
         M::Error: ProviderError,
     {
@@ -363,8 +391,12 @@ where
         let mut buf = String::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(CompactionError::summarization_failed_from)?;
-            if let StreamChunk::TextDelta { delta } = chunk {
-                buf.push_str(&delta);
+            match chunk {
+                StreamChunk::TextDelta { delta } => buf.push_str(&delta),
+                StreamChunk::TurnFinished {
+                    usage: turn_usage, ..
+                } => *usage += turn_usage,
+                _ => {}
             }
         }
 
@@ -419,6 +451,7 @@ where
 
         let mut out_messages = Vec::with_capacity(messages.len());
         let mut out_pinned = Vec::with_capacity(messages.len());
+        let mut usage = Usage::default();
 
         for (i, msg) in messages.iter().enumerate().take(start) {
             if pinned[i] {
@@ -428,7 +461,10 @@ where
         }
 
         if !to_summarize.is_empty() {
-            let summary = self.summarize_pending(to_summarize).await?;
+            let summary = self
+                .summarize_pending(to_summarize, &mut usage)
+                .await
+                .map_err(|err| err.with_usage(usage))?;
             out_messages.push(Message::user(format!(
                 "[Summary of prior conversation]\n{summary}"
             )));
@@ -440,10 +476,7 @@ where
             out_pinned.push(pinned[i]);
         }
 
-        Ok(CompactionOutput {
-            messages: out_messages,
-            pinned: out_pinned,
-        })
+        Ok(CompactionOutput::new(out_messages, out_pinned).with_usage(usage))
     }
 }
 
@@ -1014,6 +1047,7 @@ mod tests {
     /// is longer than `limit` characters gets an overflow error.
     struct RecordingSummarizer {
         limit: usize,
+        turn_usage: Usage,
         overflow_mid_stream: bool,
         outage_on_request: Option<usize>,
         requests: Mutex<Vec<ChatRequest>>,
@@ -1023,6 +1057,7 @@ mod tests {
         fn with_limit(limit: usize) -> Self {
             Self {
                 limit,
+                turn_usage: Usage::default(),
                 overflow_mid_stream: false,
                 outage_on_request: None,
                 requests: Mutex::new(Vec::new()),
@@ -1095,11 +1130,14 @@ mod tests {
                     Err(error),
                 ])));
             }
-            Ok(Box::pin(stream::iter(
-                summary_turn(&format!("summary {index}"))
-                    .into_iter()
-                    .map(Ok),
-            )))
+            let mut turn = summary_turn(&format!("summary {index}"));
+            turn.pop();
+            turn.push(StreamChunk::TurnFinished {
+                reason: FinishReason::EndTurn,
+                usage: self.turn_usage,
+                service_tier: None,
+            });
+            Ok(Box::pin(stream::iter(turn.into_iter().map(Ok))))
         }
     }
 
@@ -1498,6 +1536,138 @@ mod tests {
                 .downcast_ref::<ScriptedError>(),
             Some(&ScriptedError("network outage".into())),
         );
+    }
+
+    fn tokens(input: u64, output: u64) -> Usage {
+        let mut usage = Usage::default();
+        usage.input_tokens = input;
+        usage.output_tokens = output;
+        usage
+    }
+
+    /// A summarizer accepting up to `limit` characters, each accepted
+    /// request reporting 100 input and 10 output tokens.
+    fn billed_summarizer(limit: usize) -> RecordingSummarizer {
+        let mut model = RecordingSummarizer::with_limit(limit);
+        model.turn_usage = tokens(100, 10);
+        model
+    }
+
+    #[tokio::test]
+    async fn one_request_reports_its_usage() {
+        let strategy = SummarizeStrategy::new(Arc::new(billed_summarizer(1_000)));
+
+        let out = compact_prefix(&strategy, vec![sized_user('a', 100)])
+            .await
+            .unwrap();
+
+        assert_eq!(out.usage, tokens(100, 10));
+    }
+
+    /// Three requests: the rejected one reports nothing, the two others
+    /// add up.
+    #[tokio::test]
+    async fn split_compaction_sums_every_request() {
+        let model = Arc::new(billed_summarizer(120));
+        let strategy = SummarizeStrategy::new(model.clone());
+
+        let out = compact_prefix(&strategy, vec![sized_user('a', 80), sized_user('b', 80)])
+            .await
+            .unwrap();
+
+        assert_eq!(model.transcripts().len(), 3);
+        assert_eq!(out.usage, tokens(200, 20));
+    }
+
+    /// An overflow mid-stream arrives before the turn reports its usage.
+    #[tokio::test]
+    async fn request_cut_off_mid_stream_counts_as_nothing() {
+        let mut model = billed_summarizer(120);
+        model.overflow_mid_stream = true;
+        let strategy = SummarizeStrategy::new(Arc::new(model));
+
+        let out = compact_prefix(&strategy, vec![sized_user('a', 80), sized_user('b', 80)])
+            .await
+            .unwrap();
+
+        assert_eq!(out.usage, tokens(200, 20));
+    }
+
+    #[tokio::test]
+    async fn failure_keeps_what_earlier_requests_spent() {
+        let mut model = billed_summarizer(120);
+        model.outage_on_request = Some(2);
+        let strategy = SummarizeStrategy::new(Arc::new(model));
+
+        let err = compact_prefix(&strategy, vec![sized_user('a', 80), sized_user('b', 80)])
+            .await
+            .expect_err("outage");
+
+        assert_eq!(err.usage(), tokens(100, 10));
+    }
+
+    #[tokio::test]
+    async fn request_limit_error_keeps_what_accepted_requests_spent() {
+        let model = Arc::new(billed_summarizer(120));
+        let strategy = SummarizeStrategy::new(model.clone());
+
+        let prefix = (0..30).map(|_| sized_user('a', 80)).collect();
+        let err = compact_prefix(&strategy, prefix)
+            .await
+            .expect_err("needs more than the default requests");
+
+        let accepted = model.accepted().len() as u64;
+        assert!(accepted > 0);
+        assert_eq!(err.usage(), tokens(100 * accepted, 10 * accepted));
+    }
+
+    /// The request finished and reported its usage, it just has no text.
+    #[tokio::test]
+    async fn summary_with_no_text_still_counts_its_request() {
+        let model = ScriptedModel::new([vec![StreamChunk::TurnFinished {
+            reason: FinishReason::EndTurn,
+            usage: tokens(100, 0),
+            service_tier: None,
+        }]]);
+        let strategy = SummarizeStrategy::new(Arc::new(model));
+
+        let err = compact_prefix(&strategy, vec![sized_user('a', 80)])
+            .await
+            .expect_err("no text");
+
+        assert_eq!(err.usage(), tokens(100, 0));
+    }
+
+    #[tokio::test]
+    async fn fully_pinned_prefix_spends_nothing() {
+        let strategy = SummarizeStrategy::new(Arc::new(billed_summarizer(1_000)));
+        let messages = vec![sized_user('a', 80), Message::user("tail")];
+
+        let out = strategy
+            .compact(&messages, &[true, false], 1)
+            .await
+            .unwrap();
+
+        assert_eq!(out.usage, Usage::default());
+    }
+
+    #[tokio::test]
+    async fn truncate_reports_zero_usage() {
+        let messages = vec![sized_user('a', 80), Message::user("tail")];
+
+        let out = TruncateStrategy
+            .compact(&messages, &unpinned(2), 1)
+            .await
+            .unwrap();
+
+        assert_eq!(out.usage, Usage::default());
+    }
+
+    #[test]
+    fn output_new_has_zero_usage_until_set() {
+        let out = CompactionOutput::new(Vec::new(), Vec::new());
+        assert_eq!(out.usage, Usage::default());
+        assert_eq!(out.with_usage(tokens(1, 2)).usage, tokens(1, 2));
     }
 
     #[tokio::test]

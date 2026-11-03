@@ -207,12 +207,13 @@ pub trait ChatMiddleware: Send + Sync {
     /// caller gets from `RunError::usage`: every provider turn that
     /// finished (each one a [`StreamChunk::TurnFinished`]) plus the
     /// usage tools reported through `ToolContext::report_usage`,
-    /// sub-agents included. It follows the rules of
+    /// sub-agents included, plus what history compactions spent. It
+    /// follows the rules of
     /// [`StreamChunk::RunFinished::usage`] with one gap: a turn that
     /// fails mid-stream never reports its usage, so its tokens are not
     /// counted even though the provider may bill them. Summing
     /// `TurnFinished` in [`Self::on_chunk`] only recovers the run's own
-    /// turns; this value also has the delegated spend.
+    /// turns; this value also has the delegated and compaction spend.
     ///
     /// `run.partial_messages` holds the messages of the steps the run
     /// completed before failing, the same list the caller receives in
@@ -225,9 +226,10 @@ pub trait ChatMiddleware: Send + Sync {
     /// `partial_messages` does not: one is what was spent, the other
     /// what is safe to keep.
     ///
-    /// A failed pre-run compaction also fires it, with zero usage and
-    /// no `partial_messages`: `Conversation` compacts the history inside
-    /// the run, after `RunStarted` and before the first step.
+    /// A failed pre-run compaction also fires it, with no
+    /// `partial_messages` and, as usage, what that compaction's earlier
+    /// requests spent: `Conversation` compacts the history inside the
+    /// run, after `RunStarted` and before the first step.
     async fn on_run_error(&self, run: &RunErrorInfo<'_>) {}
     /// Fired when the caller drops a run's stream before the run
     /// closed: a `select!` that picks another branch, an outer timeout,
@@ -396,7 +398,8 @@ pub struct RunFinishedInfo<'a> {
     pub run_id: &'a RunId,
     /// Why the run ended; aborts arrive as [`FinishReason::Aborted`].
     pub reason: &'a FinishReason,
-    /// Total usage of the run, sub-agents included.
+    /// Total usage of the run, sub-agents and history compactions
+    /// included.
     pub usage: &'a Usage,
     /// Everything the run added to history.
     pub new_messages: &'a [Message],

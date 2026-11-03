@@ -1,7 +1,8 @@
 //! A run that ends in `Err` still reports what it spent:
 //! `RunError::usage` and the `usage` passed to `on_run_error` hold the
 //! run's finished turns plus the usage tools reported (sub-agents
-//! included). The turn that failed is not counted.
+//! included) and what compactions spent. The turn that failed is not
+//! counted.
 
 use std::sync::{Arc, Mutex};
 
@@ -183,9 +184,10 @@ async fn failing_first_turn_has_zero_usage() {
 }
 
 /// The pre-run compaction runs inside the run, before the first turn:
-/// its failure has zero usage and `on_run_error` sees it.
+/// a failure that spent nothing has zero usage and `on_run_error` sees
+/// it. `compaction_usage.rs` covers one that spent tokens first.
 #[tokio::test]
-async fn pre_run_compaction_error_has_zero_usage_and_fires_hook() {
+async fn pre_run_compaction_error_without_spend_has_zero_usage_and_fires_hook() {
     let spy = Arc::new(Spy::default());
     let mut chat = Conversation::builder(ScriptedModel::with_turns([text_turn(
         "never",

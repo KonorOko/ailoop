@@ -9,7 +9,8 @@ Provides:
   used by compaction strategies.
 - `Compactor` strategies — drop / summarize old turns while
   preserving tool-call / tool-result pairing. Emits
-  `StreamChunk::HistoryCompacted` with strategy name and counts.
+  `StreamChunk::HistoryCompacted` with strategy name, counts and
+  usage.
 - `HistoryStore` — async trait for persisting and restoring
   conversation state. Ships with `InMemoryHistoryStore` and
   `JsonFileHistoryStore`.

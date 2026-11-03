@@ -113,7 +113,8 @@ pub struct RunOutcome {
     /// tools reported through
     /// [`ToolContext::report_usage`](crate::ToolContext::report_usage)
     /// (a [`SubAgentTool`](crate::SubAgentTool)'s child run,
-    /// recursively). Same value as `RunFinished.usage`.
+    /// recursively) and what history compactions spent. Same value as
+    /// `RunFinished.usage`.
     pub usage: Usage,
     /// Every [`Message`] the run added to history (assistant turns,
     /// `User { ToolResult }` user-role turns synthesised from tool

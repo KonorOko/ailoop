@@ -396,9 +396,10 @@ fn budget_label(reason: &AbortReason) -> &'static str {
 ///
 /// # Usage
 ///
-/// Every token the child spends — its own provider turns and those of
-/// any sub-agent it calls in turn — is reported to the parent through
-/// [`ToolContext::report_usage`] as it is spent, so the parent's
+/// Every token the child spends — its own provider turns, its history
+/// compactions and those of any sub-agent it calls in turn — is
+/// reported to the parent through [`ToolContext::report_usage`] as it
+/// is spent, so the parent's
 /// [`RunFinished::usage`] / [`RunOutcome::usage`](crate::RunOutcome::usage)
 /// include it. That holds when the child aborts (its own `timeout`,
 /// `max_iterations`, or a wrap-up) and when the parent aborts while
