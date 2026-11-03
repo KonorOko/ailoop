@@ -126,6 +126,7 @@ impl ChatMiddleware for TracingMiddleware {
                 before_count,
                 after_count,
                 strategy,
+                usage,
                 ..
             } => {
                 tracing::info!(
@@ -134,6 +135,12 @@ impl ChatMiddleware for TracingMiddleware {
                     before = *before_count,
                     after = *after_count,
                     strategy = *strategy,
+                    input_tokens = usage.input_tokens,
+                    output_tokens = usage.output_tokens,
+                    cached_input_tokens = usage.cached_input_tokens,
+                    cache_creation_input_tokens = usage.cache_creation_input_tokens,
+                    cache_creation_5m_tokens = usage.cache_creation_5m_tokens,
+                    cache_creation_1h_tokens = usage.cache_creation_1h_tokens,
                     "history compacted",
                 );
             }
@@ -356,11 +363,14 @@ mod tests {
                     &[],
                 ))
                 .await;
-                mw.on_chunk(&StreamChunk::history_compacted(
+                let mut compaction_usage = Usage::default();
+                compaction_usage.input_tokens = 321;
+                mw.on_chunk(&StreamChunk::history_compacted_with_usage(
                     run_id.clone(),
                     12,
                     4,
                     "truncate",
+                    compaction_usage,
                 ))
                 .await;
             });
@@ -389,6 +399,7 @@ mod tests {
             log.contains("strategy=\"truncate\""),
             "missing strategy field"
         );
+        assert!(log.contains("input_tokens=321"), "missing compaction usage");
     }
 
     /// Drives a real `run_chat` with `TracingMiddleware` registered and a

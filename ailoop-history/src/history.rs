@@ -1,7 +1,7 @@
 //! [`History`] + [`HistoryBuilder`] + the report type
 //! [`compact_if_needed`](History::compact_if_needed) returns.
 
-use ailoop_core::{AssistantBlock, CharTokenizer, Message, Tokenizer, UserBlock};
+use ailoop_core::{AssistantBlock, CharTokenizer, Message, Tokenizer, Usage, UserBlock};
 
 use crate::{
     compaction::{CompactionStrategy, TruncateStrategy},
@@ -28,6 +28,12 @@ pub struct CompactionStats {
     /// [`CompactionStrategy::name`]: crate::CompactionStrategy::name
     /// [`StreamChunk::HistoryCompacted`]: ailoop_core::StreamChunk::HistoryCompacted
     pub strategy: &'static str,
+    /// What the strategy's model requests cost
+    /// ([`CompactionOutput::usage`]). Zero for a strategy that calls no
+    /// model, such as [`TruncateStrategy`].
+    ///
+    /// [`CompactionOutput::usage`]: crate::CompactionOutput::usage
+    pub usage: Usage,
 }
 
 /// Owns the message vector backing a single conversation, plus the
@@ -326,12 +332,14 @@ impl History {
         );
         let after = output.messages.len();
         let strategy = self.strategy.name();
+        let usage = output.usage;
         self.messages = output.messages;
         self.pinned = output.pinned;
         Ok(CompactionStats {
             before,
             after,
             strategy,
+            usage,
         })
     }
 
@@ -731,6 +739,48 @@ mod tests {
                 Err(CompactionError::NotEnoughHistory)
             ));
         }
+    }
+
+    /// Keeps everything and reports a fixed spend.
+    struct BilledStrategy(Usage);
+
+    #[async_trait::async_trait]
+    impl CompactionStrategy for BilledStrategy {
+        fn name(&self) -> &'static str {
+            "billed"
+        }
+
+        async fn compact(
+            &self,
+            messages: &[Message],
+            pinned: &[bool],
+            _preserve_n_last: usize,
+        ) -> Result<crate::CompactionOutput, CompactionError> {
+            Ok(crate::CompactionOutput::new(messages.to_vec(), pinned.to_vec()).with_usage(self.0))
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_stats_carry_the_strategy_usage() {
+        let mut spent = Usage::default();
+        spent.input_tokens = 7;
+        let mut mgr = History::builder(1)
+            .strategy(Box::new(BilledStrategy(spent)))
+            .build();
+        mgr.add_message(Message::user("long enough to go over budget"));
+
+        assert_eq!(mgr.force_compact().await.unwrap().usage, spent);
+        let report = mgr.compact_if_needed().await.unwrap().expect("over budget");
+        assert_eq!(report.usage, spent);
+    }
+
+    #[tokio::test]
+    async fn truncate_stats_report_zero_usage() {
+        let mut mgr = History::builder(1).preserve_n_last(1).build();
+        mgr.add_message(Message::user("first"));
+        mgr.add_message(Message::user("second"));
+
+        assert_eq!(mgr.force_compact().await.unwrap().usage, Usage::default());
     }
 
     #[tokio::test]

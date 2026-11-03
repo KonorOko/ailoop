@@ -2,7 +2,7 @@
 
 use std::error::Error as StdError;
 
-use ailoop_core::ProviderError;
+use ailoop_core::{ProviderError, Usage};
 use thiserror::Error;
 
 /// Failure surface of [`CompactionStrategy::compact`] (and therefore of
@@ -52,6 +52,11 @@ pub enum CompactionError {
         /// The original error, when there is one. `None` for a failure
         /// that no error caused, such as a summary with no text.
         source: Option<Box<dyn StdError + Send + Sync>>,
+        /// What the strategy's model requests spent before the failure.
+        /// Zero when none reported usage. Read it with
+        /// [`CompactionError::usage`] and set it with
+        /// [`CompactionError::with_usage`].
+        usage: Usage,
     },
 }
 
@@ -59,7 +64,8 @@ impl CompactionError {
     /// Build a [`CompactionError::SummarizationFailed`] from each of
     /// its parts. For a strategy whose failure is not a model error, or
     /// whose error does not implement [`ProviderError`]; otherwise
-    /// prefer [`CompactionError::summarization_failed_from`].
+    /// prefer [`CompactionError::summarization_failed_from`]. Its usage
+    /// is zero until [`CompactionError::with_usage`] sets it.
     pub fn summarization_failed(
         message: impl Into<String>,
         context_overflow: bool,
@@ -69,13 +75,15 @@ impl CompactionError {
             message: message.into(),
             context_overflow,
             source,
+            usage: Usage::default(),
         }
     }
 
     /// Build a [`CompactionError::SummarizationFailed`] from a model
     /// error: its `Display` text becomes the message, its
     /// [`ProviderError::is_context_overflow`] the overflow flag, and
-    /// the error itself the source.
+    /// the error itself the source. Its usage is zero until
+    /// [`CompactionError::with_usage`] sets it.
     pub fn summarization_failed_from<E>(error: E) -> Self
     where
         E: StdError + ProviderError + Send + Sync + 'static,
@@ -84,6 +92,27 @@ impl CompactionError {
             message: error.to_string(),
             context_overflow: error.is_context_overflow(),
             source: Some(Box::new(error)),
+            usage: Usage::default(),
+        }
+    }
+
+    /// Set what a [`CompactionError::SummarizationFailed`] spent before
+    /// failing, replacing any earlier value. Other variants spend
+    /// nothing and are returned unchanged.
+    pub fn with_usage(mut self, spent: Usage) -> Self {
+        if let Self::SummarizationFailed { usage, .. } = &mut self {
+            *usage = spent;
+        }
+        self
+    }
+
+    /// What the compaction spent before failing, which the provider may
+    /// bill even though no summary came out. Zero for every variant
+    /// other than [`CompactionError::SummarizationFailed`].
+    pub fn usage(&self) -> Usage {
+        match self {
+            Self::SummarizationFailed { usage, .. } => *usage,
+            _ => Usage::default(),
         }
     }
 
@@ -188,5 +217,28 @@ mod tests {
     #[test]
     fn not_enough_history_is_not_an_overflow() {
         assert!(!CompactionError::NotEnoughHistory.is_context_overflow());
+    }
+
+    fn spent() -> Usage {
+        let mut usage = Usage::default();
+        usage.input_tokens = 7;
+        usage
+    }
+
+    #[test]
+    fn summarization_failed_constructors_start_at_zero_usage() {
+        for err in [
+            CompactionError::summarization_failed("no budget", false, None),
+            CompactionError::summarization_failed_from(RejectedError { overflow: false }),
+        ] {
+            assert_eq!(err.usage(), Usage::default());
+            assert_eq!(err.with_usage(spent()).usage(), spent());
+        }
+    }
+
+    #[test]
+    fn not_enough_history_never_reports_usage() {
+        let err = CompactionError::NotEnoughHistory.with_usage(spent());
+        assert_eq!(err.usage(), Usage::default());
     }
 }

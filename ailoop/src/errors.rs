@@ -144,8 +144,9 @@ pub enum EngineError<E: std::error::Error> {
 ///
 /// [`usage`](Self::usage) is what the run spent before failing,
 /// counted like [`StreamChunk::RunFinished::usage`] on a run that ends
-/// in `Ok`: every provider turn that finished plus the usage tools
-/// reported through [`ToolContext::report_usage`], sub-agents included.
+/// in `Ok`: every provider turn that finished, the usage tools
+/// reported through [`ToolContext::report_usage`], sub-agents included,
+/// and what history compactions spent.
 /// The turn that failed is not counted: a response cut off by an error
 /// never reports its usage, although the provider may still bill it.
 ///
@@ -154,13 +155,16 @@ pub enum EngineError<E: std::error::Error> {
 /// error), the turn and anything its tools reported are counted, but
 /// the step is left out of the partial messages.
 ///
-/// An error raised before the first step (the pre-run compaction in
-/// [`Conversation`]) has zero usage.
+/// A failed compaction counts what its earlier requests spent
+/// ([`CompactionError::usage`]). That is the whole usage when the
+/// pre-run compaction in [`Conversation`] fails, so it is zero if none
+/// of its requests reported any.
 ///
 /// `RunError` converts into [`EngineError`] with `?`, dropping the
 /// partial messages and the usage, so code that propagates
 /// `EngineError` keeps compiling.
 ///
+/// [`CompactionError::usage`]: ailoop_history::CompactionError::usage
 /// [`Conversation`]: crate::Conversation
 /// [`Conversation::run`]: crate::Conversation::run
 /// [`Conversation::stream`]: crate::Conversation::stream

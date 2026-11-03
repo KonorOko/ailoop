@@ -38,8 +38,38 @@ and this project adheres to
   is `SummarizationFailed` with `context_overflow: true` and the last
   provider error as `source`, and the summaries from that call are
   discarded.
+- Compacting now reports what it cost, which used to appear nowhere.
+  `StreamChunk::HistoryCompacted`, `CompactionStats` and
+  `CompactionOutput` have a `usage` field: the sum of every request of
+  that compaction. A request rejected or cut off before the provider
+  reported its usage counts as nothing, and `TruncateStrategy` reports
+  zero. `JsonTracer` and `TracingMiddleware` include it in their
+  compaction event. The chunk carries it separately because the
+  summarizer can be a different model from the run's.
+- Third-party strategies keep compiling and report zero through
+  `CompactionOutput::new`. To report a spend, use
+  `CompactionOutput::with_usage(usage)`, or
+  `CompactionError::with_usage(usage)` on a failure; both
+  `summarization_failed` constructors keep their signatures.
+  `StreamChunk::history_compacted` also keeps its signature, and
+  `StreamChunk::history_compacted_with_usage` sets the usage.
+- `CompactionError::usage()` and a `usage` field on
+  `SummarizationFailed` hold what a failed compaction spent before
+  failing. The value is zero for other variants.
 
 ### Changed (BREAKING)
+
+- `RunFinished.usage`, `RunOutcome::usage`, `RunError::usage()` and the
+  usage middlewares receive now include history compactions, at all
+  three points a run compacts (pre-run, between iterations and overflow
+  recovery), so runs that summarize report a higher value. Before, a
+  run's total left out tokens the provider billed. The total can mix
+  prices when the summarizer is another model. A sub-agent's compaction
+  reaches its parent's total the same way. A failed compaction counts
+  what its earlier requests spent, so a failed pre-run compaction no
+  longer always has zero usage. A compaction cut short by an abort or a
+  dropped stream is not counted, including its finished requests,
+  because its running total is dropped with it.
 
 - `CompactionError::SummarizationFailed(String)` is now
   `SummarizationFailed { message, context_overflow, source }`, marked
@@ -61,8 +91,9 @@ and this project adheres to
   - A failed pre-run compaction no longer fails the `.await` of
     `Conversation::stream` / `stream_with_options`. It arrives as an
     `Err` item after `RunStarted` and fires `on_run_error`, once, with
-    zero usage and no partial messages. `Conversation::run` still
-    returns `Err`, and the kickoff stays in the history, as before.
+    what that compaction spent and no partial messages.
+    `Conversation::run` still returns `Err`, and the kickoff stays in
+    the history, as before.
   - The run's `timeout` now includes the compaction, so a run that
     spends its time summarizing can abort before its first step.
   - `RunStartInfo::messages` holds the history before the compaction,
@@ -131,6 +162,7 @@ and this project adheres to
   // Before: not needed.
   // After
   impl ailoop::ProviderError for MyModelError {}
+  ```
 
 - `HistoryCompacted` position: look for it among the chunks instead of
   expecting it first.
@@ -200,6 +232,34 @@ and this project adheres to
       self.record_prompt_size(req.messages.len());
   }
 
+  ```
+
+- Compaction in `RunFinished.usage`: a caller that adds its own
+  compaction cost now counts it twice, so remove that. A caller computing
+  cost per model takes the compaction out of the total, using the chunk:
+
+  ```rust
+  // Before
+  let total = run_usage + my_summarizer_usage;
+  let cost = price(run_model, run_usage) + price(summarizer_model, my_summarizer_usage);
+
+  // After
+  let total = run_usage;
+  // Sum `usage` from each `StreamChunk::HistoryCompacted`.
+  let run_model_usage = sub_usage(run_usage, compacted_usage);
+  let cost = price(run_model, run_model_usage) + price(summarizer_model, compacted_usage);
+  ```
+
+  Tool-reported spend is now the total minus the turns minus the
+  compactions. A caller still using the old formula, the total minus the
+  turns, attributes compaction to tools:
+
+  ```rust
+  // Before
+  let tools = sub_usage(run_usage, turns_usage);
+
+  // After
+  let tools = sub_usage(sub_usage(run_usage, turns_usage), compacted_usage);
   ```
 
 ## [1.0.0-rc.6] — 2026-10-24
