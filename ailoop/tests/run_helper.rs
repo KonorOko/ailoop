@@ -209,9 +209,9 @@ async fn run_returns_ok_with_aborted_finish_reason_on_timeout() {
 /// only the `final_text = None` invariant after an abort that fires
 /// before any assistant content.
 #[tokio::test]
-async fn run_drains_history_compacted_prelude_without_clobbering_outcome() {
+async fn run_drains_pre_run_history_compacted_without_clobbering_outcome() {
     // Pre-seed enough history to overflow the default builder budget so
-    // `Conversation::stream`'s `HistoryCompacted` prelude fires; then
+    // the pre-run `HistoryCompacted` fires; then
     // run a normal turn. `Conversation::run` must consume every chunk,
     // not just the first one, and still surface the engine's
     // RunFinished as the outcome.

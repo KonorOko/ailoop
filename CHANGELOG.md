@@ -32,6 +32,46 @@ and this project adheres to
   `M::Error: ProviderError`, which it needs to classify the error. The
   bundled adapters already implement it.
 
+- The pre-run compaction now runs inside the run, in the stream's body,
+  because it could not be aborted from outside it (see Fixed). It runs
+  after `on_run_started` and `RunStarted`, before the first step, only
+  for runs with a kickoff (never on resume), whatever
+  `compact_between_iterations` says. This has four visible effects:
+  - `StreamChunk::HistoryCompacted` is no longer the first chunk of a
+    run that compacts; it comes right after `RunStarted`.
+  - A failed pre-run compaction no longer fails the `.await` of
+    `Conversation::stream` / `stream_with_options`. It arrives as an
+    `Err` item after `RunStarted` and fires `on_run_error`, once, with
+    zero usage and no partial messages. `Conversation::run` still
+    returns `Err`, and the kickoff stays in the history, as before.
+  - The run's `timeout` now includes the compaction, so a run that
+    spends its time summarizing can abort before its first step.
+  - `RunStartInfo::messages` holds the history before the compaction,
+    so the first request may carry fewer messages than
+    `on_run_started` saw.
+- A run stopped before the compaction (a middleware returning
+  `Terminate` from `on_run_started`, or an abort that fired earlier)
+  no longer compacts, and a stream that is never polled does not either.
+  The next run compacts instead.
+
+### Fixed
+
+- Cancellation and timeout now interrupt the pre-run compaction.
+  `Conversation::stream` awaited it before the stream, and the abort
+  race, existed: cancelling during a summary did nothing until the
+  summary finished, and it was paid for, although
+  `stream_with_options` promised that the race interrupts every await.
+  The run now ends promptly in `RunFinished` with
+  `FinishReason::Aborted(AbortReason::Cancelled)` or `Timeout`, and the
+  summary request is dropped. `on_run_finished` fires once. The history
+  is left as it was: the kickoff stays, as it does when a run aborts an
+  instant later or fails in its first step, and no earlier message is
+  lost, because the history only changes once the strategy returns. A
+  stream dropped during the compaction rolls back the same way and fires
+  `on_run_dropped`. A compaction that finished is kept even if the run
+  then fails or its stream is dropped, so an `Err` does not throw away a
+  summary already paid for; mid-run compactions are still rolled back.
+
 ### Migration
 
 - Matching and building `SummarizationFailed`:
@@ -60,6 +100,75 @@ and this project adheres to
   // Before: not needed.
   // After
   impl ailoop::ProviderError for MyModelError {}
+
+- `HistoryCompacted` position: look for it among the chunks instead of
+  expecting it first.
+
+  ```rust
+  // Before
+  let first = stream.next().await;
+  if let Some(Ok(StreamChunk::HistoryCompacted { after_count, .. })) = first {
+      show_compacted(after_count);
+  }
+  // After
+  while let Some(chunk) = stream.next().await {
+      if let StreamChunk::HistoryCompacted { after_count, .. } = chunk? {
+          show_compacted(after_count);
+      }
+  }
+  ```
+
+- Failed pre-run compaction: handle context errors where the stream's
+  other errors are handled. A code path that reported the `.await`
+  error by hand and also reports from `on_run_error` now sees it twice,
+  so keep one.
+
+  ```rust
+  // Before
+  let mut stream = match chat.stream(input).await {
+      Ok(stream) => stream,
+      Err(e) => return show_compaction_failed(e),
+  };
+  while let Some(chunk) = stream.next().await {
+      render(chunk?);
+  }
+  // After
+  let mut stream = chat.stream(input).await?;
+  while let Some(chunk) = stream.next().await {
+      match chunk {
+          Ok(chunk) => render(chunk),
+          Err(e) if matches!(e.kind(), EngineError::Context(_)) => {
+              return show_compaction_failed(e);
+          }
+          Err(e) => return Err(e),
+      }
+  }
+  ```
+
+- Timeout: a deadline meant only for the model and tools has to leave
+  room for a summary.
+
+  ```rust
+  // Before
+  let options = RunOptions::new().timeout(run_budget);
+  // After
+  let options = RunOptions::new().timeout(run_budget + summary_budget);
+  ```
+
+- `on_run_started`: to see what the first request carries, read it in
+  `on_chat_request`.
+
+  ```rust
+  // Before
+  async fn on_run_started(&self, run: &RunStartInfo<'_>) -> HookAction {
+      self.record_prompt_size(run.messages.len());
+      HookAction::Continue
+  }
+  // After
+  async fn on_chat_request(&self, _step: &StepInfo, req: &mut ChatRequest) {
+      self.record_prompt_size(req.messages.len());
+  }
+
   ```
 
 ## [1.0.0-rc.6] — 2026-10-24

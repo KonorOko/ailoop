@@ -154,8 +154,8 @@ pub enum EngineError<E: std::error::Error> {
 /// error), the turn and anything its tools reported are counted, but
 /// the step is left out of the partial messages.
 ///
-/// An error raised before the run starts (history compaction before the
-/// first step in [`Conversation`]) has zero usage.
+/// An error raised before the first step (the pre-run compaction in
+/// [`Conversation`]) has zero usage.
 ///
 /// `RunError` converts into [`EngineError`] with `?`, dropping the
 /// partial messages and the usage, so code that propagates
