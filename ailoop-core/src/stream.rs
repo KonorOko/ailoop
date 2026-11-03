@@ -235,8 +235,8 @@ pub enum StreamChunk {
     /// observability middlewares can report what was dropped.
     ///
     /// Emitted by the history-backed `Conversation` path (never by
-    /// bare `run_chat`) at three points: as the first chunk when the
-    /// history was compacted before the run started; between a
+    /// bare `run_chat`) at three points: right after `RunStarted` when
+    /// the pre-run compaction compacted the history; between a
     /// `StepFinished` and the next `StepStarted` when compacting
     /// between iterations is enabled; and inside a step after a
     /// context-window overflow, right before the request is retried.

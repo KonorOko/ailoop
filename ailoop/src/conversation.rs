@@ -148,8 +148,9 @@ pub struct RunOutcome {
 pub struct RunOptions {
     /// Wall-clock deadline for this run. Same semantics as
     /// [`ailoop_core::RunConfig::timeout`]: the engine checks the
-    /// deadline at every await boundary (HTTP setup, SSE chunks, tool
-    /// execution, retry backoff inside `RetryingModel`). On expiry the
+    /// deadline at every await boundary (the pre-run compaction, HTTP
+    /// setup, SSE chunks, tool execution, retry backoff inside
+    /// `RetryingModel`). On expiry the
     /// run aborts with [`ailoop_core::FinishReason::Aborted`] —
     /// **never** an `Err`.
     pub timeout: Option<Duration>,
@@ -469,7 +470,7 @@ where
             .clone()
             .ok_or(EngineError::Resume(ResumeError::NotSuspended))?;
         let resume = Resume::new(suspension, decisions).map_err(EngineError::Resume)?;
-        self.start_run(None, options, Some(resume)).await
+        Ok(self.start_run(None, options, Some(resume)))
     }
 
     /// Names of every tool currently active for this conversation.
@@ -617,19 +618,32 @@ where
     /// [`Conversation::messages`] only after the stream has
     /// fully drained.
     ///
-    /// If [`History::compact_if_needed`] fires before the
-    /// engine starts, a [`StreamChunk::HistoryCompacted`] is yielded as
-    /// the first chunk, carrying the same [`RunId`] every subsequent
-    /// engine chunk uses. Compactions during the run
+    /// The run starts when the stream is first polled: the kickoff is
+    /// already in the history, then come
+    /// [`on_run_started`](ChatMiddleware::on_run_started) and
+    /// [`StreamChunk::RunStarted`], and then, before the first step,
+    /// the pre-run compaction ([`History::compact_if_needed`]). If it
+    /// compacts, a [`StreamChunk::HistoryCompacted`] follows `RunStarted`.
+    /// Compactions during the run
     /// ([`ConversationBuilder::compact_between_iterations`],
     /// [`ConversationBuilder::recover_from_context_overflow`]) are
     /// reported the same way, in stream order.
+    ///
+    /// The pre-run compaction is part of the run: the run's `timeout`
+    /// and `cancellation` interrupt it, and the run then ends in an
+    /// aborted `RunFinished` with the kickoff still in the history and
+    /// no message lost. If it fails, the failure arrives as an `Err` in
+    /// the stream, after `RunStarted`, and fires
+    /// [`on_run_error`](ChatMiddleware::on_run_error); the kickoff stays
+    /// in the history. The future returned by this method only fails when
+    /// the conversation is suspended.
     ///
     /// The history is updated in place while the run proceeds and
     /// committed on `RunFinished`. If the run ends in `Err`, or the
     /// stream is dropped before `RunFinished`, the history is rolled
     /// back to its state right after the kickoff was added (and the
-    /// pre-run compaction, if any, ran). On `Err`, the steps the run
+    /// pre-run compaction, if any, finished: a summary already paid for
+    /// is kept). On `Err`, the steps the run
     /// completed before failing travel in
     /// [`RunError::partial_messages`]; append them with
     /// [`Self::extend_messages`] to keep them.
@@ -645,8 +659,8 @@ where
     /// override `max_iterations` / `max_tokens`, or supply a
     /// caller-minted [`RunId`]. The cancellation race lives inside the
     /// engine's `select!`, so it interrupts every await — including the
-    /// backoff sleeps inside `RetryingModel`. See [`RunOptions`] for
-    /// the per-field contract.
+    /// pre-run compaction and the backoff sleeps inside `RetryingModel`.
+    /// See [`RunOptions`] for the per-field contract.
     ///
     /// `input` accepts the same forms as [`Self::stream`] — `&str` /
     /// `String` for plain text, a [`UserBlock`](ailoop_core::UserBlock)
@@ -666,34 +680,26 @@ where
             matches!(msg, Message::User { .. }),
             "Conversation kickoff must be a Message::User; got {msg:?}"
         );
-        self.start_run(Some(msg), options, None).await
+        Ok(self.start_run(Some(msg), options, None))
     }
 
-    /// Start a run: from `kickoff` (added to the history, then the
-    /// pre-run compaction), or resuming the suspension in `resume`.
-    async fn start_run(
+    /// Start a run: from `kickoff` (added to the history here; the
+    /// engine runs the pre-run compaction), or resuming the suspension
+    /// in `resume`.
+    fn start_run(
         &mut self,
         kickoff: Option<Message>,
         options: RunOptions,
         resume: Option<Resume>,
-    ) -> Result<RunStream<'_, M>, RunError<M::Error>> {
-        let report = match kickoff {
-            Some(msg) => {
-                self.history.add_message(msg);
-                self.history
-                    .compact_if_needed()
-                    .await
-                    .map_err(EngineError::Context)?
-            }
-            None => None,
-        };
-
-        let run_id = options.run_id.unwrap_or_default();
+    ) -> RunStream<'_, M> {
+        if let Some(msg) = kickoff {
+            self.history.add_message(msg);
+        }
 
         let mut config = RunConfig::default();
         config.middlewares = self.middlewares.clone();
         config.middlewares.extend(options.extra_middlewares);
-        config.run_id = Some(run_id.clone());
+        config.run_id = Some(options.run_id.unwrap_or_default());
         config.timeout = options.timeout;
         config.cancellation = options.cancellation;
         config.control = options.control;
@@ -725,32 +731,14 @@ where
             ledger.clone(),
         );
 
-        let prelude: BoxStream<'_, Result<StreamChunk, RunError<M::Error>>> = match report {
-            Some(r) => {
-                let mut chunk =
-                    StreamChunk::history_compacted(run_id, r.before, r.after, r.strategy);
-                let middlewares = self.middlewares.clone();
-                Box::pin(futures::stream::once(async move {
-                    for mw in &middlewares {
-                        mw.on_chunk_mut(&mut chunk).await;
-                    }
-                    for mw in &middlewares {
-                        mw.on_chunk(&chunk).await;
-                    }
-                    Ok(chunk)
-                }))
-            }
-            None => Box::pin(futures::stream::empty()),
-        };
-
-        Ok(RunStream {
-            inner: Box::pin(prelude.chain(inner)),
+        RunStream {
+            inner,
             suspension: &mut self.suspension,
             restore,
             ledger,
             pending: None,
             done: false,
-        })
+        }
     }
 }
 
@@ -1027,7 +1015,10 @@ impl<M: CompletionModel> ConversationBuilder<M> {
     /// Check the history budget before **every** model call of a run,
     /// not only before the first one. Default: `false`.
     ///
-    /// Without it, compaction runs once, before the run starts. A run
+    /// Without it, compaction runs once per run, after
+    /// [`StreamChunk::RunStarted`] and before the first step (never on
+    /// [`Conversation::resume_stream`]). With or without it, that
+    /// pre-run compaction runs and a failure in it ends the run. A run
     /// that loops through many tool calls then grows its context with
     /// every tool result until the provider rejects it. With it, before
     /// each call after the first, the engine runs
@@ -1795,7 +1786,7 @@ mod tests {
     }
 
     /// `Conversation::stream` runs registered middlewares' `on_chunk`
-    /// against the `HistoryCompacted` prelude before yielding it, so a
+    /// against the pre-run `HistoryCompacted` before yielding it, so a
     /// subscriber sees the event under a real run (not just when a test
     /// pokes `on_chunk` directly). Companion to the engine-side test
     /// that asserts `StepFinished` reaches `on_chunk`.
@@ -1880,8 +1871,8 @@ mod tests {
     }
 
     /// When `compact_if_needed` runs, `Conversation::stream` must emit
-    /// `HistoryCompacted` as the first chunk, carrying the same `RunId`
-    /// the engine then uses for its own chunks. This is the contract
+    /// `HistoryCompacted` right after `RunStarted`, carrying the same
+    /// `RunId` as every other chunk of the run. This is the contract
     /// observability middlewares rely on to attribute compaction to a
     /// specific run.
     #[tokio::test]
@@ -1908,12 +1899,16 @@ mod tests {
             .await
             .expect("stream should start");
 
-        let first = stream
+        let started_run_id = match stream.next().await.expect("RunStarted").unwrap() {
+            StreamChunk::RunStarted { run_id, .. } => run_id,
+            other => panic!("expected RunStarted first, got {other:?}"),
+        };
+        let second = stream
             .next()
             .await
-            .expect("expected at least one chunk")
+            .expect("expected a chunk after RunStarted")
             .unwrap();
-        let compacted_run_id = match first {
+        let compacted_run_id = match second {
             StreamChunk::HistoryCompacted {
                 run_id,
                 before_count,
@@ -1925,15 +1920,15 @@ mod tests {
                 assert_eq!(strategy, "truncate");
                 run_id
             }
-            other => panic!("expected HistoryCompacted first, got {other:?}"),
+            other => panic!("expected HistoryCompacted after RunStarted, got {other:?}"),
         };
+        assert_eq!(compacted_run_id, started_run_id);
 
         // Every subsequent engine-emitted chunk must carry the same RunId.
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.unwrap();
             match &chunk {
-                StreamChunk::RunStarted { run_id, .. }
-                | StreamChunk::StepStarted { run_id, .. }
+                StreamChunk::StepStarted { run_id, .. }
                 | StreamChunk::StepFinished { run_id, .. }
                 | StreamChunk::ToolResult { run_id, .. }
                 | StreamChunk::RunFinished { run_id, .. } => {
@@ -1947,13 +1942,19 @@ mod tests {
         }
     }
 
-    /// Runs one turn and reports whether it opened with
-    /// `HistoryCompacted`.
-    async fn first_chunk_is_compaction(chat: &mut Conversation<MockModel>) -> bool {
+    /// Runs one turn and reports whether `HistoryCompacted` came right
+    /// after `RunStarted`.
+    async fn opens_with_compaction(chat: &mut Conversation<MockModel>) -> bool {
         let mut stream = chat.stream("kickoff").await.expect("stream should start");
-        let first = stream.next().await.expect("at least one chunk").unwrap();
+        let first = stream.next().await.expect("RunStarted").unwrap();
+        assert!(matches!(first, StreamChunk::RunStarted { .. }));
+        let second = stream
+            .next()
+            .await
+            .expect("a chunk after RunStarted")
+            .unwrap();
         while stream.next().await.is_some() {}
-        matches!(first, StreamChunk::HistoryCompacted { .. })
+        matches!(second, StreamChunk::HistoryCompacted { .. })
     }
 
     fn big_turns() -> Vec<Message> {
@@ -1979,7 +1980,7 @@ mod tests {
                 .expect("builder should succeed");
             chat.history.extend(big_turns());
             assert_eq!(
-                first_chunk_is_compaction(&mut chat).await,
+                opens_with_compaction(&mut chat).await,
                 expect_compaction,
                 "reserved_tokens = {reserved}"
             );
@@ -1997,7 +1998,7 @@ mod tests {
                 .build()
                 .expect("builder should succeed");
             assert_eq!(
-                first_chunk_is_compaction(&mut chat).await,
+                opens_with_compaction(&mut chat).await,
                 expect_compaction,
                 "reserved_tokens = {reserved}"
             );
