@@ -8,6 +8,60 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- `CompactionError::is_context_overflow()` tells whether a failed summary
+  was too large for the model, for a failure when the stream opens and
+  for one mid-stream, and also when the error arrives inside
+  `EngineError::Context`. Before, the only way to tell was comparing the
+  error's text. `CompactionError::summarization_failed_from(error)` and
+  `CompactionError::summarization_failed(message, context_overflow,
+  source)` build the error for third-party strategies. The model's
+  original error is now readable through `std::error::Error::source()`
+  and `downcast_ref`.
+
+### Changed (BREAKING)
+
+- `CompactionError::SummarizationFailed(String)` is now
+  `SummarizationFailed { message, context_overflow, source }`, marked
+  `#[non_exhaustive]`, because a string lost the original error and
+  `ProviderError::is_context_overflow`. Its `Display` text is unchanged
+  (`Summarization failed: {message}`). A summarizer that returns no text
+  has `source: None` and `context_overflow: false`.
+- `SummarizeStrategy<M>` implements `CompactionStrategy` only when
+  `M::Error: ProviderError`, which it needs to classify the error. The
+  bundled adapters already implement it.
+
+### Migration
+
+- Matching and building `SummarizationFailed`:
+
+  ```rust
+  // Before
+  if let CompactionError::SummarizationFailed(message) = &err {
+      overflow = message.contains("prompt is too long");
+  }
+  return Err(CompactionError::SummarizationFailed("no budget".into()));
+
+  // After
+  if let CompactionError::SummarizationFailed { message, .. } = &err {
+      log(message);
+  }
+  overflow = err.is_context_overflow();
+  return Err(CompactionError::summarization_failed("no budget", false, None));
+  // Or, from a model error whose type implements ProviderError:
+  return Err(CompactionError::summarization_failed_from(model_error));
+  ```
+
+- A custom model used with `SummarizeStrategy` needs `ProviderError` on
+  its error type. The default method reports no overflow:
+
+  ```rust
+  // Before: not needed.
+  // After
+  impl ailoop::ProviderError for MyModelError {}
+  ```
+
 ## [1.0.0-rc.6] — 2026-10-24
 
 This release contains two breaking changes, both around resuming a

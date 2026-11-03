@@ -45,9 +45,12 @@ pub enum EngineError<E: std::error::Error> {
     /// History compaction failed. Typically this means a configured
     /// [`CompactionStrategy`] could not satisfy the token budget — see
     /// [`CompactionError`] for the concrete cases.
+    /// [`CompactionError::is_context_overflow`] tells whether a summary
+    /// request was itself too large for the model.
     ///
     /// [`CompactionStrategy`]: ailoop_history::CompactionStrategy
     /// [`CompactionError`]: ailoop_history::CompactionError
+    /// [`CompactionError::is_context_overflow`]: ailoop_history::CompactionError::is_context_overflow
     #[error("context error: {0}")]
     Context(#[from] ailoop_history::CompactionError),
 
@@ -169,7 +172,9 @@ pub enum EngineError<E: std::error::Error> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct RunError<E: std::error::Error> {
-    kind: EngineError<E>,
+    // Boxed to keep `Result<_, RunError<_>>` small on the success path
+    // (`clippy::result_large_err`).
+    kind: Box<EngineError<E>>,
     usage: Usage,
     partial_messages: Vec<Message>,
 }
@@ -177,7 +182,7 @@ pub struct RunError<E: std::error::Error> {
 impl<E: std::error::Error> RunError<E> {
     pub(crate) fn new(kind: EngineError<E>, usage: Usage, partial_messages: Vec<Message>) -> Self {
         Self {
-            kind,
+            kind: Box::new(kind),
             usage,
             partial_messages,
         }
@@ -191,7 +196,7 @@ impl<E: std::error::Error> RunError<E> {
     /// Consumes the error and returns its cause, dropping the partial
     /// messages.
     pub fn into_kind(self) -> EngineError<E> {
-        self.kind
+        *self.kind
     }
 
     /// What the run spent before failing: finished turns plus usage
@@ -211,7 +216,7 @@ impl<E: std::error::Error> RunError<E> {
     /// partial messages.
     pub fn into_parts(self) -> RunErrorParts<E> {
         RunErrorParts {
-            kind: self.kind,
+            kind: *self.kind,
             usage: self.usage,
             partial_messages: self.partial_messages,
         }
@@ -268,7 +273,7 @@ impl<E: std::error::Error> From<EngineError<E>> for RunError<E> {
 /// partial messages are dropped.
 impl<E: std::error::Error> From<RunError<E>> for EngineError<E> {
     fn from(err: RunError<E>) -> Self {
-        err.kind
+        *err.kind
     }
 }
 

@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use ailoop_core::{
-    AssistantBlock, ChatRequest, CompletionModel, Message, StreamChunk, SystemPrompt, UserBlock,
+    AssistantBlock, ChatRequest, CompletionModel, Message, ProviderError, StreamChunk,
+    SystemPrompt, UserBlock,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -176,9 +177,14 @@ pub const DEFAULT_SUMMARIZER_PROMPT: &str = "You are summarizing a prior convers
 /// agent's tool surface, sidestepping provider validation that would
 /// otherwise reject a `tool_use` block when no tools are declared.
 ///
-/// On model failure the strategy returns
+/// On failure the strategy returns
 /// [`CompactionError::SummarizationFailed`]; the caller decides
-/// whether to fall back to [`TruncateStrategy`] or propagate.
+/// whether to fall back to [`TruncateStrategy`] or propagate. A model
+/// error, from opening the stream or mid-stream, is kept as the
+/// [`source`](std::error::Error::source), and
+/// [`CompactionError::is_context_overflow`] reports its
+/// [`ProviderError::is_context_overflow`]. That is why the strategy
+/// needs `M::Error: ProviderError`.
 pub struct SummarizeStrategy<M> {
     model: Arc<M>,
     summarizer_prompt: String,
@@ -216,7 +222,10 @@ where
         self
     }
 
-    async fn summarize(&self, messages: Vec<Message>) -> Result<String, CompactionError> {
+    async fn summarize(&self, messages: Vec<Message>) -> Result<String, CompactionError>
+    where
+        M::Error: ProviderError,
+    {
         // Leave `tool_choice` unset rather than `ToolChoice::None`: some providers
         // reject `tool_choice: none` when the request also has no
         // `tools` array, and "no tools" already implies "no tool calls".
@@ -227,19 +236,21 @@ where
             .model
             .chat_stream(req)
             .await
-            .map_err(|e| CompactionError::SummarizationFailed(e.to_string()))?;
+            .map_err(CompactionError::summarization_failed_from)?;
 
         let mut buf = String::new();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| CompactionError::SummarizationFailed(e.to_string()))?;
+            let chunk = chunk.map_err(CompactionError::summarization_failed_from)?;
             if let StreamChunk::TextDelta { delta } = chunk {
                 buf.push_str(&delta);
             }
         }
 
         if buf.is_empty() {
-            return Err(CompactionError::SummarizationFailed(
-                "summarizer model returned no text".into(),
+            return Err(CompactionError::summarization_failed(
+                "summarizer model returned no text",
+                false,
+                None,
             ));
         }
 
@@ -251,6 +262,7 @@ where
 impl<M> CompactionStrategy for SummarizeStrategy<M>
 where
     M: CompletionModel + 'static,
+    M::Error: ProviderError,
 {
     fn name(&self) -> &'static str {
         "summarize"
@@ -590,15 +602,93 @@ mod tests {
             .compact(&messages, &pinned, 2)
             .await
             .expect_err("model error must propagate");
-        match err {
-            CompactionError::SummarizationFailed(msg) => {
+        match &err {
+            CompactionError::SummarizationFailed { message, .. } => {
                 assert!(
-                    msg.contains("summary network outage"),
-                    "expected wrapped model error, got: {msg}"
+                    message.contains("summary network outage"),
+                    "expected wrapped model error, got: {message}"
                 );
             }
             other => panic!("expected SummarizationFailed, got {other:?}"),
         }
+    }
+
+    /// What the summarizer model does: fail when opening the stream, or
+    /// after some text has already arrived.
+    fn failing_turns(error: &str) -> [ailoop_core::testing::ScriptedTurn; 2] {
+        [
+            Err(ScriptedError(error.into())),
+            Ok(vec![
+                Ok(StreamChunk::TextDelta {
+                    delta: "partial".into(),
+                }),
+                Err(ScriptedError(error.into())),
+            ]),
+        ]
+    }
+
+    async fn summarize_failure(turn: ailoop_core::testing::ScriptedTurn) -> CompactionError {
+        let strategy = SummarizeStrategy::new(Arc::new(ScriptedModel::with_turns([turn])));
+        let messages = vec![
+            Message::user("turn 1 q"),
+            Message::assistant_text("turn 1 a"),
+            Message::user("turn 2 q"),
+        ];
+        strategy
+            .compact(&messages, &unpinned(messages.len()), 1)
+            .await
+            .expect_err("summarizer fails")
+    }
+
+    #[tokio::test]
+    async fn summarize_strategy_reports_context_overflow() {
+        for turn in failing_turns("context_overflow: prompt is too long") {
+            let err = summarize_failure(turn).await;
+            assert!(err.is_context_overflow(), "{err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_strategy_does_not_report_other_errors_as_overflow() {
+        for turn in failing_turns("network outage") {
+            let err = summarize_failure(turn).await;
+            assert!(!err.is_context_overflow(), "{err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_strategy_keeps_the_original_error_as_source() {
+        for turn in failing_turns("network outage") {
+            let err = summarize_failure(turn).await;
+            let source = std::error::Error::source(&err).expect("source");
+            assert_eq!(
+                source.downcast_ref::<ScriptedError>(),
+                Some(&ScriptedError("network outage".into())),
+            );
+        }
+    }
+
+    /// Callers may match this prefix, so the text has to stay stable.
+    #[tokio::test]
+    async fn summarize_strategy_keeps_the_display_text() {
+        for turn in failing_turns("network outage") {
+            let err = summarize_failure(turn).await;
+            assert_eq!(
+                err.to_string(),
+                "Summarization failed: scripted error: network outage"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_strategy_empty_summary_has_no_cause() {
+        let err = summarize_failure(Ok(vec![])).await;
+        assert_eq!(
+            err.to_string(),
+            "Summarization failed: summarizer model returned no text"
+        );
+        assert!(!err.is_context_overflow());
+        assert!(std::error::Error::source(&err).is_none());
     }
 
     #[tokio::test]
