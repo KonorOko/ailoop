@@ -106,6 +106,17 @@ and this project adheres to
 
 ### Fixed
 
+- `DEFAULT_SUMMARIZER_PROMPT` no longer lets a summary answer what the
+  conversation left open. Asked to summarize a transcript with an
+  unanswered question, some models wrote the answer into the summary,
+  and after compacting the run read it as something that had been said.
+  With a question like "what is 17 times 23?", `claude-sonnet-4-6` did
+  this in 6 of 8 summaries, and in none of 8 with the new prompt. The
+  prompt now asks for only what the transcript states and for unanswered
+  questions to be reported as unanswered. Results the transcript does
+  state are still kept. Code passing its own prompt to
+  `SummarizeStrategy::with_prompt` is unaffected.
+
 - `SummarizeStrategy` now sends the prefix as one user message holding a
   labelled transcript (`User: …`, `Assistant: …`, with tool calls, tool
   results and placeholders as text). It used to send the messages as

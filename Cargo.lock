@@ -99,6 +99,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ailoop-live-tests"
+version = "0.1.0"
+dependencies = [
+ "ailoop",
+ "ailoop-anthropic",
+ "futures",
+ "tokio",
+]
+
+[[package]]
 name = "ailoop-mcp"
 version = "1.0.0-rc.6"
 dependencies = [
