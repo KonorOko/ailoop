@@ -8,6 +8,19 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [1.0.0-rc.7] — 2026-11-04
+
+This release is about history compaction, and most of its breaking
+changes affect code that matches compaction errors or watches the start
+of a run. `SummarizationFailed` is now a struct variant, and
+`SummarizeStrategy<M>` requires `M::Error: ProviderError`. The pre-run
+compaction runs inside the run, so `HistoryCompacted` comes after
+`RunStarted`, a failure arrives through the stream, and the run's timeout
+includes it. `RunFinished.usage` now includes compaction, so runs that
+summarize report a higher value. Every entry describes the change against
+1.0.0-rc.6; the Migration section at the end has the before/after
+snippets.
+
 ### Added
 
 - `CompactionError::is_context_overflow()` tells whether a failed summary
@@ -2238,7 +2251,8 @@ workspace-wide API audit (closed 2026-05-10).
 - Other providers (OpenAI public, Bedrock, Vertex, local engines)
   are not implemented.
 
-[Unreleased]: https://github.com/KonorOko/ailoop/compare/v1.0.0-rc.6...HEAD
+[Unreleased]: https://github.com/KonorOko/ailoop/compare/v1.0.0-rc.7...HEAD
+[1.0.0-rc.7]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.7
 [1.0.0-rc.6]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.6
 [1.0.0-rc.5]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.5
 [1.0.0-rc.4]: https://github.com/KonorOko/ailoop/releases/tag/v1.0.0-rc.4
