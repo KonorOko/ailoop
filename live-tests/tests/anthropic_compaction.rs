@@ -27,11 +27,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ailoop::{
-    AbortReason, CancellationToken, CompactionError, Conversation, FinishReason, History,
-    HistoryBuilder, Message, RunOptions, StreamChunk, SummarizeStrategy,
+    AbortReason, CancellationToken, ChatRequest, CompactionError, CompletionModel, Conversation,
+    FinishReason, History, HistoryBuilder, Message, RunOptions, StreamChunk, SummarizeStrategy,
+    async_trait,
 };
 use ailoop_anthropic::{AnthropicChatModel, AnthropicClient};
 use futures::StreamExt;
+use futures::stream::BoxStream;
 
 const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 /// Size of the rejected request, well past a window of a million tokens
@@ -75,28 +77,36 @@ fn transcript() -> Vec<Message> {
     ]
 }
 
-/// `chars` characters of text across many messages, with a fact at each
-/// end of the part that gets summarized.
+/// `chars` characters of work log across many messages, with a fact at
+/// each end of the part that gets summarized.
 fn oversized_history(chars: usize) -> Vec<Message> {
-    const WORDS: [&str; 12] = [
-        "harbor", "lantern", "quartz", "meadow", "cobalt", "thimble", "orchard", "falcon",
-        "granite", "willow", "ember", "saddle",
-    ];
+    const JOBS: [&str; 6] = ["billing", "ingest", "search", "reports", "backup", "auth"];
+    const OWNERS: [&str; 5] = ["Ana", "Luis", "Mei", "Omar", "Sofia"];
+    const ALERTS: [&str; 4] = ["latency", "disk usage", "error rate", "queue depth"];
     const PER_MESSAGE: usize = 40_000;
 
     let count = (chars / PER_MESSAGE).max(4) & !1;
     let mut messages = Vec::with_capacity(count + 1);
+    let mut n: u64 = 7;
     for i in 0..count {
         let mut text = match i {
-            0 => format!("The project's code name is {CODE_NAME}. "),
-            _ if i == count - 2 => format!("The backup's code name is {LATE_CODE_NAME}. "),
+            0 => format!("The project's code name is {CODE_NAME}.\n"),
+            _ if i == count - 2 => format!("The backup's code name is {LATE_CODE_NAME}.\n"),
             _ => String::new(),
         };
-        let mut n = i;
         while text.len() < PER_MESSAGE {
-            n = n.wrapping_mul(31).wrapping_add(17);
-            text.push_str(WORDS[n % WORDS.len()]);
-            text.push(' ');
+            n = n.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let r = (n >> 33) as usize;
+            text.push_str(&format!(
+                "Ticket OPS-{}: the {} job on host-{} took {} ms after {} retries; {} is following the {} alert.\n",
+                r % 90_000,
+                JOBS[r % JOBS.len()],
+                r % 40,
+                r % 9_000,
+                r % 4,
+                OWNERS[r % OWNERS.len()],
+                ALERTS[r % ALERTS.len()],
+            ));
         }
         messages.push(if i % 2 == 0 {
             Message::user(text)
@@ -106,6 +116,48 @@ fn oversized_history(chars: usize) -> Vec<Message> {
     }
     messages.push(Message::user("Carry on."));
     messages
+}
+
+/// A model that prints each answer it streams, to see what every
+/// request of a split produced.
+struct Logged<M>(M);
+
+#[async_trait]
+impl<M: CompletionModel> CompletionModel for Logged<M> {
+    type Error = M::Error;
+
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn model(&self) -> &str {
+        self.0.model()
+    }
+
+    async fn chat_stream(
+        &self,
+        req: ChatRequest,
+    ) -> Result<BoxStream<'static, Result<StreamChunk, Self::Error>>, Self::Error> {
+        let stream = self.0.chat_stream(req).await.inspect_err(|error| {
+            println!("--- request rejected: {error}");
+        })?;
+        let mut answer = String::new();
+        Ok(stream
+            .inspect(move |chunk| match chunk {
+                Ok(StreamChunk::TextDelta { delta }) => answer.push_str(delta),
+                Ok(StreamChunk::TurnFinished { usage, .. }) => {
+                    println!(
+                        "--- request answered, {} input tokens, early fact: {}, late fact: {}\n{answer}",
+                        usage.input_tokens,
+                        answer.contains(CODE_NAME),
+                        answer.contains(LATE_CODE_NAME),
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => println!("--- stream failed: {error}"),
+            })
+            .boxed())
+    }
 }
 
 /// The history's summary as printable text.
@@ -285,18 +337,21 @@ async fn costly_oversized_prefix_is_split_until_it_fits() {
         .expect("set AILOOP_LIVE_OVERFLOW_CHARS; see the top of this file")
         .parse()
         .expect("a number of characters");
-    let mut history = history_with(oversized_history(chars));
+    let mut history = History::builder(1_000_000)
+        .preserve_n_last(1)
+        .strategy(Box::new(SummarizeStrategy::new(Arc::new(Logged(model())))))
+        .build();
+    history.extend(oversized_history(chars));
 
     let started = Instant::now();
     let stats = history.force_compact().await.expect("the split completes");
 
     let summary = rendered(&history);
     println!("{stats:?} in {:?}\n{summary}", started.elapsed());
-    println!(
-        "kept the early fact: {}, the late fact: {}",
-        summary.contains(CODE_NAME),
-        summary.contains(LATE_CODE_NAME),
-    );
+    // Each end of the history lands in a different request, so the early
+    // fact only survives by being carried through every summary.
+    assert!(summary.contains(CODE_NAME), "lost the early fact");
+    assert!(summary.contains(LATE_CODE_NAME), "lost the late fact");
     assert!(stats.after < stats.before, "{stats:?}");
     assert!(stats.usage.input_tokens > 0, "{stats:?}");
 }
