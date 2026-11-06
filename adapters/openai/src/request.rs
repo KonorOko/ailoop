@@ -4,24 +4,53 @@ use ailoop_core::{
 };
 use serde_json::{Value, json};
 
-use crate::errors::AzureOpenAIError;
+use crate::client::MaxTokensField;
+use crate::error_body::RequestFeatures;
+use crate::errors::OpenAIError;
 
-/// Build the Chat Completions v1 request body. The deployment name is
-/// passed as `model` (Azure v1 takes deployments via the `model` field
-/// rather than the URL path).
+/// Client settings that shape the body.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BodyOptions {
+    pub max_tokens_field: MaxTokensField,
+    pub stream_usage: bool,
+}
+
+/// Whether the request carries images (in user turns) or tools, so an
+/// error message about either is only read as a missing capability when
+/// the request used it.
+pub(crate) fn request_features(req: &ChatRequest) -> RequestFeatures {
+    let images = req.messages.iter().any(|m| match m {
+        Message::User { blocks } => blocks.iter().any(|b| matches!(b, UserBlock::Image { .. })),
+        _ => false,
+    });
+    let tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
+    RequestFeatures { images, tools }
+}
+
+/// Build the Chat Completions request body.
 ///
-/// Returns [`AzureOpenAIError::UnsupportedContent`] when the request
+/// Returns [`OpenAIError::UnsupportedContent`] when the request
 /// carries content the Chat Completions wire model cannot represent
 /// (documents, image tool results, image `Source::FileId`). The
-/// failure is request-build-time and happens before any HTTP call is
-/// made; callers that want a downgrade install a `ChatMiddleware` and
-/// rewrite the request in `on_chat_request`.
-pub fn build_body(deployment: &str, req: &ChatRequest) -> Result<Value, AzureOpenAIError> {
+/// failure happens before any HTTP call; callers that want a downgrade
+/// install a `ChatMiddleware` and rewrite the request in
+/// `on_chat_request`.
+pub(crate) fn build_body(
+    model: &str,
+    req: &ChatRequest,
+    options: &BodyOptions,
+) -> Result<Value, OpenAIError> {
     let mut body = serde_json::Map::new();
-    body.insert("model".into(), json!(deployment));
+    body.insert("model".into(), json!(model));
     body.insert("stream".into(), json!(true));
-    body.insert("stream_options".into(), json!({ "include_usage": true }));
-    body.insert("max_tokens".into(), json!(req.max_tokens));
+    if options.stream_usage {
+        body.insert("stream_options".into(), json!({ "include_usage": true }));
+    }
+    let max_tokens_key = match options.max_tokens_field {
+        MaxTokensField::MaxTokens => "max_tokens",
+        MaxTokensField::MaxCompletionTokens => "max_completion_tokens",
+    };
+    body.insert(max_tokens_key.into(), json!(req.max_tokens));
     let system_text = req.system_prompt.as_ref().map(|s| s.as_text());
     body.insert(
         "messages".into(),
@@ -73,10 +102,10 @@ pub fn build_body(deployment: &str, req: &ChatRequest) -> Result<Value, AzureOpe
 fn to_messages(
     system_prompt: Option<&str>,
     messages: &[Message],
-) -> Result<Vec<Value>, AzureOpenAIError> {
+) -> Result<Vec<Value>, OpenAIError> {
     let mut out = Vec::new();
-    // Azure auto-converts `system` to `developer` for o-series; we always
-    // emit `system` and let the service do the right thing.
+    // OpenAI reads `system` as `developer` for reasoning models, and
+    // local servers only know `system`, so it is always `system`.
     if let Some(prompt) = system_prompt {
         out.push(json!({ "role": "system", "content": prompt }));
     }
@@ -116,7 +145,7 @@ fn flush_user_parts(out: &mut Vec<Value>, parts: &mut Vec<Value>) {
     }));
 }
 
-fn append_user_blocks(out: &mut Vec<Value>, blocks: &[UserBlock]) -> Result<(), AzureOpenAIError> {
+fn append_user_blocks(out: &mut Vec<Value>, blocks: &[UserBlock]) -> Result<(), OpenAIError> {
     let mut parts: Vec<Value> = Vec::new();
 
     for block in blocks {
@@ -132,7 +161,7 @@ fn append_user_blocks(out: &mut Vec<Value>, blocks: &[UserBlock]) -> Result<(), 
                 }));
             }
             UserBlock::Document { .. } => {
-                return Err(AzureOpenAIError::UnsupportedContent { kind: "document" });
+                return Err(OpenAIError::UnsupportedContent { kind: "document" });
             }
             UserBlock::ToolResult {
                 call_id, content, ..
@@ -148,7 +177,7 @@ fn append_user_blocks(out: &mut Vec<Value>, blocks: &[UserBlock]) -> Result<(), 
                     match tr_block {
                         ToolResultBlock::Text { text } => text_parts.push(text.as_str()),
                         ToolResultBlock::Image { .. } => {
-                            return Err(AzureOpenAIError::UnsupportedContent {
+                            return Err(OpenAIError::UnsupportedContent {
                                 kind: "tool_result_image",
                             });
                         }
@@ -171,16 +200,15 @@ fn append_user_blocks(out: &mut Vec<Value>, blocks: &[UserBlock]) -> Result<(), 
 /// Encode a [`Source`] as the `image_url.url` string used in Chat
 /// Completions content parts. Base64 sources become `data:` URIs;
 /// `Source::FileId` is rejected with a typed error because Chat
-/// Completions does not accept a file_id on image content parts (the
-/// Files API integration lives elsewhere on Azure).
-fn chat_completions_image_url(source: &Source) -> Result<String, AzureOpenAIError> {
+/// Completions does not accept a file_id on image content parts.
+fn chat_completions_image_url(source: &Source) -> Result<String, OpenAIError> {
     match source {
         Source::Url { url } => Ok(url.clone()),
         Source::Base64 { media_type, data } => Ok(format!("data:{media_type};base64,{data}")),
-        Source::FileId { .. } => Err(AzureOpenAIError::UnsupportedContent {
+        Source::FileId { .. } => Err(OpenAIError::UnsupportedContent {
             kind: "image_file_id",
         }),
-        _ => Err(AzureOpenAIError::UnsupportedContent {
+        _ => Err(OpenAIError::UnsupportedContent {
             kind: "image_source",
         }),
     }
@@ -209,8 +237,7 @@ fn append_assistant_blocks(out: &mut Vec<Value>, blocks: &[AssistantBlock]) {
                 }));
             }
             // Reasoning blocks have no slot in Chat Completions: the
-            // signature would be lost across turns. Use
-            // AzureOpenAIResponsesModel for reasoning round-trip.
+            // signature would be lost across turns, so they are dropped.
             AssistantBlock::Reasoning { .. } | AssistantBlock::RedactedReasoning { .. } => {}
             _ => {}
         }
@@ -292,6 +319,11 @@ mod tests {
     use super::*;
     use ailoop_core::{ChatRequest, ToolTag};
 
+    const OPTS: BodyOptions = BodyOptions {
+        max_tokens_field: MaxTokensField::MaxTokens,
+        stream_usage: true,
+    };
+
     fn base_req() -> ChatRequest {
         ChatRequest::new(Vec::new(), 1024)
     }
@@ -310,7 +342,7 @@ mod tests {
         ] {
             let mut req = base_req();
             req.reasoning_effort = Some(variant);
-            let body = build_body("dep", &req).unwrap();
+            let body = build_body("dep", &req, &OPTS).unwrap();
             assert_eq!(
                 body["reasoning_effort"],
                 json!(expected),
@@ -334,7 +366,7 @@ mod tests {
         ] {
             let mut req = base_req();
             req.reasoning_effort = Some(ReasoningEffort::Budget(budget));
-            let body = build_body("dep", &req).unwrap();
+            let body = build_body("dep", &req, &OPTS).unwrap();
             assert_eq!(
                 body["reasoning_effort"],
                 json!(expected),
@@ -347,7 +379,7 @@ mod tests {
     /// compatible with non-reasoning deployments.
     #[test]
     fn reasoning_effort_none_omits_field() {
-        let body = build_body("dep", &base_req()).unwrap();
+        let body = build_body("dep", &base_req(), &OPTS).unwrap();
         assert!(body.get("reasoning_effort").is_none());
     }
 
@@ -355,7 +387,7 @@ mod tests {
     fn serializes_simple_text_turn() {
         let mut req = base_req();
         req.messages = vec![Message::user("hi"), Message::assistant_text("hello")];
-        let body = build_body("gpt-4o-mini-deployment", &req).unwrap();
+        let body = build_body("gpt-4o-mini-deployment", &req, &OPTS).unwrap();
         assert_eq!(body["model"], json!("gpt-4o-mini-deployment"));
         assert_eq!(body["stream"], json!(true));
         assert_eq!(body["stream_options"], json!({ "include_usage": true }));
@@ -377,7 +409,7 @@ mod tests {
                 json!({ "location": "SF", "units": "C" }),
             )],
         }];
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("assistant"));
         assert_eq!(msg["content"], Value::Null);
@@ -401,7 +433,7 @@ mod tests {
                 ToolResultContent::text("70F"),
             )],
         }];
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("tool"));
         assert_eq!(msg["tool_call_id"], json!("call_1"));
@@ -418,7 +450,7 @@ mod tests {
                 ToolResultContent::error("API down"),
             )],
         }];
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("tool"));
         assert_eq!(msg["tool_call_id"], json!("call_1"));
@@ -437,7 +469,7 @@ mod tests {
                 UserBlock::text("after"),
             ],
         }];
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0]["role"], json!("user"));
@@ -457,7 +489,7 @@ mod tests {
             json!({ "type": "object", "properties": {} }),
             vec![ToolTag::ReadOnly, ToolTag::Network],
         )]);
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         let tool = &body["tools"][0];
         assert_eq!(tool["type"], json!("function"));
         assert_eq!(tool["function"]["name"], json!("get_weather"));
@@ -478,7 +510,7 @@ mod tests {
     fn omits_top_k_silently() {
         let mut req = base_req();
         req.top_k = Some(50);
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         assert!(body.get("top_k").is_none());
     }
 
@@ -490,7 +522,7 @@ mod tests {
             "temperature": 0.9,
             "logit_bias": { "100": -100 }
         }));
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         // additional_params overrides the canonical temperature.
         assert_eq!(body["temperature"], json!(0.9));
         assert_eq!(body["logit_bias"], json!({ "100": -100 }));
@@ -501,7 +533,7 @@ mod tests {
         let mut req = base_req();
         req.system_prompt = Some("be helpful".into());
         req.messages = vec![Message::user("hi")];
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], json!("system"));
         assert_eq!(messages[0]["content"], json!("be helpful"));
@@ -512,7 +544,7 @@ mod tests {
     fn omits_optional_sampling_when_none() {
         let mut req = base_req();
         req.messages = vec![Message::user("hi")];
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
         assert!(body.get("stop").is_none());
@@ -520,7 +552,7 @@ mod tests {
 
     #[test]
     fn omits_tool_choice_and_parallel_when_unset() {
-        let body = build_body("dep", &base_req()).unwrap();
+        let body = build_body("dep", &base_req(), &OPTS).unwrap();
         assert!(body.get("tool_choice").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
     }
@@ -529,7 +561,7 @@ mod tests {
     fn maps_tool_choice_auto_as_string() {
         let mut req = base_req();
         req.tool_choice = Some(ToolChoice::Auto);
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         assert_eq!(body["tool_choice"], json!("auto"));
     }
 
@@ -540,7 +572,7 @@ mod tests {
     fn maps_tool_choice_any_as_required() {
         let mut req = base_req();
         req.tool_choice = Some(ToolChoice::Any);
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         assert_eq!(body["tool_choice"], json!("required"));
     }
 
@@ -550,7 +582,7 @@ mod tests {
         req.tool_choice = Some(ToolChoice::Tool {
             name: "get_weather".into(),
         });
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         assert_eq!(
             body["tool_choice"],
             json!({
@@ -564,7 +596,7 @@ mod tests {
     fn maps_tool_choice_none_as_string() {
         let mut req = base_req();
         req.tool_choice = Some(ToolChoice::None);
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         assert_eq!(body["tool_choice"], json!("none"));
     }
 
@@ -576,7 +608,7 @@ mod tests {
     fn serial_tool_use_emits_parallel_tool_calls_false() {
         let mut req = base_req();
         req.parallel_tool_use = Some(false);
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         assert_eq!(body["parallel_tool_calls"], json!(false));
         assert!(body.get("tool_choice").is_none());
     }
@@ -585,7 +617,7 @@ mod tests {
     fn parallel_tool_use_emits_parallel_tool_calls_true() {
         let mut req = base_req();
         req.parallel_tool_use = Some(true);
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         assert_eq!(body["parallel_tool_calls"], json!(true));
     }
 
@@ -601,7 +633,7 @@ mod tests {
                 AssistantBlock::text("answer"),
             ],
         }];
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("assistant"));
         // Reasoning is dropped; only text survives.
@@ -622,7 +654,7 @@ mod tests {
                 }),
             ],
         }];
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], json!("user"));
         assert_eq!(
@@ -646,7 +678,7 @@ mod tests {
                 data: "iVBOR".into(),
             })],
         }];
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         let msg = &body["messages"][0];
         // Single non-text part -> array form, not string.
         let parts = msg["content"].as_array().unwrap();
@@ -662,7 +694,7 @@ mod tests {
     fn text_only_user_message_still_emits_string_content() {
         let mut req = base_req();
         req.messages = vec![Message::user("hi")];
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         let msg = &body["messages"][0];
         // No multimodal parts -> preserve the pre-1.0 string shape.
         assert_eq!(msg["content"], json!("hi"));
@@ -677,10 +709,10 @@ mod tests {
                 data: "JVBERi0".into(),
             })],
         }];
-        let err = build_body("dep", &req).expect_err("documents must be rejected");
+        let err = build_body("dep", &req, &OPTS).expect_err("documents must be rejected");
         assert!(matches!(
             err,
-            AzureOpenAIError::UnsupportedContent { kind: "document" }
+            OpenAIError::UnsupportedContent { kind: "document" }
         ));
     }
 
@@ -692,10 +724,10 @@ mod tests {
                 id: "file_abc".into(),
             })],
         }];
-        let err = build_body("dep", &req).expect_err("image file_id must be rejected");
+        let err = build_body("dep", &req, &OPTS).expect_err("image file_id must be rejected");
         assert!(matches!(
             err,
-            AzureOpenAIError::UnsupportedContent {
+            OpenAIError::UnsupportedContent {
                 kind: "image_file_id"
             }
         ));
@@ -713,10 +745,10 @@ mod tests {
                 })]),
             )],
         }];
-        let err = build_body("dep", &req).expect_err("image tool result must be rejected");
+        let err = build_body("dep", &req, &OPTS).expect_err("image tool result must be rejected");
         assert!(matches!(
             err,
-            AzureOpenAIError::UnsupportedContent {
+            OpenAIError::UnsupportedContent {
                 kind: "tool_result_image"
             }
         ));
@@ -735,8 +767,61 @@ mod tests {
                 ]),
             )],
         }];
-        let body = build_body("dep", &req).unwrap();
+        let body = build_body("dep", &req, &OPTS).unwrap();
         let msg = &body["messages"][0];
         assert_eq!(msg["content"], json!("line 1\nline 2"));
+    }
+
+    #[test]
+    fn max_tokens_field_and_stream_usage_follow_options() {
+        let opts = BodyOptions {
+            max_tokens_field: MaxTokensField::MaxCompletionTokens,
+            stream_usage: false,
+        };
+        let body = build_body("gpt-5", &base_req(), &opts).unwrap();
+        assert_eq!(body["max_completion_tokens"], json!(1024));
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("stream_options").is_none());
+
+        let body = build_body("llama3.2", &base_req(), &OPTS).unwrap();
+        assert_eq!(body["max_tokens"], json!(1024));
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn jpeg_screenshot_wires_as_data_uri() {
+        let mut req = base_req();
+        req.messages = vec![Message::user_with_blocks([
+            UserBlock::text("¿Qué ves?"),
+            UserBlock::image(Source::Base64 {
+                media_type: "image/jpeg".into(),
+                data: "/9j/4AAQ".into(),
+            }),
+        ])];
+        let body = build_body("llava", &req, &OPTS).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["url"],
+            json!("data:image/jpeg;base64,/9j/4AAQ")
+        );
+    }
+
+    #[test]
+    fn features_report_images_and_tools() {
+        let mut req = base_req();
+        assert!(!request_features(&req).images);
+        assert!(!request_features(&req).tools);
+        req.messages = vec![Message::User {
+            blocks: vec![UserBlock::image(Source::Url {
+                url: "https://example.com/a.png".into(),
+            })],
+        }];
+        req.tools = Some(vec![ToolDefinition::new(
+            "t",
+            "d",
+            json!({"type":"object"}),
+            vec![],
+        )]);
+        let features = request_features(&req);
+        assert!(features.images && features.tools);
     }
 }

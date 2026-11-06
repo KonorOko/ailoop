@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
-use crate::client::TokenProvider;
-use crate::errors::AzureOpenAIError;
+use crate::azure::TokenProvider;
+use crate::errors::OpenAIError;
 
 /// [`TokenProvider`] wrapper that memoizes the inner provider's token
 /// for `ttl - refresh_skew` and triggers a fresh fetch once that window
@@ -22,18 +22,18 @@ use crate::errors::AzureOpenAIError;
 ///
 /// The `TokenProvider` trait surface stays unchanged: the policy lives in
 /// construction, not in the trait. Wrap once at startup and pass the
-/// wrapper into [`AzureOpenAIClient::with_provider`](crate::AzureOpenAIClient::with_provider):
+/// wrapper to [`OpenAIClient::azure`](crate::OpenAIClient::azure):
 ///
 /// ```ignore
 /// use std::time::Duration;
-/// use ailoop_azure_openai::{AzureOpenAIClient, CachingTokenProvider};
+/// use ailoop_openai::{AzureAuth, CachingTokenProvider, OpenAIClient};
 ///
 /// let cached = CachingTokenProvider::new(
 ///     my_entra_provider,
 ///     Duration::from_secs(3600),
 ///     Duration::from_secs(300),
 /// );
-/// let client = AzureOpenAIClient::with_provider("https://x.openai.azure.com", cached);
+/// let client = OpenAIClient::azure("https://x.openai.azure.com", AzureAuth::provider(cached));
 /// ```
 ///
 /// ## Concurrency
@@ -89,7 +89,7 @@ impl<P: TokenProvider> CachingTokenProvider<P> {
 
 #[async_trait]
 impl<P: TokenProvider> TokenProvider for CachingTokenProvider<P> {
-    async fn token(&self) -> Result<String, AzureOpenAIError> {
+    async fn token(&self) -> Result<String, OpenAIError> {
         {
             let guard = self.read_cache();
             if let Some((token, fetched_at)) = guard.as_ref()
@@ -112,7 +112,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::client::{AzureOpenAIAuth, AzureOpenAIClient};
+    use crate::azure::AzureAuth;
+    use crate::client::OpenAIClient;
 
     struct CountingProvider {
         calls: Arc<AtomicUsize>,
@@ -134,7 +135,7 @@ mod tests {
 
     #[async_trait]
     impl TokenProvider for CountingProvider {
-        async fn token(&self) -> Result<String, AzureOpenAIError> {
+        async fn token(&self) -> Result<String, OpenAIError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.token.clone())
         }
@@ -146,9 +147,9 @@ mod tests {
 
     #[async_trait]
     impl TokenProvider for FailingProvider {
-        async fn token(&self) -> Result<String, AzureOpenAIError> {
+        async fn token(&self) -> Result<String, OpenAIError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(AzureOpenAIError::Config("fetch failed".into()))
+            Err(OpenAIError::Config("fetch failed".into()))
         }
     }
 
@@ -156,7 +157,7 @@ mod tests {
 
     #[async_trait]
     impl TokenProvider for StaticProvider {
-        async fn token(&self) -> Result<String, AzureOpenAIError> {
+        async fn token(&self) -> Result<String, OpenAIError> {
             Ok(self.0.clone())
         }
     }
@@ -245,11 +246,11 @@ mod tests {
         );
 
         match cache.token().await {
-            Err(AzureOpenAIError::Config(msg)) => assert!(msg.contains("fetch failed")),
+            Err(OpenAIError::Config(msg)) => assert!(msg.contains("fetch failed")),
             other => panic!("expected Config error, got {other:?}"),
         }
         match cache.token().await {
-            Err(AzureOpenAIError::Config(_)) => {}
+            Err(OpenAIError::Config(_)) => {}
             other => panic!("expected Config error, got {other:?}"),
         }
 
@@ -257,19 +258,18 @@ mod tests {
     }
 
     /// `CachingTokenProvider<StaticProvider>` satisfies the bound on
-    /// [`AzureOpenAIClient::with_provider`] and lands in the `Provider`
-    /// auth variant — the type stack used in production
+    /// [`AzureAuth::provider`] — the type stack used in production
     /// (`Arc<CachingTokenProvider<...>>` as `Arc<dyn TokenProvider>`)
     /// compiles and resolves correctly.
     #[test]
-    fn caching_provider_plugs_into_with_provider() {
+    fn caching_provider_plugs_into_azure_auth() {
         let cached = CachingTokenProvider::new(
             StaticProvider("t".into()),
             Duration::from_secs(3600),
             Duration::from_secs(300),
         );
-        let client = AzureOpenAIClient::with_provider("https://x.openai.azure.com", cached);
-        assert!(matches!(client.auth, AzureOpenAIAuth::Provider(_)));
+        let client = OpenAIClient::azure("https://x.openai.azure.com", AzureAuth::provider(cached));
+        assert!(client.is_azure());
 
         let arc_cached: Arc<CachingTokenProvider<StaticProvider>> =
             Arc::new(CachingTokenProvider::new(
@@ -277,7 +277,7 @@ mod tests {
                 Duration::from_secs(60),
                 Duration::from_secs(5),
             ));
-        let auth = AzureOpenAIAuth::Provider(arc_cached);
-        assert!(matches!(auth, AzureOpenAIAuth::Provider(_)));
+        let auth = AzureAuth::Provider(arc_cached);
+        assert!(matches!(auth, AzureAuth::Provider(_)));
     }
 }
