@@ -8,7 +8,11 @@ publish = false
 
 [dev-dependencies]
 ailoop.workspace = true
+ailoop-core.workspace = true
 ailoop-anthropic.workspace = true
+ailoop-openai.workspace = true
 
 futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
