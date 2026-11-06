@@ -17,7 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 
-use crate::provider_error::ProviderError;
+use crate::provider_error::{Capability, ProviderError, ProviderErrorKind};
 use crate::request::ChatRequest;
 use crate::retry::{RetryClassification, Retryable};
 use crate::stream::StreamChunk;
@@ -38,18 +38,160 @@ impl std::fmt::Display for ScriptedError {
 
 impl std::error::Error for ScriptedError {}
 
-/// Test-only classification by message convention: contains
-/// `"context_overflow"` → [`ProviderError::is_context_overflow`] is
-/// `true`. Lets engine-level recovery be exercised without a real
-/// provider.
+impl ScriptedError {
+    /// Build an error whose message is the marker for `kind`, so its
+    /// [`ProviderError::kind`] is `kind` and its
+    /// [`Retryable::retry_classification`] matches what a real adapter
+    /// reports for that kind (see the [`ProviderError`] impl).
+    ///
+    /// `retry_after` is written as `:<ms>` and only kept for the
+    /// transient kinds ([`Network`](ProviderErrorKind::Network),
+    /// [`RateLimited`](ProviderErrorKind::RateLimited),
+    /// [`Unavailable`](ProviderErrorKind::Unavailable) and
+    /// [`Interrupted`](ProviderErrorKind::Interrupted)); the other
+    /// kinds are permanent and ignore it.
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// # use ailoop_core::{ProviderError, ProviderErrorKind, RetryClassification, Retryable};
+    /// # use ailoop_core::testing::ScriptedError;
+    /// let err = ScriptedError::of(ProviderErrorKind::RateLimited, Some(Duration::from_millis(90)));
+    /// assert_eq!(err.0, "rate_limited:90");
+    /// assert_eq!(err.kind(), ProviderErrorKind::RateLimited);
+    /// assert_eq!(
+    ///     err.retry_classification(),
+    ///     RetryClassification::Transient { retry_after: Some(Duration::from_millis(90)) },
+    /// );
+    /// ```
+    pub fn of(kind: ProviderErrorKind, retry_after: Option<Duration>) -> Self {
+        let name = marker_name(kind);
+        let message = match retry_after {
+            Some(delay) if is_transient(kind) => format!("{name}:{}", delay.as_millis()),
+            _ => name.to_string(),
+        };
+        Self(message)
+    }
+
+    /// The marker at the start of the message and the text after its
+    /// `:`, when the message starts with one. A marker counts only as
+    /// the whole message or followed by `:`, so `"network outage"` is
+    /// not the `network` marker.
+    fn marker(&self) -> Option<(ProviderErrorKind, &str)> {
+        let (head, tail) = self.0.split_once(':').unwrap_or((self.0.as_str(), ""));
+        let kind = match head {
+            "network" => ProviderErrorKind::Network,
+            "auth" => ProviderErrorKind::Auth,
+            "permission" => ProviderErrorKind::Permission,
+            "rate_limited" => ProviderErrorKind::RateLimited,
+            "unavailable" => ProviderErrorKind::Unavailable,
+            "quota" => ProviderErrorKind::QuotaExhausted,
+            "context_overflow" => ProviderErrorKind::ContextOverflow,
+            "request_too_large" => ProviderErrorKind::RequestTooLarge,
+            "content_filter" => ProviderErrorKind::ContentFilter,
+            "model_not_found" => ProviderErrorKind::ModelNotFound,
+            "unsupported" => {
+                let capability = match tail.split(':').next().unwrap_or("").trim() {
+                    "images" => Capability::Images,
+                    "tools" => Capability::Tools,
+                    _ => return None,
+                };
+                ProviderErrorKind::Unsupported(capability)
+            }
+            "interrupted" => ProviderErrorKind::Interrupted,
+            "invalid_request" => ProviderErrorKind::InvalidRequest,
+            "other" => ProviderErrorKind::Other,
+            _ => return None,
+        };
+        Some((kind, tail))
+    }
+}
+
+fn marker_name(kind: ProviderErrorKind) -> &'static str {
+    match kind {
+        ProviderErrorKind::Network => "network",
+        ProviderErrorKind::Auth => "auth",
+        ProviderErrorKind::Permission => "permission",
+        ProviderErrorKind::RateLimited => "rate_limited",
+        ProviderErrorKind::Unavailable => "unavailable",
+        ProviderErrorKind::QuotaExhausted => "quota",
+        ProviderErrorKind::ContextOverflow => "context_overflow",
+        ProviderErrorKind::RequestTooLarge => "request_too_large",
+        ProviderErrorKind::ContentFilter => "content_filter",
+        ProviderErrorKind::ModelNotFound => "model_not_found",
+        ProviderErrorKind::Unsupported(Capability::Images) => "unsupported:images",
+        ProviderErrorKind::Unsupported(Capability::Tools) => "unsupported:tools",
+        ProviderErrorKind::Interrupted => "interrupted",
+        ProviderErrorKind::InvalidRequest => "invalid_request",
+        ProviderErrorKind::Other => "other",
+    }
+}
+
+/// Kinds a real adapter reports as transient.
+fn is_transient(kind: ProviderErrorKind) -> bool {
+    matches!(
+        kind,
+        ProviderErrorKind::Network
+            | ProviderErrorKind::RateLimited
+            | ProviderErrorKind::Unavailable
+            | ProviderErrorKind::Interrupted
+    )
+}
+
+/// Leading milliseconds of `tail`, as in `"90"` or `"90: slow down"`.
+fn leading_millis(tail: &str) -> Option<Duration> {
+    let digits: String = tail
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse::<u64>().ok().map(Duration::from_millis)
+}
+
+/// Test-only classification by message convention, so engine-level
+/// recovery can be exercised without a real provider.
+///
+/// A message that starts with a marker, either alone or followed by
+/// `:`, gets that marker's kind. Delays are in milliseconds.
+///
+/// | Marker | Kind |
+/// |---|---|
+/// | `network[:<ms>]` | [`Network`](ProviderErrorKind::Network) |
+/// | `auth` | [`Auth`](ProviderErrorKind::Auth) |
+/// | `permission` | [`Permission`](ProviderErrorKind::Permission) |
+/// | `rate_limited[:<ms>]` | [`RateLimited`](ProviderErrorKind::RateLimited) |
+/// | `unavailable[:<ms>]` | [`Unavailable`](ProviderErrorKind::Unavailable) |
+/// | `quota` | [`QuotaExhausted`](ProviderErrorKind::QuotaExhausted) |
+/// | `context_overflow` | [`ContextOverflow`](ProviderErrorKind::ContextOverflow) |
+/// | `request_too_large` | [`RequestTooLarge`](ProviderErrorKind::RequestTooLarge) |
+/// | `content_filter` | [`ContentFilter`](ProviderErrorKind::ContentFilter) |
+/// | `model_not_found` | [`ModelNotFound`](ProviderErrorKind::ModelNotFound) |
+/// | `unsupported:images`, `unsupported:tools` | [`Unsupported`](ProviderErrorKind::Unsupported) |
+/// | `interrupted[:<ms>]` | [`Interrupted`](ProviderErrorKind::Interrupted) |
+/// | `invalid_request` | [`InvalidRequest`](ProviderErrorKind::InvalidRequest) |
+/// | `other` | [`Other`](ProviderErrorKind::Other) |
+///
+/// Any other message is [`Other`](ProviderErrorKind::Other), except
+/// that one containing `"context_overflow"` anywhere is still a
+/// context overflow, as before these markers existed.
+/// [`ScriptedError::of`] writes the marker for a kind.
 impl ProviderError for ScriptedError {
-    fn is_context_overflow(&self) -> bool {
-        self.0.contains("context_overflow")
+    fn kind(&self) -> ProviderErrorKind {
+        match self.marker() {
+            Some((kind, _)) => kind,
+            None if self.0.contains("context_overflow") => ProviderErrorKind::ContextOverflow,
+            None => ProviderErrorKind::Other,
+        }
     }
 }
 
 /// Test-only classification by message convention so retry-aware
-/// decorators can be exercised without a real provider:
+/// decorators can be exercised without a real provider.
+///
+/// A message that starts with a [`ProviderError`] marker is classified
+/// like a real adapter classifies that kind: `network`,
+/// `rate_limited`, `unavailable` and `interrupted` are transient, with
+/// `retry_after` from their `:<ms>` suffix; every other marker is
+/// permanent. Otherwise the older conventions apply:
 ///
 /// - contains `"permanent"` → [`RetryClassification::Permanent`]
 /// - contains `"transient:<ms>"` → transient with `retry_after = ms`
@@ -57,15 +199,21 @@ impl ProviderError for ScriptedError {
 /// - anything else → permanent (so unrelated `Err`s in tests don't loop)
 impl Retryable for ScriptedError {
     fn retry_classification(&self) -> RetryClassification {
+        if let Some((kind, tail)) = self.marker() {
+            return if is_transient(kind) {
+                RetryClassification::Transient {
+                    retry_after: leading_millis(tail),
+                }
+            } else {
+                RetryClassification::Permanent
+            };
+        }
         let s = self.0.as_str();
         if s.contains("permanent") {
             return RetryClassification::Permanent;
         }
         if let Some((_, after)) = s.split_once("transient") {
-            let retry_after = after.strip_prefix(':').and_then(|tail| {
-                let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-                digits.parse::<u64>().ok().map(Duration::from_millis)
-            });
+            let retry_after = after.strip_prefix(':').and_then(leading_millis);
             return RetryClassification::Transient { retry_after };
         }
         RetryClassification::Permanent
@@ -245,5 +393,107 @@ mod tests {
             ScriptedError("something else entirely".into()).retry_classification(),
             RetryClassification::Permanent,
         );
+    }
+
+    #[test]
+    fn markers_round_trip_through_of() {
+        let kinds = [
+            ProviderErrorKind::Network,
+            ProviderErrorKind::Auth,
+            ProviderErrorKind::Permission,
+            ProviderErrorKind::RateLimited,
+            ProviderErrorKind::Unavailable,
+            ProviderErrorKind::QuotaExhausted,
+            ProviderErrorKind::ContextOverflow,
+            ProviderErrorKind::RequestTooLarge,
+            ProviderErrorKind::ContentFilter,
+            ProviderErrorKind::ModelNotFound,
+            ProviderErrorKind::Unsupported(Capability::Images),
+            ProviderErrorKind::Unsupported(Capability::Tools),
+            ProviderErrorKind::Interrupted,
+            ProviderErrorKind::InvalidRequest,
+            ProviderErrorKind::Other,
+        ];
+        for kind in kinds {
+            let err = ScriptedError::of(kind, None);
+            assert_eq!(err.kind(), kind, "{err:?}");
+            assert_eq!(
+                err.is_context_overflow(),
+                kind == ProviderErrorKind::ContextOverflow
+            );
+            let expected = if is_transient(kind) {
+                RetryClassification::Transient { retry_after: None }
+            } else {
+                RetryClassification::Permanent
+            };
+            assert_eq!(err.retry_classification(), expected, "{err:?}");
+        }
+    }
+
+    #[test]
+    fn transient_markers_carry_their_delay_in_millis() {
+        let delay = Some(Duration::from_millis(90));
+        for kind in [
+            ProviderErrorKind::Network,
+            ProviderErrorKind::RateLimited,
+            ProviderErrorKind::Unavailable,
+            ProviderErrorKind::Interrupted,
+        ] {
+            let err = ScriptedError::of(kind, delay);
+            assert_eq!(err.kind(), kind);
+            assert_eq!(
+                err.retry_classification(),
+                RetryClassification::Transient { retry_after: delay },
+            );
+        }
+        assert_eq!(
+            ScriptedError("rate_limited:500: slow down".into()).retry_classification(),
+            RetryClassification::Transient {
+                retry_after: Some(Duration::from_millis(500))
+            },
+        );
+    }
+
+    #[test]
+    fn permanent_kinds_ignore_a_delay() {
+        let err = ScriptedError::of(
+            ProviderErrorKind::QuotaExhausted,
+            Some(Duration::from_secs(1)),
+        );
+        assert_eq!(err.0, "quota");
+        assert_eq!(err.retry_classification(), RetryClassification::Permanent);
+    }
+
+    #[test]
+    fn markers_only_count_at_the_start_as_a_whole_word() {
+        // Would match two markers with `contains`.
+        let err = ScriptedError("permanent network failure".into());
+        assert_eq!(err.kind(), ProviderErrorKind::Other);
+        assert_eq!(err.retry_classification(), RetryClassification::Permanent);
+
+        for message in [
+            "network outage",
+            "networking",
+            "rate limited",
+            "upstream: network",
+        ] {
+            let err = ScriptedError(message.into());
+            assert_eq!(err.kind(), ProviderErrorKind::Other, "{message}");
+        }
+        assert_eq!(
+            ScriptedError("network: connection reset".into()).kind(),
+            ProviderErrorKind::Network,
+        );
+        assert_eq!(
+            ScriptedError("unsupported:audio".into()).kind(),
+            ProviderErrorKind::Other,
+        );
+    }
+
+    #[test]
+    fn legacy_context_overflow_anywhere_still_counts() {
+        let err = ScriptedError("summary failed: context_overflow".into());
+        assert_eq!(err.kind(), ProviderErrorKind::ContextOverflow);
+        assert!(err.is_context_overflow());
     }
 }
