@@ -32,13 +32,17 @@ use crate::traits::CompletionModel;
 /// `SummarizeStrategy` and the engine exactly like the model it wraps.
 ///
 /// ```
-/// # use ailoop_core::{BoxedModel, CompletionModel, RetryingModel};
-/// # use ailoop_core::testing::ScriptedModel;
-/// let models: Vec<BoxedModel> = vec![
-///     BoxedModel::new(ScriptedModel::new([]).with_model("primary")),
-///     BoxedModel::new(RetryingModel::new(ScriptedModel::new([]).with_model("backup"))),
-/// ];
-/// assert_eq!(models[1].model(), "backup");
+/// use std::collections::HashMap;
+/// use ailoop_core::{BoxedModel, CompletionModel, ProviderError, Retryable};
+///
+/// fn register<M>(models: &mut HashMap<String, BoxedModel>, model: M)
+/// where
+///     M: CompletionModel + 'static,
+///     M::Error: ProviderError + Retryable,
+/// {
+///     let model = BoxedModel::new(model);
+///     models.insert(model.model().to_string(), model);
+/// }
 /// ```
 ///
 /// Wrapping a `BoxedModel` again returns it unchanged rather than
@@ -147,12 +151,26 @@ where
 /// it can be downcast to the adapter's type:
 ///
 /// ```
-/// # use ailoop_core::{BoxedError, ProviderError, ProviderErrorKind};
-/// # use ailoop_core::testing::ScriptedError;
-/// let err = BoxedError::new(ScriptedError("rate_limited:90".into()));
+/// # use ailoop_core::{BoxedError, ProviderError, ProviderErrorKind, RetryClassification, Retryable};
+/// #[derive(Debug)]
+/// struct Throttled;
+/// # impl std::fmt::Display for Throttled {
+/// #     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("throttled") }
+/// # }
+/// # impl std::error::Error for Throttled {}
+/// impl ProviderError for Throttled {
+///     fn kind(&self) -> ProviderErrorKind { ProviderErrorKind::RateLimited }
+/// }
+/// impl Retryable for Throttled {
+///     fn retry_classification(&self) -> RetryClassification {
+///         RetryClassification::Transient { retry_after: None }
+///     }
+/// }
+///
+/// let err = BoxedError::new(Throttled);
 /// assert_eq!(err.kind(), ProviderErrorKind::RateLimited);
-/// assert_eq!(err.to_string(), "scripted error: rate_limited:90");
-/// assert!(err.downcast_ref::<ScriptedError>().is_some());
+/// assert_eq!(err.to_string(), "throttled");
+/// assert!(err.downcast_ref::<Throttled>().is_some());
 /// ```
 ///
 /// A caller that walks the [`source`](StdError::source) chain sees
