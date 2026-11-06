@@ -1,4 +1,4 @@
-use ailoop_core::{Message, Usage};
+use ailoop_core::{Message, ProviderError, ProviderErrorKind, Usage};
 use ailoop_prompts::PromptError;
 use ailoop_tools::ToolRegistryError;
 
@@ -100,6 +100,25 @@ pub enum EngineError<E: std::error::Error> {
     Resume(#[from] ailoop_core::ResumeError),
 }
 
+impl<E: std::error::Error + ProviderError> EngineError<E> {
+    /// The provider's [`ProviderError::kind`] when the run failed on a
+    /// model error: [`EngineError::Model`] or
+    /// [`EngineError::ContextOverflow`]. `None` for every other variant.
+    ///
+    /// A failed compaction ([`EngineError::Context`]) is left out on
+    /// purpose, because its error comes from the summarizer's request
+    /// and not from the run's; read it with
+    /// [`CompactionError::provider_kind`].
+    ///
+    /// [`CompactionError::provider_kind`]: ailoop_history::CompactionError::provider_kind
+    pub fn provider_kind(&self) -> Option<ProviderErrorKind> {
+        match self {
+            EngineError::Model(e) | EngineError::ContextOverflow(e) => Some(e.kind()),
+            _ => None,
+        }
+    }
+}
+
 /// A run that ended in `Err`: the cause ([`EngineError`]), what the
 /// run spent, and the messages of every step the run completed before
 /// it failed.
@@ -195,6 +214,15 @@ impl<E: std::error::Error> RunError<E> {
     /// What made the run fail.
     pub fn kind(&self) -> &EngineError<E> {
         &self.kind
+    }
+
+    /// Shortcut for [`EngineError::provider_kind`] on
+    /// [`kind`](Self::kind).
+    pub fn provider_kind(&self) -> Option<ProviderErrorKind>
+    where
+        E: ProviderError,
+    {
+        self.kind.provider_kind()
     }
 
     /// Consumes the error and returns its cause, dropping the partial
