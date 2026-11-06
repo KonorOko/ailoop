@@ -29,7 +29,7 @@
 //! - [`RetryingModel`], [`Retryable`], [`RetryConfig`] — backoff
 //!   decorator that wraps any [`CompletionModel`].
 //! - [`ProviderError`] — provider-agnostic classification of model
-//!   errors (context overflow) for callers above the model.
+//!   errors ([`ProviderErrorKind`]) for callers above the model.
 
 #![deny(missing_docs)]
 
@@ -61,7 +61,7 @@ pub use middleware::{
     ChatMiddleware, ContinueDecision, HookAction, RunErrorInfo, RunFinishedInfo, RunStartInfo,
     StepInfo, ToolCallInfo, ToolDecision, TurnEndInfo,
 };
-pub use provider_error::ProviderError;
+pub use provider_error::{Capability, ProviderError, ProviderErrorKind};
 pub use request::{ChatRequest, ReasoningEffort, ToolChoice, ToolDefinition, ToolTag};
 pub use retry::{RetryClassification, RetryConfig, Retryable, RetryingModel};
 pub use stream::{AbortReason, FinishReason, StreamChunk, ToolProgress, Usage};
