@@ -118,6 +118,7 @@ fn tool_call_turn(id: &str) -> ScriptedTurn {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }),
     ])
 }
@@ -129,6 +130,7 @@ fn text_turn(text: &str) -> ScriptedTurn {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }),
     ])
 }
@@ -1118,6 +1120,7 @@ async fn resume_does_not_run_the_pre_run_compaction() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }),
     ]);
     let (model, _) = RecordingModel::new(vec![suspending_turn, text_turn("done")]);

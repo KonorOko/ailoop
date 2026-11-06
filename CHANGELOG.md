@@ -43,6 +43,29 @@ and this project adheres to
 - `AnthropicChatModel::thinking_mode(ThinkingMode::Budget | Adaptive)`
   forces the wire shape for ids the model list cannot read, such as an
   alias behind a proxy.
+- `AnthropicChatModel::server_fallbacks(true)` opts into Anthropic's
+  server-side fallbacks: every request sends the
+  `server-side-fallback-2026-07-01` beta header and `"fallbacks":
+  "default"`, so a request a safety classifier declines is re-run on the
+  model Anthropic recommends for that refusal category. It is sent for
+  every model id and never dropped silently. A `fallbacks` key in
+  `additional_params` replaces `"default"`.
+- `FinishReason::Refusal`: the provider declined to answer. Anthropic's
+  `stop_reason: "refusal"` used to arrive as `Other("refusal")`.
+- `StreamChunk::TurnFinished` has a `model: Option<String>` field with the
+  model that produced the turn, as the provider reports it. The Anthropic
+  adapter reads it from `message_start` and from the `fallback` block, so
+  after a server-side fallback it names the fallback model. `JsonTracer`
+  writes it to `turn_finished` and `TracingMiddleware` logs it.
+
+### Changed (BREAKING)
+
+- `StreamChunk::TurnFinished` gains the `model` field. Code that builds
+  the variant (scripted models, test fixtures, custom adapters) must set
+  it, usually to `None`; patterns that list every field need `model` or
+  `..`.
+- `ailoop-anthropic`: a `refusal` stop reason is now
+  `FinishReason::Refusal` instead of `FinishReason::Other("refusal")`.
 
 - `ProviderErrorKind` and `ProviderError::kind()` say what went wrong at
   the provider without downcasting the adapter's error: `Network`,

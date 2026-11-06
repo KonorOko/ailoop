@@ -71,6 +71,7 @@ async fn on_chunk_mut_mutation_visible_to_subsequent_on_chunk() {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ]]);
 
@@ -130,6 +131,7 @@ async fn all_chunk_muts_run_before_any_observer() {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ]]);
 
@@ -224,12 +226,14 @@ async fn on_before_tool_call_mut_mutation_visible_to_tool_and_observer() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let turn2 = vec![StreamChunk::TurnFinished {
         reason: FinishReason::EndTurn,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     }];
     let model = ScriptedModel::new([turn1, turn2]);
 
@@ -328,12 +332,14 @@ async fn on_after_tool_call_mut_mutation_visible_to_observer_and_history() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let turn2 = vec![StreamChunk::TurnFinished {
         reason: FinishReason::EndTurn,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     }];
     let model = ScriptedModel::new([turn1, turn2]);
 
@@ -395,6 +401,7 @@ async fn run_outcome_final_text_reflects_chunk_mutation() {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ]]);
 
@@ -433,6 +440,7 @@ async fn replacing_run_finished_variant_is_ignored() {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ]]);
 

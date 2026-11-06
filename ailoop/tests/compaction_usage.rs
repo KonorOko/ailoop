@@ -38,6 +38,7 @@ fn text_turn(text: &str, usage: Usage) -> ScriptedTurn {
             reason: FinishReason::EndTurn,
             usage,
             service_tier: None,
+            model: None,
         }),
     ])
 }
@@ -61,6 +62,7 @@ fn call_turn(tool: &str, args: Value, usage: Usage) -> ScriptedTurn {
             reason: FinishReason::ToolUse,
             usage,
             service_tier: None,
+            model: None,
         }),
     ])
 }

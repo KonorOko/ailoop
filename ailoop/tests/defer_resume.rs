@@ -142,6 +142,7 @@ fn calls_turn(calls: &[(&str, &str)]) -> Vec<StreamChunk> {
         reason: FinishReason::ToolUse,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     });
     chunks
 }
@@ -153,6 +154,7 @@ fn text_turn(text: &str) -> Vec<StreamChunk> {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ]
 }
@@ -599,6 +601,7 @@ async fn suspended_sub_agent_is_abandoned_and_reports_an_error() {
                 reason: FinishReason::ToolUse,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ]
     };
