@@ -168,7 +168,7 @@ pub enum UserBlock {
     },
     /// Document content rendered inline (PDF and similar). Anthropic
     /// has a dedicated `document` content type; Chat Completions does
-    /// not, so the Azure adapter surfaces a typed
+    /// not, so the OpenAI adapter surfaces a typed
     /// `UnsupportedContent` error and callers downgrade via
     /// `ChatMiddleware::on_chat_request` if they want a text
     /// substitute.

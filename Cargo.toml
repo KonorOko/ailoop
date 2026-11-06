@@ -7,7 +7,6 @@ members = [
     "ailoop-prompts",
     "ailoop-tools",
     "adapters/anthropic",
-    "adapters/azure-openai",
     "adapters/openai",
     "adapters/mcp",
     "examples/basic-chat",
@@ -36,7 +35,6 @@ ailoop-prompts = { path = "ailoop-prompts", version = "1.0.0-rc.7" }
 ailoop-history = { path = "ailoop-history", version = "1.0.0-rc.7" }
 ailoop-tools = { path = "ailoop-tools", version = "1.0.0-rc.7" }
 ailoop-anthropic = { path = "adapters/anthropic", version = "1.0.0-rc.7" }
-ailoop-azure-openai = { path = "adapters/azure-openai", version = "1.0.0-rc.7" }
 ailoop-openai = { path = "adapters/openai", version = "1.0.0-rc.7" }
 ailoop-derive = { path = "ailoop-derive", version = "1.0.0-rc.7" }
 ailoop-mcp = { path = "adapters/mcp", version = "1.0.0-rc.7" }
