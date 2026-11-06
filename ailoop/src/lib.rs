@@ -84,15 +84,15 @@ mod sub_agent;
 mod tracing_middleware;
 
 pub use ailoop_core::{
-    AbortReason, AssistantBlock, BackgroundConfig, BackgroundToolResult, CacheControl, CallState,
-    CancellationToken, Capability, CharTokenizer, ChatMiddleware, ChatRequest, CompletionClient,
-    CompletionModel, ContinueDecision, DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_TOKENS, FinishReason,
-    HookAction, Inbound, Message, ProviderError, ProviderErrorKind, ReasoningEffort, Resume,
-    ResumeDecision, ResumeError, RetryClassification, RetryConfig, Retryable, RetryingModel,
-    RunConfig, RunControl, RunErrorInfo, RunFinishedInfo, RunId, RunStartInfo, Source, StepId,
-    StepInfo, StreamChunk, SuspendedCall, Suspension, SystemBlock, SystemPrompt, Tokenizer,
-    ToolCallInfo, ToolChoice, ToolDecision, ToolDefinition, ToolProgress, ToolResultBlock,
-    ToolResultContent, ToolTag, TurnEndInfo, Usage, UserBlock,
+    AbortReason, AssistantBlock, BackgroundConfig, BackgroundToolResult, BoxedError, BoxedModel,
+    CacheControl, CallState, CancellationToken, Capability, CharTokenizer, ChatMiddleware,
+    ChatRequest, CompletionClient, CompletionModel, ContinueDecision, DEFAULT_MAX_ITERATIONS,
+    DEFAULT_MAX_TOKENS, FinishReason, HookAction, Inbound, Message, ProviderError,
+    ProviderErrorKind, ReasoningEffort, Resume, ResumeDecision, ResumeError, RetryClassification,
+    RetryConfig, Retryable, RetryingModel, RunConfig, RunControl, RunErrorInfo, RunFinishedInfo,
+    RunId, RunStartInfo, Source, StepId, StepInfo, StreamChunk, SuspendedCall, Suspension,
+    SystemBlock, SystemPrompt, Tokenizer, ToolCallInfo, ToolChoice, ToolDecision, ToolDefinition,
+    ToolProgress, ToolResultBlock, ToolResultContent, ToolTag, TurnEndInfo, Usage, UserBlock,
 };
 pub use ailoop_derive::{ToolJsonType, ailoop_tool};
 pub use ailoop_history::{

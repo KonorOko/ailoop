@@ -28,12 +28,15 @@
 //!   provider adapter implements.
 //! - [`RetryingModel`], [`Retryable`], [`RetryConfig`] — backoff
 //!   decorator that wraps any [`CompletionModel`].
+//! - [`BoxedModel`], [`BoxedError`] — a [`CompletionModel`] with its
+//!   type erased, for picking a provider at runtime.
 //! - [`ProviderError`] — provider-agnostic classification of model
 //!   errors ([`ProviderErrorKind`]) for callers above the model.
 
 #![deny(missing_docs)]
 
 mod background;
+mod boxed;
 mod config;
 mod control;
 mod ids;
@@ -50,6 +53,7 @@ mod tokenizer;
 mod traits;
 
 pub use background::{BackgroundConfig, BackgroundToolResult};
+pub use boxed::{BoxedError, BoxedModel};
 pub use config::{DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_TOKENS, RunConfig};
 pub use control::{BackgroundEnd, Drained, Inbound, RunControl};
 pub use ids::{RunId, StepId};

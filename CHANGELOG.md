@@ -152,6 +152,20 @@ and this project adheres to
   --test openai_azure -- --ignored`, with `AZURE_OPENAI_ENDPOINT`, one
   of `AZURE_OPENAI_API_KEY` or `AZURE_OPENAI_TOKEN`, and
   `AILOOP_AZURE_DEPLOYMENT`.
+- `BoxedModel`, a `CompletionModel` with its type erased, for code that
+  picks a provider at runtime and stores the models in one field, `Vec`
+  or map. `BoxedModel::new(model)` takes any model whose error
+  implements `ProviderError` and `Retryable`. The model sits behind an
+  `Arc`, so `clone()` is cheap and clones share it. Wrapping a
+  `BoxedModel` again adds no layer. Re-exported from `ailoop`.
+- `BoxedError`, the error of a `BoxedModel`, from opening the stream and
+  mid-stream alike. It reads `kind()` and `retry_classification()` once,
+  when it wraps the original error, so `RetryingModel<BoxedModel>`
+  retries and `SummarizeStrategy<BoxedModel>` compacts exactly like the
+  typed model. `Display` is the original error's text, `source()` is the
+  original error, and `downcast_ref`, `downcast` and `into_inner` give
+  it back. A compaction error from a boxed summarizer has the
+  `BoxedError` as its `source()`, one level above the adapter's error.
 
 ### Removed (BREAKING)
 
