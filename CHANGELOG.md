@@ -36,6 +36,54 @@ and this project adheres to
   forces the wire shape for ids the model list cannot read, such as an
   alias behind a proxy.
 
+- `ProviderErrorKind` and `ProviderError::kind()` say what went wrong at
+  the provider without downcasting the adapter's error: `Network`,
+  `Auth`, `Permission`, `RateLimited`, `Unavailable`, `QuotaExhausted`,
+  `ContextOverflow`, `RequestTooLarge`, `ContentFilter`, `ModelNotFound`,
+  `Unsupported(Capability)`, `Interrupted`, `InvalidRequest` and `Other`.
+  The enum is `Copy`, `#[non_exhaustive]` and carries no data: how long
+  to wait stays in `Retryable::retry_classification()`, so combine the
+  two. `Capability` (`Images`, `Tools`) is `#[non_exhaustive]` too. Both
+  are re-exported from `ailoop`.
+- `kind()` is the primitive. `is_context_overflow()` now defaults to
+  `kind() == ContextOverflow`, so an adapter implements only `kind()`.
+  `kind()` defaults to `Other`, so an existing impl that overrides only
+  `is_context_overflow()` keeps compiling and behaving the same.
+- `AnthropicError` and `AzureOpenAIError` implement `kind()`. HTTP
+  envelopes and mid-stream error events map from their typed kind
+  (`AnthropicApiErrorKind::provider_kind()`,
+  `AzureOpenAIApiErrorKind::provider_kind()`), and a body that is not an
+  error envelope maps from its status (401, 403, 404, 413, 429, 5xx).
+  `Http` and an SSE transport failure are `Network`; other SSE failures,
+  `Json`, `Config` and Azure's `UnsupportedContent` are `Other`. Azure's
+  `DeploymentNotFound` and `NotFound` are `ModelNotFound`, and its
+  `ContentFilter` is `ContentFilter`.
+- `AnthropicApiErrorKind::InsufficientCredit`: `from_error` recognises an
+  exhausted credit balance by the `"credit balance"` phrase in the
+  message (on an `invalid_request_error`, a `permission_error` or an
+  unknown type). Its kind is `QuotaExhausted` and it is `Permanent`;
+  before, it was a plain `InvalidRequest`.
+- `EngineError::provider_kind()` and `RunError::provider_kind()` return
+  the provider's kind for `EngineError::Model` and
+  `EngineError::ContextOverflow`, and `None` for the other variants.
+- `CompactionError::SummarizationFailed` has a `kind` field, the
+  summarizer error's `ProviderErrorKind`, read with
+  `CompactionError::provider_kind()`. `summarization_failed_from` fills
+  it; `summarization_failed` leaves it `None`.
+- `ScriptedError` markers for every kind: `network`, `auth`,
+  `permission`, `rate_limited`, `unavailable`, `quota`,
+  `context_overflow`, `request_too_large`, `content_filter`,
+  `model_not_found`, `unsupported:images`, `unsupported:tools`,
+  `interrupted`, `invalid_request` and `other`. A marker counts only at
+  the start of the message, alone or followed by `:`, so
+  `"network outage"` is not `network`. `Retryable` reads them the way a
+  real adapter classifies the kind: `network`, `rate_limited`,
+  `unavailable` and `interrupted` are transient, with an optional
+  `:<ms>` delay in milliseconds, and the rest are permanent.
+  `ScriptedError::of(kind, Option<Duration>)` writes the marker. The
+  older `permanent`, `transient[:<ms>]` and `context_overflow` anywhere
+  in the message still work.
+
 ### Changed
 
 - On adaptive Anthropic models, `ReasoningEffort::Minimal` is sent as
@@ -45,6 +93,12 @@ and this project adheres to
 - On adaptive Anthropic models, `ReasoningEffort::Budget(n)` is
   bucketised like Chat Completions: below 2048 is `"low"`, below 8192 is
   `"medium"`, otherwise `"high"`. Legacy models still get `n` verbatim.
+
+### Migration
+
+- konor-kit style markers in seconds (`rate_limit:<seconds>`) become
+  `rate_limited:<ms>`, or `ScriptedError::of(ProviderErrorKind::RateLimited,
+  Some(delay))`.
 
 ## [1.0.0-rc.7] — 2026-11-04
 

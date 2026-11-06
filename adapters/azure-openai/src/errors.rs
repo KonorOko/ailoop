@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ailoop_core::{ProviderError, RetryClassification, Retryable};
+use ailoop_core::{ProviderError, ProviderErrorKind, RetryClassification, Retryable};
 use reqwest::StatusCode;
 
 /// Discriminated category of an HTTP-level Azure OpenAI API error,
@@ -69,6 +69,25 @@ impl AzureOpenAIApiErrorKind {
             "DeploymentNotFound" => Self::DeploymentNotFound,
             "server_error" | "InternalServerError" => Self::ServerError,
             other => Self::Other(other.to_string()),
+        }
+    }
+
+    /// The provider-agnostic [`ProviderErrorKind`] for this kind.
+    /// [`DeploymentNotFound`](Self::DeploymentNotFound) and
+    /// [`NotFound`](Self::NotFound) are both
+    /// [`ModelNotFound`](ProviderErrorKind::ModelNotFound), since a
+    /// deployment is how Azure serves a model.
+    pub fn provider_kind(&self) -> ProviderErrorKind {
+        match self {
+            Self::RateLimit => ProviderErrorKind::RateLimited,
+            Self::InvalidRequest => ProviderErrorKind::InvalidRequest,
+            Self::ContextOverflow => ProviderErrorKind::ContextOverflow,
+            Self::ContentFilter => ProviderErrorKind::ContentFilter,
+            Self::Authentication => ProviderErrorKind::Auth,
+            Self::Permission => ProviderErrorKind::Permission,
+            Self::NotFound | Self::DeploymentNotFound => ProviderErrorKind::ModelNotFound,
+            Self::ServerError => ProviderErrorKind::Unavailable,
+            Self::Other(_) => ProviderErrorKind::Other,
         }
     }
 }
@@ -212,21 +231,48 @@ impl Retryable for AzureOpenAIError {
     }
 }
 
+/// Kind for a response whose body is not Azure's error envelope, read
+/// from the status alone.
+fn kind_from_status(status: StatusCode) -> ProviderErrorKind {
+    match status.as_u16() {
+        401 => ProviderErrorKind::Auth,
+        403 => ProviderErrorKind::Permission,
+        404 => ProviderErrorKind::ModelNotFound,
+        413 => ProviderErrorKind::RequestTooLarge,
+        429 => ProviderErrorKind::RateLimited,
+        500..=599 => ProviderErrorKind::Unavailable,
+        _ => ProviderErrorKind::Other,
+    }
+}
+
 impl ProviderError for AzureOpenAIError {
-    /// `true` for [`AzureOpenAIApiErrorKind::ContextOverflow`], whether
-    /// it arrived as an HTTP error envelope or as a mid-stream error
-    /// event.
-    fn is_context_overflow(&self) -> bool {
-        matches!(
-            self,
-            AzureOpenAIError::Api {
-                kind: AzureOpenAIApiErrorKind::ContextOverflow,
-                ..
-            } | AzureOpenAIError::Provider {
-                kind: AzureOpenAIApiErrorKind::ContextOverflow,
-                ..
+    /// - [`Api`](AzureOpenAIError::Api) and
+    ///   [`Provider`](AzureOpenAIError::Provider): from their
+    ///   [`AzureOpenAIApiErrorKind`] (see
+    ///   [`AzureOpenAIApiErrorKind::provider_kind`]), whether it arrived
+    ///   as an HTTP error envelope or as a mid-stream error event.
+    /// - [`Status`](AzureOpenAIError::Status): from the HTTP status.
+    /// - [`Http`](AzureOpenAIError::Http) and an SSE transport failure:
+    ///   [`Network`](ProviderErrorKind::Network).
+    /// - Any other SSE failure, [`Json`](AzureOpenAIError::Json),
+    ///   [`Config`](AzureOpenAIError::Config) and
+    ///   [`UnsupportedContent`](AzureOpenAIError::UnsupportedContent):
+    ///   [`Other`](ProviderErrorKind::Other).
+    fn kind(&self) -> ProviderErrorKind {
+        match self {
+            AzureOpenAIError::Api { kind, .. } | AzureOpenAIError::Provider { kind, .. } => {
+                kind.provider_kind()
             }
-        )
+            AzureOpenAIError::Status { status, .. } => kind_from_status(*status),
+            AzureOpenAIError::Http(_)
+            | AzureOpenAIError::Sse(eventsource_stream::EventStreamError::Transport(_)) => {
+                ProviderErrorKind::Network
+            }
+            AzureOpenAIError::Sse(_)
+            | AzureOpenAIError::Json(_)
+            | AzureOpenAIError::Config(_)
+            | AzureOpenAIError::UnsupportedContent { .. } => ProviderErrorKind::Other,
+        }
     }
 }
 
@@ -434,5 +480,99 @@ mod tests {
             .await,
             3
         );
+    }
+
+    #[test]
+    fn api_kinds_map_to_provider_kinds() {
+        let cases = [
+            (
+                AzureOpenAIApiErrorKind::RateLimit,
+                ProviderErrorKind::RateLimited,
+            ),
+            (
+                AzureOpenAIApiErrorKind::InvalidRequest,
+                ProviderErrorKind::InvalidRequest,
+            ),
+            (
+                AzureOpenAIApiErrorKind::ContextOverflow,
+                ProviderErrorKind::ContextOverflow,
+            ),
+            (
+                AzureOpenAIApiErrorKind::ContentFilter,
+                ProviderErrorKind::ContentFilter,
+            ),
+            (
+                AzureOpenAIApiErrorKind::Authentication,
+                ProviderErrorKind::Auth,
+            ),
+            (
+                AzureOpenAIApiErrorKind::Permission,
+                ProviderErrorKind::Permission,
+            ),
+            (
+                AzureOpenAIApiErrorKind::NotFound,
+                ProviderErrorKind::ModelNotFound,
+            ),
+            (
+                AzureOpenAIApiErrorKind::DeploymentNotFound,
+                ProviderErrorKind::ModelNotFound,
+            ),
+            (
+                AzureOpenAIApiErrorKind::ServerError,
+                ProviderErrorKind::Unavailable,
+            ),
+            (
+                AzureOpenAIApiErrorKind::Other("future".into()),
+                ProviderErrorKind::Other,
+            ),
+        ];
+        for (api, expected) in cases {
+            let http = AzureOpenAIError::Api {
+                status: StatusCode::BAD_REQUEST,
+                kind: api.clone(),
+                message: String::new(),
+                retry_after: None,
+            };
+            let event = AzureOpenAIError::Provider {
+                kind: api.clone(),
+                message: String::new(),
+            };
+            assert_eq!(http.kind(), expected, "{api:?}");
+            assert_eq!(event.kind(), expected, "{api:?}");
+        }
+    }
+
+    #[test]
+    fn status_fallback_kind_comes_from_the_status() {
+        let cases = [
+            (401, ProviderErrorKind::Auth),
+            (403, ProviderErrorKind::Permission),
+            (404, ProviderErrorKind::ModelNotFound),
+            (413, ProviderErrorKind::RequestTooLarge),
+            (429, ProviderErrorKind::RateLimited),
+            (503, ProviderErrorKind::Unavailable),
+            (400, ProviderErrorKind::Other),
+        ];
+        for (status, expected) in cases {
+            let err = AzureOpenAIError::Status {
+                status: StatusCode::from_u16(status).unwrap(),
+                body: "<html/>".into(),
+            };
+            assert_eq!(err.kind(), expected, "{status}");
+        }
+    }
+
+    #[test]
+    fn local_failures_are_other() {
+        let json = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        assert_eq!(
+            AzureOpenAIError::Json(json).kind(),
+            ProviderErrorKind::Other
+        );
+        let utf8 = String::from_utf8(vec![0xff]).unwrap_err();
+        let sse = AzureOpenAIError::Sse(eventsource_stream::EventStreamError::Utf8(utf8));
+        assert_eq!(sse.kind(), ProviderErrorKind::Other);
+        let unsupported = AzureOpenAIError::UnsupportedContent { kind: "document" };
+        assert_eq!(unsupported.kind(), ProviderErrorKind::Other);
     }
 }
