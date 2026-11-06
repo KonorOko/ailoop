@@ -42,23 +42,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ailoop-azure-openai"
-version = "1.0.0-rc.7"
-dependencies = [
- "ailoop-core",
- "async-stream",
- "async-trait",
- "dotenvy",
- "eventsource-stream",
- "futures",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "ailoop-core"
 version = "1.0.0-rc.7"
 dependencies = [
@@ -104,6 +87,7 @@ version = "0.1.0"
 dependencies = [
  "ailoop",
  "ailoop-anthropic",
+ "ailoop-core",
  "ailoop-openai",
  "futures",
  "serde",
