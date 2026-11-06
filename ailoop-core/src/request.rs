@@ -182,46 +182,64 @@ impl ToolDefinition {
 /// answering.
 ///
 /// OpenAI/Azure exposes this as a categorical `reasoning_effort` string
-/// (`"minimal" | "low" | "medium" | "high"`); Anthropic exposes a
-/// `thinking.budget_tokens` integer. The variants below cover both
-/// shapes, with the per-adapter mapping documented inline so the
-/// translation is predictable rather than magic:
+/// (`"minimal" | "low" | "medium" | "high"`). Anthropic has two shapes:
+/// current models (Claude 4.6 and later) take adaptive thinking,
+/// `thinking: {"type":"adaptive"}` plus `output_config.effort`, and
+/// reject `budget_tokens` with a 400; legacy models (Claude 4.5 and
+/// earlier, Claude 3) take `thinking.budget_tokens`. The Anthropic
+/// adapter picks the shape from the model id. The per-adapter mapping:
 ///
-/// | Variant       | OpenAI / Azure          | Anthropic (`budget_tokens`) |
-/// |---------------|-------------------------|------------------------------|
-/// | `Minimal`     | `"minimal"`             | `thinking.type = "disabled"` |
-/// | `Low`         | `"low"`                 | `1024` (Anthropic minimum)   |
-/// | `Medium`      | `"medium"`              | `4096`                       |
-/// | `High`        | `"high"`                | `16384`                      |
-/// | `Budget(n)`   | `< 2048 → "low"`,<br/>`< 8192 → "medium"`,<br/>`≥ 8192 → "high"` | `n` (verbatim) |
+/// | Variant     | OpenAI / Azure | Anthropic adaptive (`effort`) | Anthropic legacy (`budget_tokens`) |
+/// |-------------|----------------|-------------------------------|------------------------------------|
+/// | `Minimal`   | `"minimal"`    | `"low"` (thinking stays on)   | `thinking.type = "disabled"`       |
+/// | `Low`       | `"low"`        | `"low"`                       | `1024` (Anthropic minimum)         |
+/// | `Medium`    | `"medium"`     | `"medium"`                    | `4096`                             |
+/// | `High`      | `"high"`       | `"high"`                      | `16384`                            |
+/// | `XHigh`     | `"high"`       | `"xhigh"`                     | `32768`                            |
+/// | `Max`       | `"high"`       | `"max"`                       | `65536`                            |
+/// | `Budget(n)` | `< 2048 → "low"`,<br/>`< 8192 → "medium"`,<br/>`≥ 8192 → "high"` | same buckets as OpenAI | `n` (verbatim) |
 ///
-/// Use `Budget(n)` when you want exact control over Anthropic's
-/// `budget_tokens`. The OpenAI side then bucketises into the closest
+/// `Budget(n)` gives exact control over `budget_tokens` on legacy
+/// Anthropic models. Everywhere else it is bucketised into the closest
 /// categorical effort — a deliberately opinionated mapping so the same
-/// `ChatRequest` works against either adapter without falling back to
-/// [`ChatRequest::additional_params`]. If you need a budget outside
-/// the bucketing, the escape hatch is still available.
+/// `ChatRequest` works against every adapter without falling back to
+/// [`ChatRequest::additional_params`]. If you need a value outside the
+/// mapping, the escape hatch is still available.
 ///
 /// Providers that do not surface a reasoning control ignore the field
 /// entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReasoningEffort {
-    /// OpenAI: `"minimal"`. Anthropic: explicit `thinking.type =
-    /// "disabled"` on the wire.
+    /// OpenAI: `"minimal"`. Anthropic legacy models: explicit
+    /// `thinking.type = "disabled"`. Anthropic adaptive models:
+    /// `effort = "low"` — those models cannot turn thinking off (or
+    /// reject a request that tries), so `Minimal` does **not** disable
+    /// thinking there; it asks for the least of it.
     Minimal,
-    /// OpenAI: `"low"`. Anthropic: `budget_tokens = 1024` (the API
-    /// minimum for enabled thinking).
+    /// OpenAI: `"low"`. Anthropic: `effort = "low"`, or
+    /// `budget_tokens = 1024` (the API minimum) on legacy models.
     Low,
-    /// OpenAI: `"medium"`. Anthropic: `budget_tokens = 4096`.
+    /// OpenAI: `"medium"`. Anthropic: `effort = "medium"`, or
+    /// `budget_tokens = 4096` on legacy models.
     Medium,
-    /// OpenAI: `"high"`. Anthropic: `budget_tokens = 16384`.
+    /// OpenAI: `"high"`. Anthropic: `effort = "high"`, or
+    /// `budget_tokens = 16384` on legacy models.
     High,
-    /// Anthropic-native exact budget. OpenAI bucketises: values below
-    /// `2048` map to `"low"`, below `8192` to `"medium"`, otherwise to
-    /// `"high"`. Anthropic requires at least `1024`; values below that
-    /// are still forwarded verbatim so the API returns a
-    /// caller-actionable error rather than silently rounding.
+    /// Between `High` and `Max`. OpenAI: `"high"`. Anthropic:
+    /// `effort = "xhigh"` (sent as `"high"` to Claude Opus 4.6 and
+    /// Sonnet 4.6, which predate it), or `budget_tokens = 32768` on
+    /// legacy models.
+    XHigh,
+    /// The deepest setting. OpenAI: `"high"`. Anthropic:
+    /// `effort = "max"`, or `budget_tokens = 65536` on legacy models.
+    Max,
+    /// Exact thinking budget. Anthropic legacy models get it verbatim
+    /// as `budget_tokens` (the API requires at least `1024`; smaller
+    /// values are still forwarded so the API returns a
+    /// caller-actionable error rather than silently rounding).
+    /// Everywhere else it bucketises: values below `2048` map to
+    /// `"low"`, below `8192` to `"medium"`, otherwise to `"high"`.
     Budget(u32),
 }
 

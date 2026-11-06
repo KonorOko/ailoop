@@ -8,6 +8,44 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- `ailoop-anthropic`: `ReasoningEffort` no longer gets a 400 on current
+  Claude models. Claude 4.6 and later reject `thinking.budget_tokens`, so
+  they now receive `thinking: {"type":"adaptive"}` and
+  `output_config.effort`. `budget_tokens` is only sent to a closed list
+  of legacy models: Claude 4.5 and earlier (`claude-haiku-4-5`,
+  `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-opus-4-1`,
+  `claude-*-4-0`) and the `claude-3-*` family, in their bare, dated,
+  Vertex (`@`) and Bedrock (`anthropic.`) spellings. Any other id,
+  including unknown ones, is treated as adaptive.
+- `ailoop-anthropic`: `additional_params.output_config` is now merged key
+  by key into the `output_config` the adapter builds, so passing
+  `output_config.format` or `task_budget` no longer drops the typed
+  `effort`. A key set on both sides takes the `additional_params` value.
+  Every other key still replaces the typed value wholesale.
+
+### Added
+
+- `ReasoningEffort::XHigh` and `ReasoningEffort::Max`. On adaptive
+  Anthropic models they send `"xhigh"` and `"max"` (`XHigh` is sent as
+  `"high"` to Claude Opus 4.6 and Sonnet 4.6, which predate it); on
+  legacy models they send `budget_tokens` 32768 and 65536. Chat
+  Completions (`ailoop-azure-openai`) sends both as `"high"`.
+- `AnthropicChatModel::thinking_mode(ThinkingMode::Budget | Adaptive)`
+  forces the wire shape for ids the model list cannot read, such as an
+  alias behind a proxy.
+
+### Changed
+
+- On adaptive Anthropic models, `ReasoningEffort::Minimal` is sent as
+  `effort: "low"` and does **not** turn thinking off: those models cannot
+  disable it, and several reject `{"type":"disabled"}` with a 400. On
+  legacy models it still sends `{"type":"disabled"}`.
+- On adaptive Anthropic models, `ReasoningEffort::Budget(n)` is
+  bucketised like Chat Completions: below 2048 is `"low"`, below 8192 is
+  `"medium"`, otherwise `"high"`. Legacy models still get `n` verbatim.
+
 ## [1.0.0-rc.7] — 2026-11-04
 
 This release is about history compaction, and most of its breaking
