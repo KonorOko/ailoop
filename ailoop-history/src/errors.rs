@@ -2,7 +2,7 @@
 
 use std::error::Error as StdError;
 
-use ailoop_core::{ProviderError, Usage};
+use ailoop_core::{ProviderError, ProviderErrorKind, Usage};
 use thiserror::Error;
 
 /// Failure surface of [`CompactionStrategy::compact`] (and therefore of
@@ -35,7 +35,8 @@ pub enum CompactionError {
     /// `Box<dyn CompactionStrategy>`, so the model's error is boxed.
     /// Read it through [`std::error::Error::source`] and
     /// `downcast_ref`. Use [`CompactionError::is_context_overflow`] to
-    /// tell whether the summary request itself was too large, since
+    /// tell whether the summary request itself was too large, and
+    /// [`CompactionError::provider_kind`] for what went wrong, since
     /// [`ProviderError`] cannot be queried through a boxed error.
     ///
     /// Build it with [`CompactionError::summarization_failed_from`] or
@@ -49,6 +50,11 @@ pub enum CompactionError {
         /// `true` when the model rejected the summary request because
         /// it did not fit the context window.
         context_overflow: bool,
+        /// The model error's [`ProviderError::kind`], taken when the
+        /// error was wrapped. `None` for a failure that no model error
+        /// caused, or one built with
+        /// [`CompactionError::summarization_failed`].
+        kind: Option<ProviderErrorKind>,
         /// The original error, when there is one. `None` for a failure
         /// that no error caused, such as a summary with no text.
         source: Option<Box<dyn StdError + Send + Sync>>,
@@ -74,6 +80,7 @@ impl CompactionError {
         Self::SummarizationFailed {
             message: message.into(),
             context_overflow,
+            kind: None,
             source,
             usage: Usage::default(),
         }
@@ -81,8 +88,9 @@ impl CompactionError {
 
     /// Build a [`CompactionError::SummarizationFailed`] from a model
     /// error: its `Display` text becomes the message, its
-    /// [`ProviderError::is_context_overflow`] the overflow flag, and
-    /// the error itself the source. Its usage is zero until
+    /// [`ProviderError::is_context_overflow`] the overflow flag, its
+    /// [`ProviderError::kind`] the kind, and the error itself the
+    /// source. Its usage is zero until
     /// [`CompactionError::with_usage`] sets it.
     pub fn summarization_failed_from<E>(error: E) -> Self
     where
@@ -91,6 +99,7 @@ impl CompactionError {
         Self::SummarizationFailed {
             message: error.to_string(),
             context_overflow: error.is_context_overflow(),
+            kind: Some(error.kind()),
             source: Some(Box::new(error)),
             usage: Usage::default(),
         }
@@ -113,6 +122,18 @@ impl CompactionError {
         match self {
             Self::SummarizationFailed { usage, .. } => *usage,
             _ => Usage::default(),
+        }
+    }
+
+    /// The [`ProviderError::kind`] of the model error that made a
+    /// [`CompactionError::SummarizationFailed`], when one did. `None`
+    /// for every other variant, for a failure that no model error
+    /// caused, and for one built with
+    /// [`CompactionError::summarization_failed`].
+    pub fn provider_kind(&self) -> Option<ProviderErrorKind> {
+        match self {
+            Self::SummarizationFailed { kind, .. } => *kind,
+            _ => None,
         }
     }
 
@@ -186,6 +207,7 @@ mod tests {
             let err = CompactionError::summarization_failed_from(RejectedError { overflow });
 
             assert_eq!(err.is_context_overflow(), overflow);
+            assert_eq!(err.provider_kind(), Some(ProviderErrorKind::Other));
             assert_eq!(err.to_string(), "Summarization failed: request rejected");
             let source = err
                 .source()
@@ -217,6 +239,34 @@ mod tests {
     #[test]
     fn not_enough_history_is_not_an_overflow() {
         assert!(!CompactionError::NotEnoughHistory.is_context_overflow());
+        assert_eq!(CompactionError::NotEnoughHistory.provider_kind(), None);
+    }
+
+    #[derive(Debug)]
+    struct Throttled;
+
+    impl fmt::Display for Throttled {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("slow down")
+        }
+    }
+
+    impl StdError for Throttled {}
+
+    impl ProviderError for Throttled {
+        fn kind(&self) -> ProviderErrorKind {
+            ProviderErrorKind::RateLimited
+        }
+    }
+
+    #[test]
+    fn summarization_failed_from_keeps_the_provider_kind() {
+        let err = CompactionError::summarization_failed_from(Throttled);
+        assert_eq!(err.provider_kind(), Some(ProviderErrorKind::RateLimited));
+        assert!(!err.is_context_overflow());
+
+        let err = CompactionError::summarization_failed("no text", false, None);
+        assert_eq!(err.provider_kind(), None);
     }
 
     fn spent() -> Usage {
