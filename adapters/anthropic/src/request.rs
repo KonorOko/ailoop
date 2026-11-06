@@ -1,12 +1,14 @@
 use std::time::Duration;
 
 use ailoop_core::{
-    AssistantBlock, CacheControl, ChatRequest, Message, ReasoningEffort, Source, SystemBlock,
-    SystemPrompt, ToolChoice, ToolDefinition, ToolResultBlock, UserBlock,
+    AssistantBlock, CacheControl, ChatRequest, Message, Source, SystemBlock, SystemPrompt,
+    ToolChoice, ToolDefinition, ToolResultBlock, UserBlock,
 };
 use serde_json::{Value, json};
 
-pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
+use crate::thinking::{Shape, lower};
+
+pub(crate) fn build_body(model: &str, req: &ChatRequest, shape: Shape) -> serde_json::Value {
     let mut body = serde_json::Map::new();
     body.insert("model".into(), json!(model));
     body.insert("max_tokens".into(), json!(req.max_tokens));
@@ -50,16 +52,19 @@ pub fn build_body(model: &str, req: &ChatRequest) -> serde_json::Value {
     }
 
     if let Some(effort) = req.reasoning_effort
-        && let Some(thinking) = to_anthropic_thinking(effort)
+        && let Some(lowered) = lower(effort, shape)
     {
-        body.insert("thinking".into(), thinking);
+        body.insert("thinking".into(), lowered.thinking);
+        if let Some(level) = lowered.effort {
+            body.insert("output_config".into(), json!({ "effort": level }));
+        }
     }
 
     if let Some(extra) = &req.additional_params
         && let Some(map) = extra.as_object()
     {
         for (k, v) in map {
-            body.insert(k.clone(), v.clone());
+            merge_param(&mut body, k, v);
         }
     }
 
@@ -327,22 +332,34 @@ fn to_anthropic_tool_choice(
     serde_json::Value::Object(obj)
 }
 
-/// Lower a [`ReasoningEffort`] into Anthropic's `thinking` object.
-/// `Minimal` emits explicit `{"type":"disabled"}` so the wire is
-/// unambiguous; the other variants map to `{"type":"enabled","budget_tokens":N}`
-/// using the budgets documented on [`ReasoningEffort`]. Returns `None`
-/// for unknown future variants so the field is dropped from the body
-/// rather than emitted as `null`.
-fn to_anthropic_thinking(effort: ReasoningEffort) -> Option<Value> {
-    match effort {
-        ReasoningEffort::Minimal => Some(json!({ "type": "disabled" })),
-        ReasoningEffort::Low => Some(json!({ "type": "enabled", "budget_tokens": 1024 })),
-        ReasoningEffort::Medium => Some(json!({ "type": "enabled", "budget_tokens": 4096 })),
-        ReasoningEffort::High => Some(json!({ "type": "enabled", "budget_tokens": 16384 })),
-        ReasoningEffort::Budget(n) => Some(json!({ "type": "enabled", "budget_tokens": n })),
-        // Future variants degrade to no `thinking` field on the wire so
-        // the request still validates instead of failing the build.
-        _ => None,
+/// Apply one `additional_params` entry. Most keys replace the typed
+/// value, as before. `output_config` is merged key by key (recursively),
+/// so passing `output_config.format` or `output_config.task_budget` does
+/// not drop the `effort` that [`ChatRequest::reasoning_effort`] set; a
+/// key present on both sides takes the `additional_params` value.
+fn merge_param(body: &mut serde_json::Map<String, Value>, key: &str, value: &Value) {
+    if key == "output_config"
+        && let Some(existing) = body.get_mut(key)
+    {
+        deep_merge(existing, value);
+    } else {
+        body.insert(key.to_owned(), value.clone());
+    }
+}
+
+fn deep_merge(target: &mut Value, patch: &Value) {
+    match (target, patch) {
+        (Value::Object(t), Value::Object(p)) => {
+            for (k, v) in p {
+                match t.get_mut(k) {
+                    Some(existing) => deep_merge(existing, v),
+                    None => {
+                        t.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        (target, patch) => *target = patch.clone(),
     }
 }
 
@@ -363,15 +380,25 @@ fn to_anthropic_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ailoop_core::ChatRequest;
+    use ailoop_core::{ChatRequest, ReasoningEffort};
 
     fn base_req() -> ChatRequest {
         ChatRequest::new(vec![], 1024)
     }
 
+    fn body_for(req: &ChatRequest) -> Value {
+        build_body("claude", req, Shape::Adaptive { xhigh: true })
+    }
+
+    fn body_on(model: &str, effort: ReasoningEffort) -> Value {
+        let mut req = base_req();
+        req.reasoning_effort = Some(effort);
+        build_body(model, &req, Shape::resolve(model, None))
+    }
+
     #[test]
     fn omits_tool_choice_when_unset() {
-        let body = build_body("claude", &base_req());
+        let body = body_for(&base_req());
         assert!(body.get("tool_choice").is_none());
     }
 
@@ -379,7 +406,7 @@ mod tests {
     fn maps_tool_choice_auto() {
         let mut req = base_req();
         req.tool_choice = Some(ToolChoice::Auto);
-        let body = build_body("claude", &req);
+        let body = body_for(&req);
         assert_eq!(body["tool_choice"], json!({ "type": "auto" }));
     }
 
@@ -387,7 +414,7 @@ mod tests {
     fn maps_tool_choice_any() {
         let mut req = base_req();
         req.tool_choice = Some(ToolChoice::Any);
-        let body = build_body("claude", &req);
+        let body = body_for(&req);
         assert_eq!(body["tool_choice"], json!({ "type": "any" }));
     }
 
@@ -397,7 +424,7 @@ mod tests {
         req.tool_choice = Some(ToolChoice::Tool {
             name: "get_weather".into(),
         });
-        let body = build_body("claude", &req);
+        let body = body_for(&req);
         assert_eq!(
             body["tool_choice"],
             json!({ "type": "tool", "name": "get_weather" })
@@ -408,7 +435,7 @@ mod tests {
     fn maps_tool_choice_none() {
         let mut req = base_req();
         req.tool_choice = Some(ToolChoice::None);
-        let body = build_body("claude", &req);
+        let body = body_for(&req);
         assert_eq!(body["tool_choice"], json!({ "type": "none" }));
     }
 
@@ -420,7 +447,7 @@ mod tests {
     fn serial_tool_use_alone_emits_auto_tool_choice_with_flag() {
         let mut req = base_req();
         req.parallel_tool_use = Some(false);
-        let body = build_body("claude", &req);
+        let body = body_for(&req);
         assert_eq!(
             body["tool_choice"],
             json!({ "type": "auto", "disable_parallel_tool_use": true })
@@ -432,7 +459,7 @@ mod tests {
         let mut req = base_req();
         req.tool_choice = Some(ToolChoice::Any);
         req.parallel_tool_use = Some(false);
-        let body = build_body("claude", &req);
+        let body = body_for(&req);
         assert_eq!(
             body["tool_choice"],
             json!({ "type": "any", "disable_parallel_tool_use": true })
@@ -488,7 +515,7 @@ mod tests {
     fn plain_system_prompt_wires_as_string() {
         let mut req = base_req();
         req.system_prompt = Some(SystemPrompt::from("be helpful"));
-        let body = build_body("claude", &req);
+        let body = body_for(&req);
         assert_eq!(body["system"], json!("be helpful"));
     }
 
@@ -501,7 +528,7 @@ mod tests {
             SystemBlock::new("static prelude").with_cache_control(CacheControl::Ephemeral),
             SystemBlock::new("dynamic suffix"),
         ]));
-        let body = build_body("claude", &req);
+        let body = body_for(&req);
         assert_eq!(
             body["system"],
             json!([
@@ -732,61 +759,233 @@ mod tests {
             )
             .with_cache_control(CacheControl::Ephemeral),
         ]);
-        let body = build_body("claude", &req);
+        let body = body_for(&req);
         let tool = &body["tools"][0];
         assert_eq!(tool["cache_control"], json!({ "type": "ephemeral" }));
     }
 
-    /// Categorical variants map to `thinking.budget_tokens` using the
-    /// budgets documented on `ReasoningEffort`.
+    /// Legacy models (Claude 4.5 and earlier, Claude 3) get
+    /// `thinking.budget_tokens` with the budgets documented on
+    /// `ReasoningEffort`, and no `output_config`.
     #[test]
-    fn reasoning_effort_low_medium_high_emit_documented_budgets() {
-        for (variant, expected_budget) in [
-            (ReasoningEffort::Low, 1024),
-            (ReasoningEffort::Medium, 4096),
-            (ReasoningEffort::High, 16384),
+    fn legacy_models_emit_documented_budgets() {
+        for model in [
+            "claude-haiku-4-5",
+            "claude-sonnet-4-5",
+            "claude-opus-4-5",
+            "claude-opus-4-1",
+            "claude-sonnet-4-20250514",
+            "claude-3-7-sonnet-latest",
         ] {
-            let mut req = base_req();
-            req.reasoning_effort = Some(variant);
-            let body = build_body("claude", &req);
+            for (variant, expected_budget) in [
+                (ReasoningEffort::Low, 1024),
+                (ReasoningEffort::Medium, 4096),
+                (ReasoningEffort::High, 16384),
+                (ReasoningEffort::XHigh, 32768),
+                (ReasoningEffort::Max, 65536),
+                (ReasoningEffort::Budget(7777), 7777),
+            ] {
+                let body = body_on(model, variant);
+                assert_eq!(
+                    body["thinking"],
+                    json!({ "type": "enabled", "budget_tokens": expected_budget }),
+                    "{model} {variant:?} should map to budget {expected_budget}"
+                );
+                assert!(body.get("output_config").is_none(), "{model} {variant:?}");
+            }
+        }
+    }
+
+    /// On legacy models `Minimal` emits explicit `{"type":"disabled"}`
+    /// so the model is told *not* to think — distinct from `None`,
+    /// which omits the field.
+    #[test]
+    fn legacy_minimal_emits_disabled() {
+        let body = body_on("claude-sonnet-4-5", ReasoningEffort::Minimal);
+        assert_eq!(body["thinking"], json!({ "type": "disabled" }));
+        assert!(body.get("output_config").is_none());
+    }
+
+    /// Current models get adaptive thinking plus `output_config.effort`
+    /// and never `budget_tokens`, which they reject with a 400.
+    #[test]
+    fn adaptive_models_emit_effort() {
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-sonnet-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
+            "some-unknown-model",
+        ] {
+            for (variant, expected) in [
+                (ReasoningEffort::Minimal, "low"),
+                (ReasoningEffort::Low, "low"),
+                (ReasoningEffort::Medium, "medium"),
+                (ReasoningEffort::High, "high"),
+                (ReasoningEffort::XHigh, "xhigh"),
+                (ReasoningEffort::Max, "max"),
+            ] {
+                let body = body_on(model, variant);
+                assert_eq!(
+                    body["thinking"],
+                    json!({ "type": "adaptive" }),
+                    "{model} {variant:?}"
+                );
+                assert_eq!(
+                    body["output_config"],
+                    json!({ "effort": expected }),
+                    "{model} {variant:?} should map to {expected:?}"
+                );
+            }
+        }
+    }
+
+    /// Claude Opus 4.6 and Sonnet 4.6 are adaptive but predate
+    /// `"xhigh"`, so `XHigh` steps down to `"high"` there.
+    #[test]
+    fn claude_4_6_sends_xhigh_as_high() {
+        for model in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+            let body = body_on(model, ReasoningEffort::XHigh);
+            assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+            assert_eq!(body["output_config"], json!({ "effort": "high" }));
+            let body = body_on(model, ReasoningEffort::Max);
+            assert_eq!(body["output_config"], json!({ "effort": "max" }));
+        }
+    }
+
+    /// On adaptive models `Budget(n)` bucketises like the Chat
+    /// Completions adapters do. Boundaries are inclusive on the lower
+    /// side.
+    #[test]
+    fn adaptive_budget_bucketises() {
+        for (budget, expected) in [
+            (0u32, "low"),
+            (2047, "low"),
+            (2048, "medium"),
+            (8191, "medium"),
+            (8192, "high"),
+            (50000, "high"),
+        ] {
+            let body = body_on("claude-opus-5-5", ReasoningEffort::Budget(budget));
+            assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
             assert_eq!(
-                body["thinking"],
-                json!({ "type": "enabled", "budget_tokens": expected_budget }),
-                "{variant:?} should map to budget {expected_budget}"
+                body["output_config"],
+                json!({ "effort": expected }),
+                "Budget({budget}) should bucket as {expected:?}"
             );
         }
     }
 
-    /// `Minimal` emits explicit `{"type":"disabled"}` so the model is
-    /// told *not* to think — distinct from `None` which omits the field.
+    /// `None` (the default) omits `thinking` and `output_config`
+    /// entirely so the wire stays compatible with non-thinking
+    /// deployments.
     #[test]
-    fn reasoning_effort_minimal_emits_disabled() {
-        let mut req = base_req();
-        req.reasoning_effort = Some(ReasoningEffort::Minimal);
-        let body = build_body("claude", &req);
-        assert_eq!(body["thinking"], json!({ "type": "disabled" }));
+    fn reasoning_effort_none_omits_thinking_field() {
+        let body = body_on_none("claude-opus-5-5");
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+        let body = body_on_none("claude-sonnet-4-5");
+        assert!(body.get("thinking").is_none());
     }
 
-    /// `Budget(n)` forwards the exact budget verbatim — including
-    /// out-of-spec values, so the API returns a caller-actionable error
-    /// rather than the adapter silently rounding.
+    fn body_on_none(model: &str) -> Value {
+        build_body(model, &base_req(), Shape::resolve(model, None))
+    }
+
+    /// `additional_params.output_config` merges into the typed
+    /// `output_config` instead of replacing it, so the effort survives.
     #[test]
-    fn reasoning_effort_budget_forwards_verbatim() {
+    fn additional_output_config_keeps_typed_effort() {
         let mut req = base_req();
-        req.reasoning_effort = Some(ReasoningEffort::Budget(7777));
-        let body = build_body("claude", &req);
+        req.reasoning_effort = Some(ReasoningEffort::High);
+        req.additional_params = Some(json!({
+            "output_config": {
+                "format": { "type": "json_schema", "schema": { "type": "object" } },
+                "task_budget": { "type": "tokens", "total": 64000 },
+            }
+        }));
+        let body = build_body(
+            "claude-opus-5-5",
+            &req,
+            Shape::resolve("claude-opus-5-5", None),
+        );
         assert_eq!(
-            body["thinking"],
-            json!({ "type": "enabled", "budget_tokens": 7777 })
+            body["output_config"],
+            json!({
+                "effort": "high",
+                "format": { "type": "json_schema", "schema": { "type": "object" } },
+                "task_budget": { "type": "tokens", "total": 64000 },
+            })
         );
     }
 
-    /// `None` (the default) omits the `thinking` field entirely so the
-    /// wire stays compatible with non-thinking deployments.
+    /// The merge is recursive, and a key set on both sides takes the
+    /// `additional_params` value, which stays the explicit escape hatch.
     #[test]
-    fn reasoning_effort_none_omits_thinking_field() {
-        let body = build_body("claude", &base_req());
-        assert!(body.get("thinking").is_none());
+    fn additional_output_config_merges_deeply_and_wins_on_conflict() {
+        let mut req = base_req();
+        req.reasoning_effort = Some(ReasoningEffort::Low);
+        req.additional_params = Some(json!({
+            "output_config": { "effort": "max", "task_budget": { "total": 30000 } }
+        }));
+        let mut body = build_body(
+            "claude-opus-5-5",
+            &req,
+            Shape::resolve("claude-opus-5-5", None),
+        );
+        assert_eq!(
+            body["output_config"],
+            json!({ "effort": "max", "task_budget": { "total": 30000 } })
+        );
+
+        // Nested objects merge rather than replace.
+        let mut map = body.as_object().unwrap().clone();
+        merge_param(
+            &mut map,
+            "output_config",
+            &json!({ "task_budget": { "type": "tokens" } }),
+        );
+        body = Value::Object(map);
+        assert_eq!(
+            body["output_config"]["task_budget"],
+            json!({ "total": 30000, "type": "tokens" })
+        );
+    }
+
+    /// Without a typed effort, `output_config` passes through as is.
+    #[test]
+    fn additional_output_config_without_effort_passes_through() {
+        let mut req = base_req();
+        req.additional_params = Some(json!({ "output_config": { "effort": "low" } }));
+        let body = body_for(&req);
+        assert_eq!(body["output_config"], json!({ "effort": "low" }));
+    }
+
+    /// Other keys keep the previous behaviour: the extra value replaces
+    /// the typed one wholesale, `thinking` included.
+    #[test]
+    fn additional_params_replace_other_keys() {
+        let mut req = base_req();
+        req.reasoning_effort = Some(ReasoningEffort::High);
+        req.additional_params = Some(json!({
+            "thinking": { "type": "adaptive", "display": "summarized" },
+            "max_tokens": 2048,
+        }));
+        let body = build_body(
+            "claude-opus-5-5",
+            &req,
+            Shape::resolve("claude-opus-5-5", None),
+        );
+        assert_eq!(
+            body["thinking"],
+            json!({ "type": "adaptive", "display": "summarized" })
+        );
+        assert_eq!(body["max_tokens"], json!(2048));
+        assert_eq!(body["output_config"], json!({ "effort": "high" }));
     }
 
     #[test]
@@ -798,7 +997,7 @@ mod tests {
             json!({ "type": "object", "properties": {} }),
             vec![],
         )]);
-        let body = build_body("claude", &req);
+        let body = body_for(&req);
         let tool = &body["tools"][0];
         assert!(tool.get("cache_control").is_none());
     }
