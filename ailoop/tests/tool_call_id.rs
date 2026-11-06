@@ -114,6 +114,7 @@ fn model() -> ScriptedModel {
         reason: FinishReason::ToolUse,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     });
     let done = vec![
         StreamChunk::TextDelta { delta: "ok".into() },
@@ -121,6 +122,7 @@ fn model() -> ScriptedModel {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     ScriptedModel::new([turn, done])

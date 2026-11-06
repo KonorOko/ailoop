@@ -127,6 +127,7 @@ fn calls_turn(calls: &[(&str, &str)]) -> Vec<StreamChunk> {
         reason: FinishReason::ToolUse,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     });
     chunks
 }
@@ -140,6 +141,7 @@ fn done_turn() -> Vec<StreamChunk> {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ]
 }

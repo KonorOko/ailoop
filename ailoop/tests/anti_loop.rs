@@ -55,6 +55,7 @@ fn tool_turn(id: &str, args: Value, text: Option<&str>) -> Vec<StreamChunk> {
         reason: FinishReason::ToolUse,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     });
     chunks
 }
@@ -117,6 +118,7 @@ async fn tool_call_loop_does_not_fire_with_distinct_args() {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }],
     ];
     let model = ScriptedModel::new(turns);
@@ -138,6 +140,7 @@ async fn tool_call_loop_does_not_fire_below_threshold() {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }],
     ];
     let model = ScriptedModel::new(turns);
@@ -211,6 +214,7 @@ async fn threshold_zero_disables_tool_call_detector() {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }]))
         .collect();
     let model = ScriptedModel::new(turns);
@@ -380,6 +384,7 @@ async fn anti_loop_wires_through_conversation_builder() {
         reason: FinishReason::EndTurn,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     }]]);
 
     let mut conv = Conversation::builder(model)

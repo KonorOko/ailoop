@@ -42,6 +42,7 @@ fn tool_calls_turn(calls: &[(&str, &str)]) -> Vec<StreamChunk> {
         reason: FinishReason::ToolUse,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     });
     chunks
 }
@@ -53,6 +54,7 @@ fn text_turn(text: &str) -> Vec<StreamChunk> {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ]
 }

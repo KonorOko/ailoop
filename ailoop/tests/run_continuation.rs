@@ -32,6 +32,7 @@ fn text_turn(text: &str, reason: FinishReason, usage: Usage) -> Vec<StreamChunk>
             reason,
             usage,
             service_tier: None,
+            model: None,
         },
     ]
 }
@@ -51,6 +52,7 @@ fn tool_call_turn(id: &str) -> Vec<StreamChunk> {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ]
 }
@@ -383,6 +385,7 @@ async fn injected_blocks_share_the_tool_result_message() {
         reason: FinishReason::MaxTokens,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     });
     let model = ScriptedModel::new([turn, text_turn("done", FinishReason::EndTurn, usage(1, 1))]);
     let mut registry = ToolRegistry::new();
