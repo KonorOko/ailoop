@@ -663,6 +663,7 @@ mod tests {
     use super::*;
     use ailoop_core::testing::{ScriptedError, ScriptedModel};
     use ailoop_core::{AssistantBlock, FinishReason, ToolResultContent, Usage};
+    use ailoop_core::{BoxedError, BoxedModel};
     use futures::stream::{self, BoxStream};
     use serde_json::json;
     use std::sync::Mutex;
@@ -1683,5 +1684,123 @@ mod tests {
 
         assert_eq!(model.transcripts().len(), 3);
         assert_eq!(summary_of(&out, 0), "summary 2");
+    }
+
+    /// Shares a `RecordingSummarizer` with a `BoxedModel` that wraps it,
+    /// so the test can still read what the boxed model was sent.
+    struct Shared(Arc<RecordingSummarizer>);
+
+    #[async_trait]
+    impl CompletionModel for Shared {
+        type Error = ScriptedError;
+
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+
+        fn model(&self) -> &str {
+            self.0.model()
+        }
+
+        async fn chat_stream(
+            &self,
+            req: ChatRequest,
+        ) -> Result<BoxStream<'static, Result<StreamChunk, Self::Error>>, Self::Error> {
+            self.0.chat_stream(req).await
+        }
+    }
+
+    /// Compacts `prefix` with the summarizer `make` builds, once typed and
+    /// once behind a `BoxedModel`, and returns each result with the
+    /// transcripts its model was sent.
+    async fn compact_typed_and_boxed(
+        make: impl Fn() -> RecordingSummarizer,
+        max_requests: usize,
+        prefix: Vec<Message>,
+    ) -> [(Result<CompactionOutput, CompactionError>, Vec<String>); 2] {
+        let typed = Arc::new(make());
+        let strategy = SummarizeStrategy::new(typed.clone()).with_max_requests(max_requests);
+        let typed_out = compact_prefix(&strategy, prefix.clone()).await;
+
+        let recorder = Arc::new(make());
+        let boxed = Arc::new(BoxedModel::new(Shared(recorder.clone())));
+        let strategy = SummarizeStrategy::new(boxed).with_max_requests(max_requests);
+        let boxed_out = compact_prefix(&strategy, prefix).await;
+
+        [
+            (typed_out, typed.transcripts()),
+            (boxed_out, recorder.transcripts()),
+        ]
+    }
+
+    fn overflowing_prefix() -> Vec<Message> {
+        (0..6).map(|i| sized_user((b'a' + i) as char, 80)).collect()
+    }
+
+    #[tokio::test]
+    async fn boxed_model_splits_on_overflow_like_the_typed_one() {
+        for mid_stream in [false, true] {
+            let make = || {
+                let mut model = RecordingSummarizer::with_limit(200);
+                model.overflow_mid_stream = mid_stream;
+                model
+            };
+            let [(typed, typed_sent), (boxed, boxed_sent)] =
+                compact_typed_and_boxed(make, DEFAULT_MAX_REQUESTS, overflowing_prefix()).await;
+
+            let typed = typed.expect("typed compaction succeeds");
+            let boxed = boxed.expect("boxed compaction succeeds");
+            assert!(typed_sent.len() > 1, "the typed model had to split");
+            assert_eq!(boxed_sent, typed_sent, "mid_stream {mid_stream}");
+            assert_eq!(boxed.messages, typed.messages);
+            assert_eq!(boxed.pinned, typed.pinned);
+        }
+    }
+
+    #[tokio::test]
+    async fn boxed_model_reports_the_overflow_like_the_typed_one() {
+        let make = || RecordingSummarizer::with_limit(100);
+        let prefix = vec![sized_user('a', 80), sized_user('b', 80)];
+        let [(typed, typed_sent), (boxed, boxed_sent)] =
+            compact_typed_and_boxed(make, 1, prefix).await;
+
+        let typed = typed.expect_err("typed compaction fails");
+        let boxed = boxed.expect_err("boxed compaction fails");
+        assert_eq!(boxed_sent, typed_sent);
+        assert!(boxed.is_context_overflow());
+        assert_eq!(boxed.provider_kind(), typed.provider_kind());
+        assert_eq!(boxed.to_string(), typed.to_string());
+
+        // The boxed error sits between the compaction error and the
+        // adapter's error.
+        let typed_source = std::error::Error::source(&typed)
+            .and_then(|e| e.downcast_ref::<ScriptedError>())
+            .expect("typed source");
+        let boxed_source = std::error::Error::source(&boxed)
+            .and_then(|e| e.downcast_ref::<BoxedError>())
+            .expect("boxed source");
+        assert_eq!(
+            boxed_source.downcast_ref::<ScriptedError>(),
+            Some(typed_source)
+        );
+    }
+
+    #[tokio::test]
+    async fn boxed_model_propagates_other_errors_like_the_typed_one() {
+        let make = || {
+            let mut model = RecordingSummarizer::with_limit(120);
+            model.outage_on_request = Some(2);
+            model
+        };
+        let prefix = vec![sized_user('a', 80), sized_user('b', 80)];
+        let [(typed, typed_sent), (boxed, boxed_sent)] =
+            compact_typed_and_boxed(make, DEFAULT_MAX_REQUESTS, prefix).await;
+
+        let typed = typed.expect_err("typed compaction fails");
+        let boxed = boxed.expect_err("boxed compaction fails");
+        assert_eq!(boxed_sent, typed_sent);
+        assert!(!boxed.is_context_overflow());
+        assert_eq!(boxed.provider_kind(), typed.provider_kind());
+        assert_eq!(boxed.to_string(), typed.to_string());
     }
 }
