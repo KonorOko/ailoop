@@ -31,7 +31,7 @@ and this project adheres to
   Anthropic models they send `"xhigh"` and `"max"` (`XHigh` is sent as
   `"high"` to Claude Opus 4.6 and Sonnet 4.6, which predate it); on
   legacy models they send `budget_tokens` 32768 and 65536. Chat
-  Completions (`ailoop-azure-openai`) sends both as `"high"`.
+  Completions (`ailoop-openai`, Azure included) sends both as `"high"`.
 - `AnthropicChatModel::thinking_mode(ThinkingMode::Budget | Adaptive)`
   forces the wire shape for ids the model list cannot read, such as an
   alias behind a proxy.
@@ -83,6 +83,59 @@ and this project adheres to
   `ScriptedError::of(kind, Option<Duration>)` writes the marker. The
   older `permanent`, `transient[:<ms>]` and `context_overflow` anywhere
   in the message still work.
+- New crate `ailoop-openai`: a Chat Completions adapter for OpenAI,
+  Azure OpenAI and the servers that speak the same API, such as
+  OpenRouter, Ollama, LM Studio, vLLM and llama.cpp. The base URL is
+  configurable and the key optional, so a local server works without
+  one. It streams text, tool calls and the visible reasoning of local
+  models, and sends images as `data:` URIs. `OpenAIClient::list_models`
+  reads `GET /models`. `OpenAIClient::model_capabilities` says whether a
+  model accepts images and tools when the server states it
+  (OpenRouter's listing, Ollama's `/api/show`, LM Studio's
+  `/api/v1/models`, the last two only for local servers), and leaves the
+  answer unknown otherwise.
+- `OpenAIClient::azure(endpoint, AzureAuth)` targets an Azure resource's
+  v1 API (`{endpoint}/openai/v1`), and `OpenAIClient::azure_from_env()`
+  reads the same `AZURE_OPENAI_*` variables as before. `AzureAuth` is
+  `ApiKey` (sent as `api-key:`), `Token` or `Provider(Arc<dyn
+  TokenProvider>)`, and `CachingTokenProvider` moves into the crate.
+  On Azure the output limit is sent as `max_completion_tokens`, which
+  Azure documents as replacing the deprecated `max_tokens`.
+  `list_models` on Azure lists base models, not deployments, and
+  `model_capabilities` answers unknown without sending a request.
+- `OpenAIError` implements `ProviderError::kind()`. A connection failure
+  is `Network`, and `OpenAIClient::is_local()` tells a local server that
+  is not running apart from a missing network. Quota and credit errors
+  (OpenAI's `insufficient_quota`, OpenRouter's 402) are
+  `QuotaExhausted`, "does not support images/tools" is
+  `Unsupported(Capability)`, Azure's `DeploymentNotFound` is
+  `ModelNotFound`, `content_filter` is `ContentFilter`, and 413 is
+  `RequestTooLarge`. The retry delay comes from `Retryable`, read from
+  `retry-after-ms`, `retry-after` or OpenAI's `x-ratelimit-reset-*`
+  headers.
+- A stream that ends without `[DONE]` or a `finish_reason` is
+  `OpenAIError::Interrupted`, not a complete answer. `[DONE]` without a
+  `finish_reason` is a normal end, because some local servers never
+  send one.
+- Ignored live test against Azure: `cargo test -p ailoop-live-tests
+  --test openai_azure -- --ignored`, with `AZURE_OPENAI_ENDPOINT`, one
+  of `AZURE_OPENAI_API_KEY` or `AZURE_OPENAI_TOKEN`, and
+  `AILOOP_AZURE_DEPLOYMENT`.
+
+### Removed (BREAKING)
+
+- `ailoop-azure-openai` is removed from the workspace. Azure OpenAI is
+  now `OpenAIClient::azure` in `ailoop-openai`; see the migration notes
+  below. Version `1.0.0-rc.7` of `ailoop-azure-openai` stays on
+  crates.io.
+
+### Changed (BREAKING)
+
+- Azure: an error code the adapter does not know (`Other`) is no longer
+  always retried. It is retried only when the status is 5xx, 408 or 409,
+  or when it arrives mid-stream with no status. A non-JSON error body
+  (an Azure Front Door page) is now `OpenAIError::Api` with the body as
+  `message`, instead of `AzureOpenAIError::Status`.
 
 ### Changed
 
@@ -99,6 +152,60 @@ and this project adheres to
 - konor-kit style markers in seconds (`rate_limit:<seconds>`) become
   `rate_limited:<ms>`, or `ScriptedError::of(ProviderErrorKind::RateLimited,
   Some(delay))`.
+
+From `ailoop-azure-openai` to `ailoop-openai`:
+
+| Before (`ailoop-azure-openai`) | After (`ailoop-openai`) |
+| --- | --- |
+| `AzureOpenAIClient::new(endpoint, auth)` | `OpenAIClient::azure(endpoint, auth)` |
+| `AzureOpenAIClient::with_api_key(endpoint, key)` | `OpenAIClient::azure(endpoint, AzureAuth::ApiKey(key))` |
+| `AzureOpenAIClient::with_token(endpoint, token)` | `OpenAIClient::azure(endpoint, AzureAuth::Token(token))` |
+| `AzureOpenAIClient::with_provider(endpoint, p)` | `OpenAIClient::azure(endpoint, AzureAuth::provider(p))` |
+| `AzureOpenAIClient::from_env()` | `OpenAIClient::azure_from_env()` (same `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_TOKEN`) |
+| `AzureOpenAIAuth` | `AzureAuth` |
+| `AzureOpenAIChatModel` | `OpenAIChatModel` (`name()` is still `"azure-openai"`) |
+| `AzureOpenAIError` | `OpenAIError` |
+| `AzureOpenAIError::Status { status, body }` | `OpenAIError::Api { status, message, .. }` |
+| `AzureOpenAIApiErrorKind` | `OpenAIApiErrorKind` |
+| `TokenProvider::token() -> Result<String, AzureOpenAIError>` | `TokenProvider::token() -> Result<String, OpenAIError>` |
+| `ailoop_azure_openai::CachingTokenProvider` | `ailoop_openai::CachingTokenProvider` |
+
+Kinds, as `OpenAIApiErrorKind` and as `ProviderError::kind()`:
+
+| `AzureOpenAIApiErrorKind` | `OpenAIApiErrorKind` | `ProviderErrorKind` |
+| --- | --- | --- |
+| `RateLimit` | `RateLimit` | `RateLimited` |
+| `InvalidRequest` | `InvalidRequest` | `InvalidRequest` |
+| `ContextOverflow` | `ContextOverflow` | `ContextOverflow` |
+| `ContentFilter` | `ContentFilter` | `ContentFilter` |
+| `Authentication` | `Authentication` | `Auth` |
+| `Permission` | `Permission` | `Permission` |
+| `NotFound` | `NotFound` | `Other` |
+| `DeploymentNotFound` | `ModelNotFound` | `ModelNotFound` |
+| `ServerError` | `ServerError` | `Unavailable` |
+| `Other(code)` | `Other(code)` | `Other` |
+
+```rust
+// Before
+use ailoop_azure_openai::{AzureOpenAIAuth, AzureOpenAIClient, AzureOpenAIError, TokenProvider};
+
+#[async_trait::async_trait]
+impl TokenProvider for Entra {
+    async fn token(&self) -> Result<String, AzureOpenAIError> { /* ... */ }
+}
+let client = AzureOpenAIClient::with_provider(endpoint, Entra::new());
+let model = client.model("my-deployment");
+
+// After
+use ailoop_openai::{AzureAuth, OpenAIClient, OpenAIError, TokenProvider};
+
+#[async_trait::async_trait]
+impl TokenProvider for Entra {
+    async fn token(&self) -> Result<String, OpenAIError> { /* ... */ }
+}
+let client = OpenAIClient::azure(endpoint, AzureAuth::provider(Entra::new()));
+let model = client.model("my-deployment");
+```
 
 ## [1.0.0-rc.7] — 2026-11-04
 

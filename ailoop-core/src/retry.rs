@@ -3,8 +3,8 @@
 //! `Retry-After` hints surfaced by the adapter.
 //!
 //! Each adapter classifies its own error type via the [`Retryable`] trait
-//! (`AnthropicError` in `ailoop-anthropic`, `AzureOpenAIError` in
-//! `ailoop-azure-openai`); the decorator only needs to know whether an
+//! (`AnthropicError` in `ailoop-anthropic`, `OpenAIError` in
+//! `ailoop-openai`); the decorator only needs to know whether an
 //! error is `Permanent` or `Transient { retry_after }`.
 //!
 //! ## Scope
@@ -29,7 +29,7 @@ use crate::traits::CompletionModel;
 /// Adapter-side classification of an error as retryable or not.
 ///
 /// Implemented by each provider's error type (e.g. `AnthropicError`,
-/// `AzureOpenAIError`) so [`RetryingModel`] stays provider-agnostic.
+/// `OpenAIError`) so [`RetryingModel`] stays provider-agnostic.
 pub trait Retryable {
     /// Decide whether this error should retry, and after how long.
     fn retry_classification(&self) -> RetryClassification;
