@@ -3,12 +3,18 @@
 
 mod support;
 
-use std::time::{Duration, SystemTime};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use ailoop::{Conversation, Message, RetryConfig, RetryingModel, Source, UserBlock, ailoop_tool};
-use ailoop_core::{ChatRequest, CompletionModel, FinishReason, StreamChunk, ToolDefinition};
+use ailoop_core::{
+    Capability, ChatRequest, CompletionModel, FinishReason, ProviderError, ProviderErrorKind,
+    RetryClassification, Retryable, StreamChunk, ToolDefinition,
+};
 use ailoop_openai::{
-    Capability, ErrorCategory, ModelCapabilities, OpenAIApiErrorKind, OpenAIClient, OpenAIError,
+    AzureAuth, CachingTokenProvider, ModelCapabilities, OpenAIApiErrorKind, OpenAIClient,
+    OpenAIError, TokenProvider,
 };
 use futures::StreamExt;
 use serde_json::json;
@@ -200,11 +206,11 @@ async fn local_service_not_running() {
     let started = std::time::Instant::now();
     let err = collect(&model, hello_request()).await.unwrap_err();
     let one_attempt = started.elapsed();
-    assert_eq!(
-        err.category(),
-        ErrorCategory::LocalServiceUnreachable {
-            url: format!("{url}/chat/completions")
-        }
+    assert_eq!(err.kind(), ProviderErrorKind::Network);
+    assert!(model.client().is_local());
+    assert!(
+        matches!(&err, OpenAIError::Unreachable { url: u, local: true, .. } if *u == format!("{url}/chat/completions")),
+        "{err:?}"
     );
     // Not retried: the service is not running. A refused connection
     // costs about the same each time (around 2 s on Windows), so a
@@ -221,8 +227,9 @@ async fn remote_host_unreachable_is_offline() {
     // `.invalid` never resolves (RFC 2606).
     let model = OpenAIClient::new("https://api.example.invalid/v1").model("m");
     let err = collect(&model, hello_request()).await.unwrap_err();
+    assert_eq!(err.kind(), ProviderErrorKind::Network);
     assert!(
-        matches!(err.category(), ErrorCategory::Offline { url } if url == "https://api.example.invalid/v1/chat/completions"),
+        matches!(&err, OpenAIError::Unreachable { url, local: false, .. } if url == "https://api.example.invalid/v1/chat/completions"),
         "{err:?}"
     );
 }
@@ -238,12 +245,8 @@ async fn rejected_key_401_and_403() {
         ),
     );
     let err = setup_error(&server, hello_request()).await;
-    assert_eq!(
-        err.category(),
-        ErrorCategory::AuthRejected {
-            status: reqwest::StatusCode::UNAUTHORIZED
-        }
-    );
+    assert_eq!(err.kind(), ProviderErrorKind::Auth);
+    assert!(matches!(&err, OpenAIError::Api { status, .. } if status.as_u16() == 401));
 
     let server = FakeServer::start().await;
     server.push(
@@ -251,12 +254,8 @@ async fn rejected_key_401_and_403() {
         Reply::json(403, json!({"error":{"code":403,"message":"Key disabled"}})),
     );
     let err = setup_error(&server, hello_request()).await;
-    assert_eq!(
-        err.category(),
-        ErrorCategory::AuthRejected {
-            status: reqwest::StatusCode::FORBIDDEN
-        }
-    );
+    assert_eq!(err.kind(), ProviderErrorKind::Permission);
+    assert!(matches!(&err, OpenAIError::Api { status, .. } if status.as_u16() == 403));
 }
 
 #[tokio::test]
@@ -270,18 +269,14 @@ async fn rate_limit_with_retry_after() {
             r#"{"error":{"message":"Rate limit reached","type":"requests","code":"rate_limit_exceeded"}}"#,
         ),
     );
-    let before = SystemTime::now();
     let err = setup_error(&server, hello_request()).await;
-    match err.category() {
-        ErrorCategory::RateLimited {
-            retry_after,
-            retry_at,
-        } => {
-            assert_eq!(retry_after, Some(Duration::from_secs(20)));
-            assert!(retry_at.unwrap() >= before + Duration::from_secs(20));
+    assert_eq!(err.kind(), ProviderErrorKind::RateLimited);
+    assert_eq!(
+        err.retry_classification(),
+        RetryClassification::Transient {
+            retry_after: Some(Duration::from_secs(20))
         }
-        other => panic!("{other:?}"),
-    }
+    );
 }
 
 #[tokio::test]
@@ -300,7 +295,12 @@ async fn rate_limit_with_openai_reset_headers() {
         ),
     );
     let err = setup_error(&server, hello_request()).await;
-    assert_eq!(err.retry_after(), Some(Duration::from_secs(90)));
+    assert_eq!(
+        err.retry_classification(),
+        RetryClassification::Transient {
+            retry_after: Some(Duration::from_secs(90))
+        }
+    );
 }
 
 #[tokio::test]
@@ -332,7 +332,7 @@ async fn quota_exhausted_is_not_retried() {
     );
     let model = RetryingModel::new(OpenAIClient::new(server.base_url()).model("m"));
     let err = collect(&model, hello_request()).await.unwrap_err();
-    assert_eq!(err.category(), ErrorCategory::QuotaExhausted);
+    assert_eq!(err.kind(), ProviderErrorKind::QuotaExhausted);
     assert_eq!(server.requests_to(CHAT).len(), 1);
 }
 
@@ -355,8 +355,8 @@ async fn model_without_tool_support() {
     )]);
     let err = setup_error(&server, req).await;
     assert_eq!(
-        err.category(),
-        ErrorCategory::ModelUnsupported(Capability::Tools)
+        err.kind(),
+        ProviderErrorKind::Unsupported(Capability::Tools)
     );
 }
 
@@ -381,8 +381,8 @@ async fn model_without_image_support() {
     );
     let err = setup_error(&server, req).await;
     assert_eq!(
-        err.category(),
-        ErrorCategory::ModelUnsupported(Capability::Images)
+        err.kind(),
+        ProviderErrorKind::Unsupported(Capability::Images)
     );
 }
 
@@ -397,7 +397,7 @@ async fn model_not_found() {
         ),
     );
     let err = setup_error(&server, hello_request()).await;
-    assert_eq!(err.category(), ErrorCategory::ModelNotFound);
+    assert_eq!(err.kind(), ProviderErrorKind::ModelNotFound);
 }
 
 #[tokio::test]
@@ -414,7 +414,7 @@ async fn connection_cut_mid_response() {
     let (chunks, err) = collect(&model, hello_request()).await.unwrap();
     assert!(matches!(&chunks[0], StreamChunk::TextDelta { .. }));
     let err = err.expect("the cut must surface as an error");
-    assert_eq!(err.category(), ErrorCategory::Interrupted);
+    assert_eq!(err.kind(), ProviderErrorKind::Interrupted);
     assert!(
         matches!(
             &err,
@@ -468,7 +468,6 @@ async fn error_event_mid_stream() {
 
 #[tokio::test]
 async fn context_overflow_is_flagged_for_compaction() {
-    use ailoop_core::ProviderError;
     let server = FakeServer::start().await;
     server.push(
         CHAT,
@@ -479,7 +478,7 @@ async fn context_overflow_is_flagged_for_compaction() {
     );
     let err = setup_error(&server, hello_request()).await;
     assert!(err.is_context_overflow());
-    assert_eq!(err.category(), ErrorCategory::ContextOverflow);
+    assert_eq!(err.kind(), ProviderErrorKind::ContextOverflow);
 }
 
 #[tokio::test]
@@ -535,14 +534,12 @@ async fn list_models_errors_are_classified() {
         .list_models()
         .await
         .unwrap_err();
-    assert!(matches!(err.category(), ErrorCategory::AuthRejected { .. }));
+    assert_eq!(err.kind(), ProviderErrorKind::Auth);
 
     let url = closed_local_url().await;
     let err = OpenAIClient::new(&url).list_models().await.unwrap_err();
-    assert!(matches!(
-        err.category(),
-        ErrorCategory::LocalServiceUnreachable { .. }
-    ));
+    assert_eq!(err.kind(), ProviderErrorKind::Network);
+    assert!(matches!(err, OpenAIError::Unreachable { local: true, .. }));
 }
 
 #[tokio::test]
@@ -622,4 +619,248 @@ async fn capabilities_stay_unknown_when_nobody_says() {
     let client = OpenAIClient::new(server.base_url());
     let caps = client.model_capabilities("some-model").await.unwrap();
     assert_eq!(caps, ModelCapabilities::default());
+}
+
+// -------------------------------------------------------------------- azure
+
+const AZURE_CHAT: &str = "/openai/v1/chat/completions";
+
+fn azure_root(server: &FakeServer) -> String {
+    format!("http://{}", server.addr)
+}
+
+#[tokio::test]
+async fn azure_api_key_goes_in_the_api_key_header() {
+    let server = FakeServer::start().await;
+    server.push(AZURE_CHAT, text_stream("hi"));
+    let model = OpenAIClient::azure(azure_root(&server), AzureAuth::ApiKey("az-key".into()))
+        .model("my-deployment");
+    assert_eq!(model.name(), "azure-openai");
+    let (_, err) = collect(&model, hello_request()).await.unwrap();
+    assert!(err.is_none(), "{err:?}");
+    let request = &server.requests_to(AZURE_CHAT)[0];
+    assert_eq!(request.headers["api-key"], "az-key");
+    assert!(!request.headers.contains_key("authorization"));
+    assert!(!request.path.contains("api-version"));
+    let body = request.json();
+    assert_eq!(body["model"], "my-deployment");
+    assert_eq!(body["max_completion_tokens"], 256);
+    assert!(body.get("max_tokens").is_none());
+}
+
+#[tokio::test]
+async fn azure_fixed_token_is_a_bearer() {
+    let server = FakeServer::start().await;
+    server.push(AZURE_CHAT, text_stream("hi"));
+    let model = OpenAIClient::azure(azure_root(&server), AzureAuth::Token("tok".into())).model("d");
+    collect(&model, hello_request()).await.unwrap();
+    let request = &server.requests_to(AZURE_CHAT)[0];
+    assert_eq!(request.headers["authorization"], "Bearer tok");
+    assert!(!request.headers.contains_key("api-key"));
+}
+
+struct CountingProvider(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl TokenProvider for CountingProvider {
+    async fn token(&self) -> Result<String, OpenAIError> {
+        let n = self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(format!("entra-{n}"))
+    }
+}
+
+#[tokio::test]
+async fn azure_token_provider_is_asked_per_request_and_can_be_cached() {
+    let server = FakeServer::start().await;
+    server.push(AZURE_CHAT, text_stream("hi"));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let model = OpenAIClient::azure(
+        azure_root(&server),
+        AzureAuth::provider(CountingProvider(Arc::clone(&calls))),
+    )
+    .model("d");
+    collect(&model, hello_request()).await.unwrap();
+    collect(&model, hello_request()).await.unwrap();
+    let auth: Vec<_> = server
+        .requests_to(AZURE_CHAT)
+        .iter()
+        .map(|r| r.headers["authorization"].clone())
+        .collect();
+    assert_eq!(auth, ["Bearer entra-0", "Bearer entra-1"]);
+
+    let cached_calls = Arc::new(AtomicUsize::new(0));
+    let cached = CachingTokenProvider::new(
+        CountingProvider(Arc::clone(&cached_calls)),
+        Duration::from_secs(3600),
+        Duration::from_secs(300),
+    );
+    let model = OpenAIClient::azure(azure_root(&server), AzureAuth::provider(cached)).model("d");
+    collect(&model, hello_request()).await.unwrap();
+    collect(&model, hello_request()).await.unwrap();
+    assert_eq!(cached_calls.load(Ordering::SeqCst), 1);
+}
+
+struct FailingProvider;
+
+#[async_trait::async_trait]
+impl TokenProvider for FailingProvider {
+    async fn token(&self) -> Result<String, OpenAIError> {
+        Err(OpenAIError::Config("token fetch failed".into()))
+    }
+}
+
+#[tokio::test]
+async fn azure_token_provider_error_fails_before_sending() {
+    let server = FakeServer::start().await;
+    let model =
+        OpenAIClient::azure(azure_root(&server), AzureAuth::provider(FailingProvider)).model("d");
+    let err = collect(&model, hello_request()).await.unwrap_err();
+    assert!(
+        matches!(&err, OpenAIError::Config(m) if m.contains("token fetch failed")),
+        "{err:?}"
+    );
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
+async fn azure_rate_limit_honours_retry_after_ms() {
+    let server = FakeServer::start().await;
+    server.push(
+        AZURE_CHAT,
+        Reply::status_with_headers(
+            429,
+            &[("retry-after-ms", "10"), ("retry-after", "60")],
+            r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#,
+        ),
+    );
+    server.push(AZURE_CHAT, text_stream("ok"));
+    let client = OpenAIClient::azure(azure_root(&server), AzureAuth::ApiKey("k".into()));
+    let err = collect(&client.clone().model("d"), hello_request())
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), ProviderErrorKind::RateLimited);
+    assert_eq!(
+        err.retry_classification(),
+        RetryClassification::Transient {
+            retry_after: Some(Duration::from_millis(10))
+        }
+    );
+    let mut config = RetryConfig::default();
+    config.jitter = false;
+    let model = RetryingModel::with_config(client.model("d"), config);
+    let (_, err) = collect(&model, hello_request()).await.unwrap();
+    assert!(err.is_none());
+}
+
+#[tokio::test]
+async fn azure_deployment_not_found_and_content_filter() {
+    let server = FakeServer::start().await;
+    server.push(
+        AZURE_CHAT,
+        Reply::json(
+            404,
+            json!({"error":{"code":"DeploymentNotFound","message":"The API deployment for this resource does not exist."}}),
+        ),
+    );
+    let model =
+        OpenAIClient::azure(azure_root(&server), AzureAuth::ApiKey("k".into())).model("nope");
+    let err = collect(&model, hello_request()).await.unwrap_err();
+    assert_eq!(err.kind(), ProviderErrorKind::ModelNotFound);
+    assert_eq!(err.retry_classification(), RetryClassification::Permanent);
+
+    let server = FakeServer::start().await;
+    server.push(
+        AZURE_CHAT,
+        Reply::json(
+            400,
+            json!({"error":{"code":"content_filter","message":"The response was filtered due to the prompt triggering Azure OpenAI's content management policy.","param":"prompt","status":400}}),
+        ),
+    );
+    let model = OpenAIClient::azure(azure_root(&server), AzureAuth::ApiKey("k".into())).model("d");
+    let err = collect(&model, hello_request()).await.unwrap_err();
+    assert_eq!(err.kind(), ProviderErrorKind::ContentFilter);
+    assert_eq!(err.retry_classification(), RetryClassification::Permanent);
+}
+
+#[tokio::test]
+async fn azure_context_overflow_is_flagged() {
+    let server = FakeServer::start().await;
+    server.push(
+        AZURE_CHAT,
+        Reply::json(
+            400,
+            json!({"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","type":"invalid_request_error","param":"input","code":"context_length_exceeded"}}),
+        ),
+    );
+    let model = OpenAIClient::azure(azure_root(&server), AzureAuth::ApiKey("k".into())).model("d");
+    let err = collect(&model, hello_request()).await.unwrap_err();
+    assert!(err.is_context_overflow());
+}
+
+#[tokio::test]
+async fn azure_recorded_text_stream() {
+    let server = FakeServer::start().await;
+    server.push(
+        AZURE_CHAT,
+        Reply::sse_recorded(include_str!("fixtures/chat_text.sse")),
+    );
+    let model = OpenAIClient::azure(azure_root(&server), AzureAuth::ApiKey("k".into())).model("d");
+    let (chunks, err) = collect(&model, hello_request()).await.unwrap();
+    assert!(err.is_none(), "{err:?}");
+    let text: String = chunks
+        .iter()
+        .filter_map(|c| match c {
+            StreamChunk::TextDelta { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "Hello, what's up?");
+    match chunks.last() {
+        Some(StreamChunk::TurnFinished { reason, usage, .. }) => {
+            assert!(matches!(reason, FinishReason::EndTurn));
+            assert_eq!((usage.input_tokens, usage.output_tokens), (13, 6));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn azure_recorded_tool_call_stream() {
+    let server = FakeServer::start().await;
+    server.push(
+        AZURE_CHAT,
+        Reply::sse_recorded(include_str!("fixtures/chat_tool_call.sse")),
+    );
+    let model = OpenAIClient::azure(azure_root(&server), AzureAuth::ApiKey("k".into())).model("d");
+    let (chunks, err) = collect(&model, hello_request()).await.unwrap();
+    assert!(err.is_none(), "{err:?}");
+    let mut started = Vec::new();
+    let mut finished = Vec::new();
+    let mut reason = None;
+    for chunk in &chunks {
+        match chunk {
+            StreamChunk::ToolCallStarted { call_id, name } => {
+                started.push((call_id.clone(), name.clone()))
+            }
+            StreamChunk::ToolCallFinished { args, .. } => finished.push(args.clone()),
+            StreamChunk::TurnFinished { reason: r, .. } => reason = Some(r.clone()),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        started,
+        [("call_FIXTURE".to_string(), "get_weather".to_string())]
+    );
+    assert_eq!(finished.len(), 1);
+    assert!(finished[0].is_object(), "{:?}", finished[0]);
+    assert!(matches!(reason, Some(FinishReason::ToolUse)));
+}
+
+#[tokio::test]
+async fn azure_capabilities_are_unknown_without_requests() {
+    let server = FakeServer::start().await;
+    let client = OpenAIClient::azure(azure_root(&server), AzureAuth::ApiKey("k".into()));
+    let caps = client.model_capabilities("my-deployment").await.unwrap();
+    assert_eq!(caps, ModelCapabilities::default());
+    assert!(server.requests().is_empty());
 }

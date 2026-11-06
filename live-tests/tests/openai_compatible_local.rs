@@ -10,6 +10,7 @@
 //! cargo test -p ailoop-live-tests --test openai_compatible_local -- --ignored --nocapture
 //! ```
 
+use ailoop::ProviderError;
 use ailoop::{Conversation, ailoop_tool};
 use ailoop_openai::{OpenAIClient, OpenAIError};
 
@@ -37,7 +38,7 @@ async fn local_lists_models_and_capabilities() {
     let client = client();
     let models = match client.list_models().await {
         Ok(models) => models,
-        Err(e) => panic!("{:?}: {e}", e.category()),
+        Err(e) => panic!("{:?}: {e}", e.kind()),
     };
     for m in &models {
         let caps = client.model_capabilities(&m.id).await.unwrap();

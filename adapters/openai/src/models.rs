@@ -82,6 +82,11 @@ impl OpenAIClient {
     /// List the models the server offers, from `GET {base_url}/models`,
     /// in the server's order. On Ollama these are the installed models;
     /// on LM Studio the downloaded ones.
+    ///
+    /// On Azure ([`OpenAIClient::azure`]) this lists the base models the
+    /// resource can deploy, **not** your deployments: the ids it returns
+    /// are not valid names for [`OpenAIClient::model`], which takes a
+    /// deployment name.
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, OpenAIError> {
         let url = self.endpoint("models");
         let response = self.get_json_response(&url).await?;
@@ -106,11 +111,17 @@ impl OpenAIClient {
     ///    unknown. Older LM Studio: `GET /api/v0/models/{id}`, whose
     ///    `type` is `"vlm"` for vision models.
     ///
-    /// Steps 2 and 3 are only tried against local servers. What none of
-    /// them states stays `None`: OpenAI's own API publishes neither.
+    /// Steps 2 and 3 are only tried against local servers
+    /// ([`OpenAIClient::is_local`]). What none of them states stays
+    /// `None`: OpenAI's own API publishes neither. On Azure the answer is
+    /// `None` for both fields and no request is sent, since the listing
+    /// does not describe deployments.
     /// Errors from the listing propagate; a failed native lookup only
     /// leaves its fields unknown.
     pub async fn model_capabilities(&self, model: &str) -> Result<ModelCapabilities, OpenAIError> {
+        if self.is_azure() {
+            return Ok(ModelCapabilities::default());
+        }
         let mut caps = self
             .list_models()
             .await?
@@ -136,6 +147,7 @@ impl OpenAIClient {
         let url = format!("{}/api/show", self.server_root());
         let builder = self
             .authorize(self.http_client.post(&url).json(&json!({ "model": model })))
+            .await
             .ok()?;
         let response = builder.send().await.ok()?;
         if !response.status().is_success() {
@@ -158,6 +170,7 @@ impl OpenAIClient {
         let url = format!("{root}/api/v0/models/{model}");
         let response = self
             .authorize(self.http_client.get(&url))
+            .await
             .ok()?
             .send()
             .await
@@ -181,6 +194,7 @@ impl OpenAIClient {
         let url = format!("{root}/api/v1/models");
         let response = self
             .authorize(self.http_client.get(&url))
+            .await
             .ok()?
             .send()
             .await
@@ -209,7 +223,8 @@ impl OpenAIClient {
 
     async fn get_json_response(&self, url: &str) -> Result<Response, OpenAIError> {
         let builder = self
-            .authorize(self.http_client.get(url))?
+            .authorize(self.http_client.get(url))
+            .await?
             .header("accept", "application/json");
         let response = builder.send().await.map_err(|e| self.send_error(url, e))?;
         if !response.status().is_success() {

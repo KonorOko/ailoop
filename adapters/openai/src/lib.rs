@@ -1,6 +1,6 @@
-//! OpenAI Chat Completions adapter for ailoop, for OpenAI and the servers
-//! that speak the same API: OpenRouter, Ollama, LM Studio, vLLM,
-//! llama.cpp.
+//! OpenAI Chat Completions adapter for ailoop, for OpenAI, Azure OpenAI
+//! and the servers that speak the same API: OpenRouter, Ollama, LM
+//! Studio, vLLM, llama.cpp.
 //!
 //! Implements [`CompletionClient`] / [`CompletionModel`] against
 //! `POST {base_url}/chat/completions` with streaming (Server-Sent
@@ -17,15 +17,38 @@
 //!     .model("qwen2.5-vl-7b-instruct");
 //! ```
 //!
+//! ## Azure OpenAI
+//!
+//! [`OpenAIClient::azure`] targets a resource's v1 API
+//! (`{endpoint}/openai/v1`), where the model name is the deployment
+//! name. [`AzureAuth`] picks the credential: an `api-key`, a fixed bearer
+//! token, or a [`TokenProvider`] for Microsoft Entra ID, which
+//! [`CachingTokenProvider`] can wrap.
+//!
+//! ```no_run
+//! use ailoop_openai::{AzureAuth, OpenAIClient};
+//!
+//! let azure = OpenAIClient::azure(
+//!     "https://my-resource.openai.azure.com",
+//!     AzureAuth::ApiKey("...".into()),
+//! )
+//! .model("my-gpt-4o-deployment");
+//! // Or from AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY / _TOKEN:
+//! let from_env = OpenAIClient::azure_from_env();
+//! ```
+//!
 //! ## Errors
 //!
-//! [`OpenAIError::category`] sorts every failure into what an app shows:
-//! offline, local service not running (with its URL), key rejected, rate
-//! limit (with the retry delay and time), quota exhausted, model without
-//! image or tool support, model not found, context overflow, or a
-//! response cut off mid-stream. [`OpenAIError`] also implements
-//! [`Retryable`] for [`RetryingModel`](ailoop_core::RetryingModel) and
-//! [`ProviderError`](ailoop_core::ProviderError) for history compaction.
+//! [`OpenAIError`] implements [`ProviderError::kind`](ailoop_core::ProviderError::kind),
+//! which sorts every failure into a provider-agnostic
+//! [`ProviderErrorKind`](ailoop_core::ProviderErrorKind): no connection,
+//! key rejected, rate limit, quota exhausted, model without image or
+//! tool support, model not found, content filter, context overflow, or a
+//! response cut off mid-stream. A connection failure is `Network`; tell
+//! "the local service is not running" from "no network" with
+//! [`OpenAIClient::is_local`]. [`Retryable`] gives the retry decision and
+//! the delay the server asked for, for
+//! [`RetryingModel`](ailoop_core::RetryingModel).
 //!
 //! "Does not support images/tools" is recognized from the server's
 //! message, since no server has a code for it, and only when the request
@@ -53,6 +76,8 @@
 
 #![deny(missing_docs)]
 
+mod azure;
+mod caching_provider;
 mod client;
 mod error_body;
 mod errors;
@@ -62,7 +87,9 @@ mod models;
 mod request;
 mod stream;
 
+pub use azure::{AzureAuth, TokenProvider};
+pub use caching_provider::CachingTokenProvider;
 pub use client::{DEFAULT_CONNECT_TIMEOUT, MaxTokensField, OpenAIClient};
-pub use errors::{Capability, ErrorCategory, OpenAIApiErrorKind, OpenAIError};
+pub use errors::{OpenAIApiErrorKind, OpenAIError};
 pub use model::OpenAIChatModel;
 pub use models::{ModelCapabilities, ModelInfo};

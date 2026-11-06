@@ -68,6 +68,18 @@ impl Reply {
         Reply::Sse { events, cut: false }
     }
 
+    /// SSE replayed from a recorded body (`data: ...` blocks separated
+    /// by blank lines), one chunk per event.
+    pub fn sse_recorded(text: &str) -> Self {
+        let events = text
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .map(|e| format!("{e}\n\n"))
+            .collect();
+        Reply::Sse { events, cut: false }
+    }
+
     /// SSE from JSON payloads, without `[DONE]`, with the body closed
     /// cleanly (`cut: false`) or abruptly (`cut: true`).
     pub fn sse_unfinished(payloads: &[Value], cut: bool) -> Self {
