@@ -24,6 +24,14 @@ and this project adheres to
   `output_config.format` or `task_budget` no longer drops the typed
   `effort`. A key set on both sides takes the `additional_params` value.
   Every other key still replaces the typed value wholesale.
+- `ailoop-anthropic`: a stream cut off before Anthropic finished the
+  message no longer looks complete. Before, a body that stopped early
+  ended in `TurnFinished { reason: EndTurn }`. Now, if the stream ends
+  without `message_stop`, or `message_stop` arrives without a
+  `stop_reason` in an earlier `message_delta`, it fails with the new
+  `AnthropicError::Interrupted` instead of emitting `TurnFinished`. Its
+  `kind()` is `Interrupted` and `RetryingModel` treats it as transient.
+  Chunks received before the cut are still delivered.
 
 ### Added
 
