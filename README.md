@@ -28,8 +28,7 @@ decoupled from any single vendor.
 | `ailoop`              | High-level API (`Conversation`, `advanced::run_chat`) |
 | `ailoop-core`         | Message, stream, and provider trait definitions    |
 | `ailoop-anthropic`    | Anthropic Messages API adapter                     |
-| `ailoop-azure-openai` | Azure OpenAI v1 API adapter (Chat Completions)     |
-| `ailoop-openai`       | OpenAI Chat Completions, also OpenRouter, Ollama, LM Studio |
+| `ailoop-openai`       | OpenAI Chat Completions, also Azure OpenAI, OpenRouter, Ollama, LM Studio |
 | `ailoop-history`      | Conversation history and compaction (formerly `ailoop-context`) |
 | `ailoop-mcp`          | MCP (Model Context Protocol) adapter (stdio MVP)   |
 | `ailoop-prompts`      | Composable system prompt utilities                 |
@@ -92,7 +91,7 @@ let outcome = chat
 `Vec<UserBlock>` and a bare `UserBlock` (image-only / document-only
 turns) are also accepted directly. Provider adapters map the blocks to
 the underlying wire format — Anthropic supports image and document
-content natively; the Azure Chat Completions adapter surfaces a typed
+content natively; the OpenAI Chat Completions adapter surfaces a typed
 error for document blocks it can't represent.
 
 ### Custom middleware
@@ -149,9 +148,8 @@ from `ailoop-core`. Currently shipped:
 
 - **Anthropic** — `ailoop-anthropic`
 - **OpenAI and compatible servers** — `ailoop-openai` (Chat Completions, for
-  OpenAI, OpenRouter, Ollama, LM Studio, vLLM and llama.cpp)
-- **Azure OpenAI** — `ailoop-azure-openai` (Chat Completions v1; Responses API
-  pending)
+  OpenAI, Azure OpenAI, OpenRouter, Ollama, LM Studio, vLLM and llama.cpp;
+  Responses API pending)
 
 Other providers (Bedrock, Gemini's native API, etc.) are not yet
 implemented.
