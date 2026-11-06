@@ -22,6 +22,11 @@
 //! - Extended thinking blocks (`thinking` / `redacted_thinking`)
 //!   round-tripped end-to-end via [`AssistantBlock::Reasoning`] /
 //!   [`AssistantBlock::RedactedReasoning`].
+//! - Server-side fallbacks (`fallbacks: "default"`) opted into with
+//!   [`AnthropicChatModel::server_fallbacks`]; the model that produced
+//!   each turn is reported on [`StreamChunk::TurnFinished`], and a
+//!   `refusal` stop reason maps to
+//!   [`FinishReason::Refusal`](ailoop_core::FinishReason::Refusal).
 //! - Typed HTTP errors via [`AnthropicError`] +
 //!   [`AnthropicApiErrorKind`], wired into [`Retryable`] for
 //!   [`RetryingModel`] backoff.

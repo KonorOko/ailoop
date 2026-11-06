@@ -145,6 +145,7 @@ async fn engine_invokes_middleware_hooks_in_order() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let turn2 = vec![
@@ -155,6 +156,7 @@ async fn engine_invokes_middleware_hooks_in_order() {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
 
@@ -253,6 +255,7 @@ fn text_turn(text: &str) -> Vec<StreamChunk> {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ]
 }

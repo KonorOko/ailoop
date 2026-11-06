@@ -154,6 +154,13 @@ pub enum StreamChunk {
         /// provider does not surface one. Per-turn rather than
         /// aggregated because it is a categorical label, not a counter.
         service_tier: Option<String>,
+        /// Model that produced this turn, as the provider reports it.
+        /// It can differ from [`crate::CompletionModel::model`] when
+        /// the provider served the turn from another model, for
+        /// example after an Anthropic server-side fallback. `None`
+        /// when the provider does not report one. Per-turn, like
+        /// `service_tier`, so telemetry can attribute each turn.
+        model: Option<String>,
     },
 
     // Extend
@@ -624,6 +631,11 @@ pub enum FinishReason {
     /// state needed to resume in a [`StreamChunk::RunSuspended`] right
     /// before `RunFinished`; see [`crate::Suspension`].
     Suspended,
+    /// The provider declined to answer (Anthropic `stop_reason:
+    /// "refusal"`, raised by its safety classifiers). The reply may be
+    /// empty or partial; do not treat partial text as complete.
+    /// Terminal, like [`Self::EndTurn`], but not a normal answer.
+    Refusal,
     /// Provider reported a finish reason the adapter did not map to
     /// one of the typed variants. Treat as terminal.
     Other(String),

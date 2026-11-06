@@ -2431,12 +2431,14 @@ mod tests {
                     reason: FinishReason::ToolUse,
                     usage: Usage::default(),
                     service_tier: None,
+                    model: None,
                 },
             ],
             vec![StreamChunk::TurnFinished {
                 reason: FinishReason::EndTurn,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             }],
         ]);
         let mut registry = ToolRegistry::new();
@@ -2532,6 +2534,7 @@ mod tests {
                 reason: FinishReason::ToolUse,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ];
         // Turn 2 just ends the run; we only care about the assistant
@@ -2540,6 +2543,7 @@ mod tests {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }];
 
         let model = ScriptedModel::new([turn1, turn2]);
@@ -2622,12 +2626,14 @@ mod tests {
                 reason: FinishReason::ToolUse,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ];
         let turn2 = vec![StreamChunk::TurnFinished {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }];
 
         let model = ScriptedModel::new([turn1, turn2]);
@@ -2836,6 +2842,7 @@ mod tests {
                 reason: FinishReason::ToolUse,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ];
         let model = ScriptedModel::new([turn]);
@@ -2934,6 +2941,7 @@ mod tests {
                 reason: FinishReason::ToolUse,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ];
         let model = ScriptedModel::new([turn]);
@@ -3018,6 +3026,7 @@ mod tests {
                 reason: FinishReason::ToolUse,
                 usage,
                 service_tier: None,
+                model: None,
             },
         ]
     }
@@ -3027,6 +3036,7 @@ mod tests {
             reason: FinishReason::EndTurn,
             usage,
             service_tier: None,
+            model: None,
         }]
     }
 

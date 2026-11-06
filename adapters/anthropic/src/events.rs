@@ -48,6 +48,13 @@ pub(crate) enum AnthropicBlock {
     RedactedThinking {
         data: String,
     },
+    /// Server-side fallback boundary (beta `server-side-fallback-*`):
+    /// the `from` model declined and the `to` model continued. An audit
+    /// marker, not content; it carries no deltas.
+    Fallback {
+        #[serde(default)]
+        to: Option<ModelRef>,
+    },
     /// Catches block types we don't know about yet (e.g. server_tool_use,
     /// web_search_tool_result) so deserialization doesn't panic. The stream
     /// handler ignores unknown blocks; if you depend on a beta block, model
@@ -78,7 +85,18 @@ pub(crate) enum AnthropicDelta {
 
 #[derive(Deserialize)]
 pub(crate) struct MessageStartPayload {
+    /// Model that is producing the message. After a server-side
+    /// fallback that happened before any output, this already names
+    /// the fallback model.
+    #[serde(default)]
+    pub model: Option<String>,
     pub usage: MessageStartUsage,
+}
+
+/// `{"model": "..."}` reference used by the `fallback` block.
+#[derive(Deserialize)]
+pub(crate) struct ModelRef {
+    pub model: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -182,6 +200,25 @@ mod tests {
         let json = r#"{"type":"server_tool_use","id":"x","name":"y","input":{}}"#;
         let block: AnthropicBlock = serde_json::from_str(json).unwrap();
         assert!(matches!(block, AnthropicBlock::Unknown));
+    }
+
+    #[test]
+    fn parses_fallback_block() {
+        let json = r#"{"type":"fallback","from":{"model":"claude-opus-5-5"},"to":{"model":"claude-opus-5"}}"#;
+        let block: AnthropicBlock = serde_json::from_str(json).unwrap();
+        match block {
+            AnthropicBlock::Fallback { to } => {
+                assert_eq!(to.map(|t| t.model).as_deref(), Some("claude-opus-5"));
+            }
+            _ => panic!("expected Fallback"),
+        }
+    }
+
+    #[test]
+    fn parses_message_start_model() {
+        let json = r#"{"model":"claude-opus-5","usage":{"input_tokens":3}}"#;
+        let payload: MessageStartPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.model.as_deref(), Some("claude-opus-5"));
     }
 
     #[test]

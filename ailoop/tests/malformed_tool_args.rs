@@ -85,6 +85,7 @@ fn finished(reason: FinishReason) -> StreamChunk {
         reason,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     }
 }
 

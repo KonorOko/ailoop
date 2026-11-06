@@ -36,6 +36,7 @@ async fn run_returns_final_text_for_text_only_turn() {
                 u
             },
             service_tier: None,
+            model: None,
         },
     ]]);
 
@@ -83,6 +84,7 @@ async fn run_final_text_reflects_last_assistant_turn_only() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let turn2 = vec![
@@ -93,6 +95,7 @@ async fn run_final_text_reflects_last_assistant_turn_only() {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let model = ScriptedModel::new([turn1, turn2]);
@@ -221,6 +224,7 @@ async fn run_drains_pre_run_history_compacted_without_clobbering_outcome() {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ]]);
 
@@ -257,6 +261,7 @@ async fn run_extends_history_exactly_once_per_call() {
                 reason: FinishReason::EndTurn,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ],
         vec![
@@ -267,6 +272,7 @@ async fn run_extends_history_exactly_once_per_call() {
                 reason: FinishReason::EndTurn,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ],
     ]);

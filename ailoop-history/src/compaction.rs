@@ -769,6 +769,7 @@ mod tests {
                 reason: FinishReason::EndTurn,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ]
     }
@@ -1136,6 +1137,7 @@ mod tests {
                 reason: FinishReason::EndTurn,
                 usage: self.turn_usage,
                 service_tier: None,
+                model: None,
             });
             Ok(Box::pin(stream::iter(turn.into_iter().map(Ok))))
         }
@@ -1628,6 +1630,7 @@ mod tests {
             reason: FinishReason::EndTurn,
             usage: tokens(100, 0),
             service_tier: None,
+            model: None,
         }]]);
         let strategy = SummarizeStrategy::new(Arc::new(model));
 

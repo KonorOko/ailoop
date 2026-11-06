@@ -77,6 +77,7 @@ fn tool_turn(id: &str) -> Vec<StreamChunk> {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ]
 }

@@ -156,8 +156,9 @@ pub trait ChatMiddleware: Send + Sync {
     /// to work when the check fails.
     ///
     /// `turn.reason` is the turn's finish reason ([`FinishReason::EndTurn`],
-    /// [`FinishReason::MaxTokens`], [`FinishReason::StopSequence`] or
-    /// [`FinishReason::Other`]); a gate usually acts only on `EndTurn`.
+    /// [`FinishReason::MaxTokens`], [`FinishReason::StopSequence`],
+    /// [`FinishReason::Refusal`] or [`FinishReason::Other`]); a gate
+    /// usually acts only on `EndTurn`.
     /// Never fired for [`FinishReason::Aborted`], nor for a turn whose
     /// close delivered messages from the run's [`crate::RunControl`]:
     /// the run continues to answer them, and the hook fires when the
