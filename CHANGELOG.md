@@ -83,6 +83,24 @@ and this project adheres to
   `ScriptedError::of(kind, Option<Duration>)` writes the marker. The
   older `permanent`, `transient[:<ms>]` and `context_overflow` anywhere
   in the message still work.
+- New crate `ailoop-openai`: a Chat Completions adapter for OpenAI and
+  the servers that speak the same API, such as OpenRouter, Ollama,
+  LM Studio, vLLM and llama.cpp. The base URL is configurable and the
+  key optional, so a local server works without one. It streams text,
+  tool calls and the visible reasoning of local models, and sends
+  images as `data:` URIs. `OpenAIClient::list_models` reads
+  `GET /models`. `OpenAIClient::model_capabilities` says whether a
+  model accepts images and tools when the server states it
+  (OpenRouter's listing, Ollama's `/api/show`, LM Studio's
+  `/api/v1/models`), and leaves the answer unknown otherwise.
+  `OpenAIError::category()` sorts failures into what an app shows:
+  offline, local service not running (with its URL), key rejected,
+  rate limit (with the delay from `retry-after-ms`, `retry-after` or
+  OpenAI's `x-ratelimit-reset-*` headers), quota exhausted, model
+  without image or tool support, model not found, context overflow,
+  and a response cut off mid-stream. A stream that ends without a
+  `finish_reason` or `[DONE]` is an error, not a complete answer. No
+  other crate changes.
 
 ### Changed
 
