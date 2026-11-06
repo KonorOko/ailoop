@@ -15,6 +15,10 @@
 //!   in [`ailoop_core`]; the adapter surfaces TTL-broken-down
 //!   `cache_creation_5m_tokens` / `cache_creation_1h_tokens` plus
 //!   per-turn `service_tier` on [`StreamChunk::TurnFinished`].
+//! - [`ReasoningEffort`](ailoop_core::ReasoningEffort) sent as adaptive
+//!   thinking (`thinking.type = "adaptive"` + `output_config.effort`)
+//!   on Claude 4.6 and later, and as `budget_tokens` on Claude 4.5 and
+//!   earlier; override with [`AnthropicChatModel::thinking_mode`].
 //! - Extended thinking blocks (`thinking` / `redacted_thinking`)
 //!   round-tripped end-to-end via [`AssistantBlock::Reasoning`] /
 //!   [`AssistantBlock::RedactedReasoning`].
@@ -52,9 +56,11 @@ mod events;
 mod model;
 mod request;
 mod stream;
+mod thinking;
 mod tokenizer;
 
 pub use client::AnthropicClient;
 pub use errors::{AnthropicApiErrorKind, AnthropicError};
 pub use model::AnthropicChatModel;
+pub use thinking::ThinkingMode;
 pub use tokenizer::OnlineCalibratedTokenizer;
