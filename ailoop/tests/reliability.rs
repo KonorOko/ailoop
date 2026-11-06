@@ -165,6 +165,7 @@ async fn no_timeout_or_cancellation_leaves_run_unaffected() {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ]]);
     let registry = ToolRegistry::new();
@@ -246,6 +247,7 @@ async fn abort_during_tool_loop_preserves_prior_tool_results() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let model = ScriptedModel::new([turn]);
@@ -380,6 +382,7 @@ async fn timeout_aborts_run_inside_slow_middleware_hook() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let model = ScriptedModel::new([turn]);
@@ -457,6 +460,7 @@ async fn tool_context_cancellation_mirrors_run_config() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let model = ScriptedModel::new([turn]);

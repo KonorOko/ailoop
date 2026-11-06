@@ -141,6 +141,7 @@ fn finish_reason_str(r: &FinishReason) -> &'static str {
         FinishReason::ToolUse => "tool_use",
         FinishReason::MaxTokens => "max_tokens",
         FinishReason::StopSequence => "stop_sequence",
+        FinishReason::Refusal => "refusal",
         FinishReason::Aborted(_) => "aborted",
         FinishReason::Suspended => "suspended",
         FinishReason::Other(_) => "other",
@@ -341,11 +342,13 @@ impl ChatMiddleware for JsonTracer {
                 reason,
                 usage,
                 service_tier,
+                model,
             } => {
                 let mut p = serde_json::Map::new();
                 p.insert("reason".into(), finish_reason_payload(reason));
                 p.insert("usage".into(), usage_payload(usage));
                 p.insert("service_tier".into(), json!(service_tier));
+                p.insert("model".into(), json!(model));
                 self.emit("turn_finished", p).await;
             }
             StreamChunk::HistoryCompacted {
@@ -712,6 +715,7 @@ mod tests {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }]]);
         let registry = ToolRegistry::new();
         let run_id = RunId::new();
@@ -796,12 +800,14 @@ mod tests {
                     reason: FinishReason::ToolUse,
                     usage: Usage::default(),
                     service_tier: None,
+                    model: None,
                 },
             ],
             vec![StreamChunk::TurnFinished {
                 reason: FinishReason::EndTurn,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             }],
         ]);
         let mut registry = ToolRegistry::new();

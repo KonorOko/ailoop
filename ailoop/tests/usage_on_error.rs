@@ -81,6 +81,7 @@ fn call_turn(tool: &str, args: Value, usage: Usage) -> ScriptedTurn {
             reason: FinishReason::ToolUse,
             usage,
             service_tier: None,
+            model: None,
         }),
     ])
 }
@@ -92,6 +93,7 @@ fn text_turn(text: &str, usage: Usage) -> ScriptedTurn {
             reason: FinishReason::EndTurn,
             usage,
             service_tier: None,
+            model: None,
         }),
     ])
 }
@@ -142,6 +144,7 @@ async fn usage_includes_a_sub_agent_that_ran_before_the_failure() {
             reason: FinishReason::EndTurn,
             usage: tokens(100, 20),
             service_tier: None,
+            model: None,
         },
     ]]))
     .build()

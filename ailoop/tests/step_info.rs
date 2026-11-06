@@ -56,12 +56,14 @@ async fn on_chat_request_sees_iteration_and_cap() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let end_turn = vec![StreamChunk::TurnFinished {
         reason: FinishReason::EndTurn,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     }];
     let model = ScriptedModel::new([tool_turn, end_turn]);
     let mut registry = ToolRegistry::new();

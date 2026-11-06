@@ -124,12 +124,14 @@ async fn on_tool_args_rewrites_args_before_tool_invocation() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let turn2 = vec![StreamChunk::TurnFinished {
         reason: FinishReason::EndTurn,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     }];
     let model = ScriptedModel::new([turn1, turn2]);
 
@@ -185,12 +187,14 @@ async fn on_tool_result_rewrites_result_before_next_turn() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let turn2 = vec![StreamChunk::TurnFinished {
         reason: FinishReason::EndTurn,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     }];
 
     let recorder = Arc::new(RequestRecorder::default());
@@ -279,12 +283,14 @@ async fn on_assistant_text_is_off_by_default() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let turn2 = vec![StreamChunk::TurnFinished {
         reason: FinishReason::EndTurn,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     }];
 
     let recorder = Arc::new(RequestRecorder::default());
@@ -342,12 +348,14 @@ async fn enable_assistant_text_opts_in_to_assistant_rewrites() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let turn2 = vec![StreamChunk::TurnFinished {
         reason: FinishReason::EndTurn,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     }];
 
     let recorder = Arc::new(RequestRecorder::default());
@@ -407,12 +415,14 @@ async fn reasoning_blocks_are_not_sanitized() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let turn2 = vec![StreamChunk::TurnFinished {
         reason: FinishReason::EndTurn,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     }];
 
     let recorder = Arc::new(RequestRecorder::default());
@@ -520,12 +530,14 @@ async fn tool_args_callback_can_filter_by_name() {
             reason: FinishReason::ToolUse,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         },
     ];
     let turn2 = vec![StreamChunk::TurnFinished {
         reason: FinishReason::EndTurn,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     }];
 
     let model = ScriptedModel::new([turn1, turn2]);
@@ -582,5 +594,6 @@ fn one_turn_model() -> ScriptedModel {
         reason: FinishReason::EndTurn,
         usage: Usage::default(),
         service_tier: None,
+        model: None,
     }]])
 }

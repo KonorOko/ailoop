@@ -107,6 +107,7 @@ impl ChatMiddleware for TracingMiddleware {
                 reason,
                 usage,
                 service_tier,
+                model,
             } => {
                 tracing::debug!(
                     target: "ailoop.chunk",
@@ -118,6 +119,7 @@ impl ChatMiddleware for TracingMiddleware {
                     cache_creation_5m_tokens = usage.cache_creation_5m_tokens,
                     cache_creation_1h_tokens = usage.cache_creation_1h_tokens,
                     service_tier = service_tier.as_deref().unwrap_or(""),
+                    model = model.as_deref().unwrap_or(""),
                     "turn finished",
                 );
             }
@@ -426,6 +428,7 @@ mod tests {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }]]);
         let registry = ToolRegistry::new();
         let mw: Arc<dyn ChatMiddleware> = Arc::new(TracingMiddleware::new());
