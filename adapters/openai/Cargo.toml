@@ -1,0 +1,30 @@
+[package]
+name = "ailoop-openai"
+description = "OpenAI Chat Completions adapter for ailoop, also for OpenAI-compatible servers (OpenRouter, Ollama, LM Studio)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["llm", "openai", "ollama", "openrouter", "agent"]
+categories = ["api-bindings", "asynchronous"]
+
+[dependencies]
+ailoop-core.workspace = true
+
+eventsource-stream.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+dotenvy.workspace = true
+
+[dev-dependencies]
+ailoop.workspace = true
+tokio.workspace = true
