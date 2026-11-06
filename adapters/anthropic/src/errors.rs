@@ -194,6 +194,18 @@ pub enum AnthropicError {
         message: String,
     },
 
+    /// The stream ended before Anthropic said the message was done:
+    /// the body stopped without a `message_stop` event, or
+    /// `message_stop` arrived without a `stop_reason` in an earlier
+    /// `message_delta`. The output received so far may be incomplete.
+    /// Transient: resending the request can produce a whole response.
+    #[error("response interrupted: {message}")]
+    #[non_exhaustive]
+    Interrupted {
+        /// What was observed.
+        message: String,
+    },
+
     /// Configuration error surfaced from
     /// [`AnthropicClient::from_env`](crate::AnthropicClient::from_env) /
     /// [`from_env_var`](crate::AnthropicClient::from_env_var): the API
@@ -242,7 +254,9 @@ impl Retryable for AnthropicError {
                     RetryClassification::Permanent
                 }
             }
-            AnthropicError::Http(_) => RetryClassification::Transient { retry_after: None },
+            AnthropicError::Http(_) | AnthropicError::Interrupted { .. } => {
+                RetryClassification::Transient { retry_after: None }
+            }
             // Parse failures are deterministic — retrying won't change the bytes.
             AnthropicError::Sse(_) | AnthropicError::Json(_) | AnthropicError::Config(_) => {
                 RetryClassification::Permanent
@@ -275,6 +289,8 @@ impl ProviderError for AnthropicError {
     /// - [`Status`](AnthropicError::Status): from the HTTP status.
     /// - [`Http`](AnthropicError::Http) and an SSE transport failure:
     ///   [`Network`](ProviderErrorKind::Network).
+    /// - [`Interrupted`](AnthropicError::Interrupted):
+    ///   [`Interrupted`](ProviderErrorKind::Interrupted).
     /// - Any other SSE failure, [`Json`](AnthropicError::Json) and
     ///   [`Config`](AnthropicError::Config):
     ///   [`Other`](ProviderErrorKind::Other).
@@ -288,6 +304,7 @@ impl ProviderError for AnthropicError {
             | AnthropicError::Sse(eventsource_stream::EventStreamError::Transport(_)) => {
                 ProviderErrorKind::Network
             }
+            AnthropicError::Interrupted { .. } => ProviderErrorKind::Interrupted,
             AnthropicError::Sse(_) | AnthropicError::Json(_) | AnthropicError::Config(_) => {
                 ProviderErrorKind::Other
             }
@@ -636,5 +653,17 @@ mod tests {
             AnthropicError::Config("ANTHROPIC_API_KEY".into()).kind(),
             ProviderErrorKind::Other,
         );
+    }
+
+    #[test]
+    fn interrupted_stream_is_transient() {
+        let err = AnthropicError::Interrupted {
+            message: "stream ended without message_stop".into(),
+        };
+        assert_eq!(err.kind(), ProviderErrorKind::Interrupted);
+        assert!(matches!(
+            err.retry_classification(),
+            RetryClassification::Transient { retry_after: None }
+        ));
     }
 }
