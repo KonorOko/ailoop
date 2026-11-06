@@ -274,6 +274,7 @@ mod tests {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }
     }
 
