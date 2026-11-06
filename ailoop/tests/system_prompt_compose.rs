@@ -59,6 +59,7 @@ impl CompletionModel for CapturingModel {
                 reason: FinishReason::EndTurn,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             }),
         ];
         Ok(Box::pin(futures::stream::iter(chunks)))

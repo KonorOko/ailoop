@@ -745,6 +745,7 @@ mod tests {
                 reason: FinishReason::EndTurn,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ]
     }
@@ -967,6 +968,7 @@ mod tests {
                 reason: FinishReason::ToolUse,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ];
         let model = ScriptedModel::new([tool_turn]);
@@ -1506,6 +1508,7 @@ mod tests {
                 reason: FinishReason::ToolUse,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ]
     }
@@ -1686,6 +1689,7 @@ mod tests {
                 reason: FinishReason::EndTurn,
                 usage,
                 service_tier: None,
+                model: None,
             },
         ]
     }
@@ -1705,6 +1709,7 @@ mod tests {
                 reason: FinishReason::ToolUse,
                 usage,
                 service_tier: None,
+                model: None,
             },
         ]
     }

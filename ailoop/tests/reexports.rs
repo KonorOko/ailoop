@@ -135,6 +135,7 @@ async fn scripted_model_is_reachable_through_the_testing_feature() {
             reason: FinishReason::EndTurn,
             usage: Usage::new(3, 1),
             service_tier: None,
+            model: None,
         },
     ]]);
     let mut chat = Conversation::builder(model).build().unwrap();

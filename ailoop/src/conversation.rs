@@ -1834,6 +1834,7 @@ mod tests {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }]]);
 
         let mut chat = Conversation::builder(model)
@@ -2060,6 +2061,7 @@ mod tests {
             reason: FinishReason::EndTurn,
             usage: Usage::default(),
             service_tier: None,
+            model: None,
         }]])
     }
 
@@ -2306,6 +2308,7 @@ mod tests {
                 reason: FinishReason::EndTurn,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ]]);
         let mut chat = Conversation::builder(model)
@@ -2338,6 +2341,7 @@ mod tests {
                 reason: FinishReason::EndTurn,
                 usage: Usage::default(),
                 service_tier: None,
+                model: None,
             },
         ]]);
         let mut resumed = ConversationBuilder::from_snapshot(resumed_model, restored)

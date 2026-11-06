@@ -268,6 +268,7 @@ where
             reason,
             usage,
             service_tier: None,
+            model: None,
         };
     };
 

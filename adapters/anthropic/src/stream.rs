@@ -45,12 +45,19 @@ where
         let mut saw_message_stop = false;
         let mut usage = Usage::default();
         let mut service_tier: Option<String> = None;
+        // Model that produced the turn: `message_start` names it, and a
+        // mid-stream `fallback` block replaces it with the model that
+        // continued.
+        let mut served_model: Option<String> = None;
 
         while let Some(event) = events.next().await {
             let parsed = event?;
 
             match parsed {
                 AnthropicEvent::MessageStart {message} => {
+                    if message.model.is_some() {
+                        served_model = message.model;
+                    }
                     usage.input_tokens = message.usage.input_tokens;
                     usage.cached_input_tokens = message.usage.cache_read_input_tokens;
                     apply_cache_creation(
@@ -106,6 +113,14 @@ where
                         AnthropicBlock::RedactedThinking { data } => {
                             // Atomic block: emit immediately, no state needed.
                             yield StreamChunk::RedactedReasoningBlock { data };
+                        }
+                        AnthropicBlock::Fallback { to } => {
+                            // Audit marker for a server-side fallback;
+                            // only the model it switched to matters.
+                            if let Some(to) = to {
+                                served_model = Some(to.model);
+                            }
+                            blocks.insert(index, BlockState::Unknown);
                         }
                         AnthropicBlock::Unknown => {
                             // Unknown block type — track as Text-like so deltas
@@ -195,6 +210,7 @@ where
             reason,
             usage,
             service_tier,
+            model: served_model,
         };
     };
 
@@ -232,6 +248,7 @@ pub fn map_stop_reason(reason: &Option<String>) -> FinishReason {
         Some("tool_use") => FinishReason::ToolUse,
         Some("max_tokens") => FinishReason::MaxTokens,
         Some("stop_sequence") => FinishReason::StopSequence,
+        Some("refusal") => FinishReason::Refusal,
         Some(other) => FinishReason::Other(other.to_string()),
         None => FinishReason::EndTurn,
     }
@@ -283,6 +300,7 @@ mod tests {
         let events = vec![
             ok(AnthropicEvent::MessageStart {
                 message: MessageStartPayload {
+                    model: None,
                     usage: MessageStartUsage {
                         input_tokens: 12,
                         ..Default::default()
@@ -406,6 +424,7 @@ mod tests {
                 reason,
                 usage,
                 service_tier,
+                ..
             } => {
                 assert!(matches!(reason, FinishReason::ToolUse));
                 assert_eq!(usage.input_tokens, 12);
@@ -428,6 +447,7 @@ mod tests {
         let events = vec![
             ok(AnthropicEvent::MessageStart {
                 message: MessageStartPayload {
+                    model: None,
                     usage: MessageStartUsage {
                         input_tokens: 1,
                         ..Default::default()
@@ -469,6 +489,7 @@ mod tests {
         let events = vec![
             ok(AnthropicEvent::MessageStart {
                 message: MessageStartPayload {
+                    model: None,
                     usage: MessageStartUsage {
                         input_tokens: 100,
                         cache_read_input_tokens: 25,
@@ -503,6 +524,7 @@ mod tests {
                 reason,
                 usage,
                 service_tier,
+                ..
             } => {
                 assert!(matches!(reason, FinishReason::EndTurn));
                 assert_eq!(usage.input_tokens, 100);
@@ -525,6 +547,7 @@ mod tests {
         let events = vec![
             ok(AnthropicEvent::MessageStart {
                 message: MessageStartPayload {
+                    model: None,
                     usage: MessageStartUsage {
                         input_tokens: 10,
                         cache_creation_input_tokens: 42,
@@ -574,6 +597,7 @@ mod tests {
         let events = vec![
             ok(AnthropicEvent::MessageStart {
                 message: MessageStartPayload {
+                    model: None,
                     usage: MessageStartUsage {
                         input_tokens: 1,
                         ..Default::default()
@@ -665,6 +689,7 @@ mod tests {
         let events = vec![
             ok(AnthropicEvent::MessageStart {
                 message: MessageStartPayload {
+                    model: None,
                     usage: MessageStartUsage {
                         input_tokens: 1,
                         ..Default::default()
@@ -719,6 +744,7 @@ mod tests {
         let mut events = vec![
             ok(AnthropicEvent::MessageStart {
                 message: MessageStartPayload {
+                    model: None,
                     usage: MessageStartUsage::default(),
                 },
             }),
@@ -842,6 +868,7 @@ mod tests {
         let events = vec![
             ok(AnthropicEvent::MessageStart {
                 message: MessageStartPayload {
+                    model: None,
                     usage: MessageStartUsage::default(),
                 },
             }),
@@ -904,6 +931,7 @@ mod tests {
         let start = || {
             ok(AnthropicEvent::MessageStart {
                 message: MessageStartPayload {
+                    model: None,
                     usage: MessageStartUsage::default(),
                 },
             })
@@ -923,5 +951,146 @@ mod tests {
             assert!(chunks.is_empty(), "{chunks:?}");
             assert!(matches!(err, AnthropicError::Interrupted { .. }), "{err:?}");
         }
+    }
+
+    fn start(model: &str) -> Result<AnthropicEvent, AnthropicError> {
+        ok(AnthropicEvent::MessageStart {
+            message: MessageStartPayload {
+                model: Some(model.into()),
+                usage: MessageStartUsage {
+                    input_tokens: 5,
+                    ..Default::default()
+                },
+            },
+        })
+    }
+
+    fn text_block(index: u32, text: &str) -> Vec<Result<AnthropicEvent, AnthropicError>> {
+        vec![
+            ok(AnthropicEvent::ContentBlockStart {
+                index,
+                content_block: AnthropicBlock::Text {
+                    text: String::new(),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockDelta {
+                index,
+                delta: AnthropicDelta::TextDelta { text: text.into() },
+            }),
+            ok(AnthropicEvent::ContentBlockStop { index }),
+        ]
+    }
+
+    fn fallback_block(index: u32, to: &str) -> Vec<Result<AnthropicEvent, AnthropicError>> {
+        let block: AnthropicBlock = serde_json::from_value(json!({
+            "type": "fallback",
+            "from": {"model": "claude-opus-5-5"},
+            "to": {"model": to},
+        }))
+        .unwrap();
+        vec![
+            ok(AnthropicEvent::ContentBlockStart {
+                index,
+                content_block: block,
+            }),
+            ok(AnthropicEvent::ContentBlockStop { index }),
+        ]
+    }
+
+    fn stop(reason: &str) -> Vec<Result<AnthropicEvent, AnthropicError>> {
+        vec![
+            ok(AnthropicEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some(reason.into()),
+                },
+                usage: UsageDelta {
+                    output_tokens: 3,
+                    ..Default::default()
+                },
+            }),
+            ok(AnthropicEvent::MessageStop),
+        ]
+    }
+
+    fn turn_finished(chunks: &[StreamChunk]) -> (&FinishReason, Option<&str>) {
+        match chunks.last() {
+            Some(StreamChunk::TurnFinished { reason, model, .. }) => (reason, model.as_deref()),
+            other => panic!("expected TurnFinished, got {other:?}"),
+        }
+    }
+
+    fn text_of(chunks: &[StreamChunk]) -> String {
+        chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::TextDelta { delta } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn turn_reports_the_model_from_message_start() {
+        let mut events = vec![start("claude-opus-5-5")];
+        events.extend(text_block(0, "hi"));
+        events.extend(stop("end_turn"));
+        let chunks = run(events).await;
+        let (reason, model) = turn_finished(&chunks);
+        assert_eq!(reason, &FinishReason::EndTurn);
+        assert_eq!(model, Some("claude-opus-5-5"));
+    }
+
+    /// Pre-output fallback: `message_start` already names the fallback
+    /// model and the `fallback` block comes first. The block emits
+    /// nothing.
+    #[tokio::test]
+    async fn pre_output_fallback_reports_the_fallback_model() {
+        let mut events = vec![start("claude-opus-5")];
+        events.extend(fallback_block(0, "claude-opus-5"));
+        events.extend(text_block(1, "answer"));
+        events.extend(stop("end_turn"));
+        let chunks = run(events).await;
+        assert_eq!(text_of(&chunks), "answer");
+        assert_eq!(
+            chunks.len(),
+            2,
+            "only the text delta and TurnFinished: {chunks:?}"
+        );
+        let (reason, model) = turn_finished(&chunks);
+        assert_eq!(reason, &FinishReason::EndTurn);
+        assert_eq!(model, Some("claude-opus-5"));
+    }
+
+    /// Mid-stream fallback: the partial stays, the `fallback` block marks
+    /// the boundary and names the model that finished the turn.
+    #[tokio::test]
+    async fn mid_stream_fallback_reports_the_model_that_continued() {
+        let mut events = vec![start("claude-opus-5-5")];
+        events.extend(text_block(0, "partial "));
+        events.extend(fallback_block(1, "claude-opus-4-8"));
+        events.extend(text_block(2, "rest"));
+        events.extend(stop("end_turn"));
+        let chunks = run(events).await;
+        assert_eq!(text_of(&chunks), "partial rest");
+        let (_, model) = turn_finished(&chunks);
+        assert_eq!(model, Some("claude-opus-4-8"));
+    }
+
+    #[tokio::test]
+    async fn refusal_stop_reason_is_typed() {
+        let mut events = vec![start("claude-opus-5-5")];
+        events.extend(stop("refusal"));
+        let chunks = run(events).await;
+        let (reason, model) = turn_finished(&chunks);
+        assert_eq!(reason, &FinishReason::Refusal);
+        assert_eq!(model, Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn unknown_stop_reason_stays_other() {
+        assert_eq!(
+            map_stop_reason(&Some("pause_turn".into())),
+            FinishReason::Other("pause_turn".into())
+        );
     }
 }
