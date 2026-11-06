@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ailoop_core::{ProviderError, RetryClassification, Retryable};
+use ailoop_core::{ProviderError, ProviderErrorKind, RetryClassification, Retryable};
 use reqwest::StatusCode;
 
 /// Discriminated category of an HTTP-level Anthropic API error, derived
@@ -44,6 +44,14 @@ pub enum AnthropicApiErrorKind {
     /// `not_found_error` — model id or resource does not exist.
     /// Permanent.
     NotFound,
+    /// The account has no credit left (`"Your credit balance is too
+    /// low"`). Anthropic reports it as an `invalid_request_error`, so
+    /// it is recognised by the `"credit balance"` phrase in the
+    /// message. Permanent: waiting does not add credit.
+    ///
+    /// Only produced by [`from_error`](Self::from_error), which sees
+    /// the message.
+    InsufficientCredit,
     /// `request_too_large` — request body exceeded provider limits.
     /// Permanent unless the caller compacts and retries explicitly.
     RequestTooLarge,
@@ -82,16 +90,40 @@ impl AnthropicApiErrorKind {
     /// `invalid_request_error`; the overflow is recognised by its
     /// documented `"prompt is too long"` message (matched
     /// case-insensitively, since the API appends token counts).
+    ///
+    /// Also tells an exhausted credit balance
+    /// ([`InsufficientCredit`](Self::InsufficientCredit)) apart, by the
+    /// `"credit balance"` phrase in the message of an
+    /// `invalid_request_error`, a `permission_error` or an unknown
+    /// type.
     pub fn from_error(error_type: &str, message: &str) -> Self {
+        let message = message.to_ascii_lowercase();
         match Self::from_error_type(error_type) {
-            Self::InvalidRequest if is_prompt_too_long(message) => Self::ContextOverflow,
+            Self::InvalidRequest | Self::Permission | Self::Other(_)
+                if message.contains("credit balance") =>
+            {
+                Self::InsufficientCredit
+            }
+            Self::InvalidRequest if message.contains("prompt is too long") => Self::ContextOverflow,
             kind => kind,
         }
     }
-}
 
-fn is_prompt_too_long(message: &str) -> bool {
-    message.to_ascii_lowercase().contains("prompt is too long")
+    /// The provider-agnostic [`ProviderErrorKind`] for this kind.
+    pub fn provider_kind(&self) -> ProviderErrorKind {
+        match self {
+            Self::Overloaded | Self::ServerError => ProviderErrorKind::Unavailable,
+            Self::RateLimit => ProviderErrorKind::RateLimited,
+            Self::InvalidRequest => ProviderErrorKind::InvalidRequest,
+            Self::ContextOverflow => ProviderErrorKind::ContextOverflow,
+            Self::Authentication => ProviderErrorKind::Auth,
+            Self::Permission => ProviderErrorKind::Permission,
+            Self::NotFound => ProviderErrorKind::ModelNotFound,
+            Self::InsufficientCredit => ProviderErrorKind::QuotaExhausted,
+            Self::RequestTooLarge => ProviderErrorKind::RequestTooLarge,
+            Self::Other(_) => ProviderErrorKind::Other,
+        }
+    }
 }
 
 /// Failure surface of [`AnthropicChatModel::chat_stream`](crate::AnthropicChatModel)
@@ -191,6 +223,7 @@ fn classify_kind(
         | AnthropicApiErrorKind::InvalidRequest
         | AnthropicApiErrorKind::ContextOverflow
         | AnthropicApiErrorKind::NotFound
+        | AnthropicApiErrorKind::InsufficientCredit
         | AnthropicApiErrorKind::RequestTooLarge => RetryClassification::Permanent,
     }
 }
@@ -218,20 +251,47 @@ impl Retryable for AnthropicError {
     }
 }
 
+/// Kind for a response whose body is not Anthropic's error envelope,
+/// read from the status alone.
+fn kind_from_status(status: StatusCode) -> ProviderErrorKind {
+    match status.as_u16() {
+        401 => ProviderErrorKind::Auth,
+        403 => ProviderErrorKind::Permission,
+        404 => ProviderErrorKind::ModelNotFound,
+        413 => ProviderErrorKind::RequestTooLarge,
+        429 => ProviderErrorKind::RateLimited,
+        500..=599 => ProviderErrorKind::Unavailable,
+        _ => ProviderErrorKind::Other,
+    }
+}
+
 impl ProviderError for AnthropicError {
-    /// `true` for [`AnthropicApiErrorKind::ContextOverflow`], whether it
-    /// arrived as an HTTP error envelope or as a mid-stream error event.
-    fn is_context_overflow(&self) -> bool {
-        matches!(
-            self,
-            AnthropicError::Api {
-                kind: AnthropicApiErrorKind::ContextOverflow,
-                ..
-            } | AnthropicError::Provider {
-                kind: AnthropicApiErrorKind::ContextOverflow,
-                ..
+    /// - [`Api`](AnthropicError::Api) and
+    ///   [`Provider`](AnthropicError::Provider): from their
+    ///   [`AnthropicApiErrorKind`] (see
+    ///   [`AnthropicApiErrorKind::provider_kind`]), so an overflow or an
+    ///   exhausted credit is recognised whether it arrived as an HTTP
+    ///   error envelope or as a mid-stream error event.
+    /// - [`Status`](AnthropicError::Status): from the HTTP status.
+    /// - [`Http`](AnthropicError::Http) and an SSE transport failure:
+    ///   [`Network`](ProviderErrorKind::Network).
+    /// - Any other SSE failure, [`Json`](AnthropicError::Json) and
+    ///   [`Config`](AnthropicError::Config):
+    ///   [`Other`](ProviderErrorKind::Other).
+    fn kind(&self) -> ProviderErrorKind {
+        match self {
+            AnthropicError::Api { kind, .. } | AnthropicError::Provider { kind, .. } => {
+                kind.provider_kind()
             }
-        )
+            AnthropicError::Status { status, .. } => kind_from_status(*status),
+            AnthropicError::Http(_)
+            | AnthropicError::Sse(eventsource_stream::EventStreamError::Transport(_)) => {
+                ProviderErrorKind::Network
+            }
+            AnthropicError::Sse(_) | AnthropicError::Json(_) | AnthropicError::Config(_) => {
+                ProviderErrorKind::Other
+            }
+        }
     }
 }
 
@@ -452,6 +512,129 @@ mod tests {
             })
             .await,
             3
+        );
+    }
+
+    #[test]
+    fn from_error_recognises_an_exhausted_credit_balance() {
+        let message = "Your credit balance is too low to access the Anthropic API.";
+        for error_type in ["invalid_request_error", "permission_error", "billing_error"] {
+            assert_eq!(
+                AnthropicApiErrorKind::from_error(error_type, message),
+                AnthropicApiErrorKind::InsufficientCredit,
+                "{error_type}",
+            );
+        }
+        // An outage that mentions billing is still an outage.
+        assert_eq!(
+            AnthropicApiErrorKind::from_error("overloaded_error", message),
+            AnthropicApiErrorKind::Overloaded,
+        );
+        let err = AnthropicError::Api {
+            status: StatusCode::BAD_REQUEST,
+            kind: AnthropicApiErrorKind::InsufficientCredit,
+            message: message.into(),
+            retry_after: None,
+        };
+        assert_eq!(err.kind(), ProviderErrorKind::QuotaExhausted);
+        assert_eq!(err.retry_classification(), RetryClassification::Permanent);
+    }
+
+    #[test]
+    fn api_kinds_map_to_provider_kinds() {
+        let cases = [
+            (
+                AnthropicApiErrorKind::Overloaded,
+                ProviderErrorKind::Unavailable,
+            ),
+            (
+                AnthropicApiErrorKind::ServerError,
+                ProviderErrorKind::Unavailable,
+            ),
+            (
+                AnthropicApiErrorKind::RateLimit,
+                ProviderErrorKind::RateLimited,
+            ),
+            (
+                AnthropicApiErrorKind::InvalidRequest,
+                ProviderErrorKind::InvalidRequest,
+            ),
+            (
+                AnthropicApiErrorKind::ContextOverflow,
+                ProviderErrorKind::ContextOverflow,
+            ),
+            (
+                AnthropicApiErrorKind::Authentication,
+                ProviderErrorKind::Auth,
+            ),
+            (
+                AnthropicApiErrorKind::Permission,
+                ProviderErrorKind::Permission,
+            ),
+            (
+                AnthropicApiErrorKind::NotFound,
+                ProviderErrorKind::ModelNotFound,
+            ),
+            (
+                AnthropicApiErrorKind::InsufficientCredit,
+                ProviderErrorKind::QuotaExhausted,
+            ),
+            (
+                AnthropicApiErrorKind::RequestTooLarge,
+                ProviderErrorKind::RequestTooLarge,
+            ),
+            (
+                AnthropicApiErrorKind::Other("future".into()),
+                ProviderErrorKind::Other,
+            ),
+        ];
+        for (api, expected) in cases {
+            let http = AnthropicError::Api {
+                status: StatusCode::BAD_REQUEST,
+                kind: api.clone(),
+                message: String::new(),
+                retry_after: None,
+            };
+            let event = AnthropicError::Provider {
+                kind: api.clone(),
+                message: String::new(),
+            };
+            assert_eq!(http.kind(), expected, "{api:?}");
+            assert_eq!(event.kind(), expected, "{api:?}");
+        }
+    }
+
+    #[test]
+    fn status_fallback_kind_comes_from_the_status() {
+        let cases = [
+            (401, ProviderErrorKind::Auth),
+            (403, ProviderErrorKind::Permission),
+            (404, ProviderErrorKind::ModelNotFound),
+            (413, ProviderErrorKind::RequestTooLarge),
+            (429, ProviderErrorKind::RateLimited),
+            (502, ProviderErrorKind::Unavailable),
+            (529, ProviderErrorKind::Unavailable),
+            (400, ProviderErrorKind::Other),
+        ];
+        for (status, expected) in cases {
+            let err = AnthropicError::Status {
+                status: StatusCode::from_u16(status).unwrap(),
+                body: "<html/>".into(),
+            };
+            assert_eq!(err.kind(), expected, "{status}");
+        }
+    }
+
+    #[test]
+    fn parse_failures_are_other() {
+        let json = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        assert_eq!(AnthropicError::Json(json).kind(), ProviderErrorKind::Other);
+        let utf8 = String::from_utf8(vec![0xff]).unwrap_err();
+        let sse = AnthropicError::Sse(eventsource_stream::EventStreamError::Utf8(utf8));
+        assert_eq!(sse.kind(), ProviderErrorKind::Other);
+        assert_eq!(
+            AnthropicError::Config("ANTHROPIC_API_KEY".into()).kind(),
+            ProviderErrorKind::Other,
         );
     }
 }

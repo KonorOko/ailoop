@@ -559,6 +559,10 @@ async fn overflow_with_nothing_to_compact_fails_without_retry() {
         matches!(err.kind(), EngineError::ContextOverflow(_)),
         "{err:?}"
     );
+    assert_eq!(
+        err.provider_kind(),
+        Some(ailoop::ProviderErrorKind::ContextOverflow)
+    );
     assert_eq!(*sizes.lock().unwrap(), vec![1]);
     assert_eq!(chat.messages().len(), 1);
 }
@@ -575,6 +579,10 @@ async fn overflow_is_a_model_error_when_recovery_is_off() {
 
     let err = chat.run("go").await.expect_err("no recovery");
     assert!(matches!(err.kind(), EngineError::Model(_)), "{err:?}");
+    assert_eq!(
+        err.kind().provider_kind(),
+        Some(ailoop::ProviderErrorKind::ContextOverflow)
+    );
     assert_eq!(*sizes.lock().unwrap(), vec![5]);
     assert_eq!(chat.messages().len(), 5);
 }
