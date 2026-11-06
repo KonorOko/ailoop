@@ -285,7 +285,8 @@ fn reasoning_effort_str(effort: ReasoningEffort) -> Option<&'static str> {
         ReasoningEffort::Minimal => Some("minimal"),
         ReasoningEffort::Low => Some("low"),
         ReasoningEffort::Medium => Some("medium"),
-        ReasoningEffort::High => Some("high"),
+        // Chat Completions tops out at "high".
+        ReasoningEffort::High | ReasoningEffort::XHigh | ReasoningEffort::Max => Some("high"),
         ReasoningEffort::Budget(n) => Some(if n < 2048 {
             "low"
         } else if n < 8192 {
@@ -336,6 +337,8 @@ mod tests {
             (ReasoningEffort::Low, "low"),
             (ReasoningEffort::Medium, "medium"),
             (ReasoningEffort::High, "high"),
+            (ReasoningEffort::XHigh, "high"),
+            (ReasoningEffort::Max, "high"),
         ] {
             let mut req = base_req();
             req.reasoning_effort = Some(variant);
