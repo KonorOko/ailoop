@@ -40,8 +40,14 @@ impl OpenAIChatModel {
 impl CompletionModel for OpenAIChatModel {
     type Error = OpenAIError;
 
+    /// `"azure-openai"` for a client built with
+    /// [`OpenAIClient::azure`], `"openai"` otherwise.
     fn name(&self) -> &str {
-        "openai"
+        if self.client.is_azure() {
+            "azure-openai"
+        } else {
+            "openai"
+        }
     }
 
     fn model(&self) -> &str {
@@ -62,7 +68,8 @@ impl CompletionModel for OpenAIChatModel {
 
         let builder = self
             .client
-            .authorize(self.client.http_client.post(&url))?
+            .authorize(self.client.http_client.post(&url))
+            .await?
             .header("accept", "text/event-stream")
             .json(&body);
         let response = builder

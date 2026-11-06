@@ -1,6 +1,6 @@
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use ailoop_core::{ProviderError, RetryClassification, Retryable};
+use ailoop_core::{Capability, ProviderError, ProviderErrorKind, RetryClassification, Retryable};
 use reqwest::StatusCode;
 
 /// Typed category of an error the server reported, from the HTTP
@@ -37,12 +37,15 @@ pub enum OpenAIApiErrorKind {
     /// Permanent; compact the history and resend.
     ContextOverflow,
     /// 404 naming the model: not installed locally, misspelled, or not
-    /// available to this key.
+    /// available to this key. Azure's `DeploymentNotFound` lands here
+    /// too, since on Azure the deployment is the model.
     ModelNotFound,
     /// Other 404.
     NotFound,
     /// The provider's moderation blocked the request. Permanent.
     ContentFilter,
+    /// 413: the request body is too large. Permanent.
+    RequestTooLarge,
     /// Other 400/422: a malformed or invalid request. Permanent.
     InvalidRequest,
     /// 5xx, or a 503/529 overload. Transient.
@@ -52,70 +55,12 @@ pub enum OpenAIApiErrorKind {
     Other(String),
 }
 
-/// One thing the model may not support, for
-/// [`ErrorCategory::ModelUnsupported`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Capability {
-    /// Image input.
-    Images,
-    /// Tool (function) calling.
-    Tools,
-}
-
-/// What went wrong, in the terms an app shows to its user. Built by
-/// [`OpenAIError::category`]; one value per message the app needs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ErrorCategory {
-    /// A remote server could not be reached: no network, DNS failure,
-    /// connection refused or timed out.
-    Offline {
-        /// The URL that failed.
-        url: String,
-    },
-    /// A server on this machine or the local network did not accept the
-    /// connection: Ollama or LM Studio is not running, or listens
-    /// elsewhere.
-    LocalServiceUnreachable {
-        /// The URL that failed.
-        url: String,
-    },
-    /// The server rejected the key (401) or its permissions (403).
-    AuthRejected {
-        /// 401 or 403.
-        status: StatusCode,
-    },
-    /// The provider's rate limit (429). Retry after the delay when
-    /// there is one.
-    RateLimited {
-        /// How long the server asked to wait, from `retry-after-ms`,
-        /// `retry-after` or OpenAI's `x-ratelimit-reset-*` headers.
-        retry_after: Option<Duration>,
-        /// `retry_after` added to the time the response arrived.
-        retry_at: Option<SystemTime>,
-    },
-    /// No quota or credit left on the account.
-    QuotaExhausted,
-    /// The model does not accept images or tools.
-    ModelUnsupported(Capability),
-    /// The model does not exist on this server.
-    ModelNotFound,
-    /// The conversation no longer fits the model's context window.
-    ContextOverflow,
-    /// The response stopped before it was complete: the connection
-    /// dropped, or the stream ended without saying why the model
-    /// stopped. Text received so far is incomplete.
-    Interrupted,
-    /// Anything else. The error's `Display` describes it.
-    Other,
-}
-
 /// Failure surface of [`OpenAIChatModel`](crate::OpenAIChatModel) and
 /// [`OpenAIClient::list_models`](crate::OpenAIClient::list_models).
 ///
-/// Use [`category`](Self::category) to decide what to show; match the
-/// variants when you need the details.
+/// Use [`ProviderError::kind`] to decide what to show; match the
+/// variants when you need the details. [`Retryable`] gives the retry
+/// decision and the delay the server asked for.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum OpenAIError {
@@ -154,10 +99,10 @@ pub enum OpenAIError {
         /// `error.code` (or `error.type`) as the server sent it, numbers
         /// included, for logs.
         code: Option<String>,
-        /// How long the server asked to wait before retrying.
+        /// How long the server asked to wait before retrying, from
+        /// `retry-after-ms`, `retry-after` or OpenAI's
+        /// `x-ratelimit-reset-*` headers.
         retry_after: Option<Duration>,
-        /// `retry_after` added to the time the response arrived.
-        retry_at: Option<SystemTime>,
     },
 
     /// The server sent an error event in the middle of the stream
@@ -194,7 +139,9 @@ pub enum OpenAIError {
     Json(#[from] serde_json::Error),
 
     /// Invalid client configuration (missing key for OpenAI, invalid
-    /// header).
+    /// header, missing `AZURE_OPENAI_*` variable), or a
+    /// [`TokenProvider`](crate::TokenProvider) that could not fetch a
+    /// token.
     #[error("invalid configuration: {0}")]
     Config(String),
 
@@ -210,69 +157,21 @@ pub enum OpenAIError {
     },
 }
 
-impl OpenAIError {
-    /// Classify the error for display. See [`ErrorCategory`].
-    pub fn category(&self) -> ErrorCategory {
-        match self {
-            OpenAIError::Unreachable {
-                url, local: true, ..
-            } => ErrorCategory::LocalServiceUnreachable { url: url.clone() },
-            OpenAIError::Unreachable { url, .. } => ErrorCategory::Offline { url: url.clone() },
-            OpenAIError::Api {
-                status,
-                kind,
-                retry_after,
-                retry_at,
-                ..
-            } => kind_category(kind, Some(*status), *retry_after, *retry_at),
-            OpenAIError::Provider { kind, .. } => kind_category(kind, None, None, None),
-            OpenAIError::Interrupted { .. } => ErrorCategory::Interrupted,
-            OpenAIError::Http(_)
-            | OpenAIError::Sse(_)
-            | OpenAIError::Json(_)
-            | OpenAIError::Config(_)
-            | OpenAIError::UnsupportedContent { .. } => ErrorCategory::Other,
-        }
-    }
-
-    /// The server's retry delay, for a rate limit that came with one.
-    pub fn retry_after(&self) -> Option<Duration> {
-        match self {
-            OpenAIError::Api { retry_after, .. } => *retry_after,
-            _ => None,
-        }
-    }
-}
-
-fn kind_category(
-    kind: &OpenAIApiErrorKind,
-    status: Option<StatusCode>,
-    retry_after: Option<Duration>,
-    retry_at: Option<SystemTime>,
-) -> ErrorCategory {
+fn provider_kind(kind: &OpenAIApiErrorKind) -> ProviderErrorKind {
     match kind {
-        OpenAIApiErrorKind::Authentication => ErrorCategory::AuthRejected {
-            status: status.unwrap_or(StatusCode::UNAUTHORIZED),
-        },
-        OpenAIApiErrorKind::Permission => ErrorCategory::AuthRejected {
-            status: status.unwrap_or(StatusCode::FORBIDDEN),
-        },
-        OpenAIApiErrorKind::RateLimit => ErrorCategory::RateLimited {
-            retry_after,
-            retry_at,
-        },
-        OpenAIApiErrorKind::QuotaExceeded => ErrorCategory::QuotaExhausted,
-        OpenAIApiErrorKind::UnsupportedImages => {
-            ErrorCategory::ModelUnsupported(Capability::Images)
-        }
-        OpenAIApiErrorKind::UnsupportedTools => ErrorCategory::ModelUnsupported(Capability::Tools),
-        OpenAIApiErrorKind::ContextOverflow => ErrorCategory::ContextOverflow,
-        OpenAIApiErrorKind::ModelNotFound => ErrorCategory::ModelNotFound,
-        OpenAIApiErrorKind::NotFound
-        | OpenAIApiErrorKind::ContentFilter
-        | OpenAIApiErrorKind::InvalidRequest
-        | OpenAIApiErrorKind::ServerError
-        | OpenAIApiErrorKind::Other(_) => ErrorCategory::Other,
+        OpenAIApiErrorKind::Authentication => ProviderErrorKind::Auth,
+        OpenAIApiErrorKind::Permission => ProviderErrorKind::Permission,
+        OpenAIApiErrorKind::RateLimit => ProviderErrorKind::RateLimited,
+        OpenAIApiErrorKind::QuotaExceeded => ProviderErrorKind::QuotaExhausted,
+        OpenAIApiErrorKind::UnsupportedImages => ProviderErrorKind::Unsupported(Capability::Images),
+        OpenAIApiErrorKind::UnsupportedTools => ProviderErrorKind::Unsupported(Capability::Tools),
+        OpenAIApiErrorKind::ContextOverflow => ProviderErrorKind::ContextOverflow,
+        OpenAIApiErrorKind::ModelNotFound => ProviderErrorKind::ModelNotFound,
+        OpenAIApiErrorKind::ContentFilter => ProviderErrorKind::ContentFilter,
+        OpenAIApiErrorKind::RequestTooLarge => ProviderErrorKind::RequestTooLarge,
+        OpenAIApiErrorKind::InvalidRequest => ProviderErrorKind::InvalidRequest,
+        OpenAIApiErrorKind::ServerError => ProviderErrorKind::Unavailable,
+        OpenAIApiErrorKind::NotFound | OpenAIApiErrorKind::Other(_) => ProviderErrorKind::Other,
     }
 }
 
@@ -307,6 +206,7 @@ fn classify_kind(
         | OpenAIApiErrorKind::ModelNotFound
         | OpenAIApiErrorKind::NotFound
         | OpenAIApiErrorKind::ContentFilter
+        | OpenAIApiErrorKind::RequestTooLarge
         | OpenAIApiErrorKind::InvalidRequest => RetryClassification::Permanent,
     }
 }
@@ -338,19 +238,33 @@ impl Retryable for OpenAIError {
 }
 
 impl ProviderError for OpenAIError {
-    /// `true` for [`OpenAIApiErrorKind::ContextOverflow`], from the HTTP
-    /// response or from an event mid-stream.
-    fn is_context_overflow(&self) -> bool {
-        matches!(
-            self,
-            OpenAIError::Api {
-                kind: OpenAIApiErrorKind::ContextOverflow,
-                ..
-            } | OpenAIError::Provider {
-                kind: OpenAIApiErrorKind::ContextOverflow,
-                ..
+    /// - [`Unreachable`](OpenAIError::Unreachable) and
+    ///   [`Http`](OpenAIError::Http) are [`Network`](ProviderErrorKind::Network).
+    ///   Tell a local server that is not running from a missing network
+    ///   with [`OpenAIClient::is_local`](crate::OpenAIClient::is_local).
+    /// - [`Api`](OpenAIError::Api) and [`Provider`](OpenAIError::Provider)
+    ///   follow their [`OpenAIApiErrorKind`]: `ServerError` is
+    ///   [`Unavailable`](ProviderErrorKind::Unavailable), `NotFound` and
+    ///   `Other` are [`Other`](ProviderErrorKind::Other), the rest map to
+    ///   the variant of the same meaning.
+    /// - [`Interrupted`](OpenAIError::Interrupted) is
+    ///   [`Interrupted`](ProviderErrorKind::Interrupted).
+    /// - [`UnsupportedContent`](OpenAIError::UnsupportedContent) is
+    ///   [`InvalidRequest`](ProviderErrorKind::InvalidRequest).
+    /// - [`Sse`](OpenAIError::Sse), [`Json`](OpenAIError::Json) and
+    ///   [`Config`](OpenAIError::Config) are [`Other`](ProviderErrorKind::Other).
+    fn kind(&self) -> ProviderErrorKind {
+        match self {
+            OpenAIError::Unreachable { .. } | OpenAIError::Http(_) => ProviderErrorKind::Network,
+            OpenAIError::Api { kind, .. } | OpenAIError::Provider { kind, .. } => {
+                provider_kind(kind)
             }
-        )
+            OpenAIError::Interrupted { .. } => ProviderErrorKind::Interrupted,
+            OpenAIError::UnsupportedContent { .. } => ProviderErrorKind::InvalidRequest,
+            OpenAIError::Sse(_) | OpenAIError::Json(_) | OpenAIError::Config(_) => {
+                ProviderErrorKind::Other
+            }
+        }
     }
 }
 
@@ -365,7 +279,6 @@ mod tests {
             message: "m".into(),
             code: None,
             retry_after: None,
-            retry_at: None,
         }
     }
 
@@ -386,7 +299,7 @@ mod tests {
             OpenAIApiErrorKind::QuotaExceeded,
         );
         assert_eq!(quota.retry_classification(), RetryClassification::Permanent);
-        assert_eq!(quota.category(), ErrorCategory::QuotaExhausted);
+        assert_eq!(quota.kind(), ProviderErrorKind::QuotaExhausted);
     }
 
     #[test]
@@ -410,23 +323,80 @@ mod tests {
     }
 
     #[test]
-    fn categories_cover_auth_and_capabilities() {
-        assert_eq!(
-            api(StatusCode::FORBIDDEN, OpenAIApiErrorKind::Permission).category(),
-            ErrorCategory::AuthRejected {
-                status: StatusCode::FORBIDDEN
-            }
-        );
-        assert_eq!(
-            api(
-                StatusCode::BAD_REQUEST,
-                OpenAIApiErrorKind::UnsupportedTools
-            )
-            .category(),
-            ErrorCategory::ModelUnsupported(Capability::Tools)
-        );
+    fn kinds_follow_the_api_kind() {
+        for (api_kind, expected) in [
+            (OpenAIApiErrorKind::Authentication, ProviderErrorKind::Auth),
+            (
+                OpenAIApiErrorKind::Permission,
+                ProviderErrorKind::Permission,
+            ),
+            (
+                OpenAIApiErrorKind::RateLimit,
+                ProviderErrorKind::RateLimited,
+            ),
+            (
+                OpenAIApiErrorKind::UnsupportedTools,
+                ProviderErrorKind::Unsupported(Capability::Tools),
+            ),
+            (
+                OpenAIApiErrorKind::UnsupportedImages,
+                ProviderErrorKind::Unsupported(Capability::Images),
+            ),
+            (
+                OpenAIApiErrorKind::ContentFilter,
+                ProviderErrorKind::ContentFilter,
+            ),
+            (
+                OpenAIApiErrorKind::ModelNotFound,
+                ProviderErrorKind::ModelNotFound,
+            ),
+            (
+                OpenAIApiErrorKind::RequestTooLarge,
+                ProviderErrorKind::RequestTooLarge,
+            ),
+            (
+                OpenAIApiErrorKind::InvalidRequest,
+                ProviderErrorKind::InvalidRequest,
+            ),
+            (
+                OpenAIApiErrorKind::ServerError,
+                ProviderErrorKind::Unavailable,
+            ),
+            (OpenAIApiErrorKind::NotFound, ProviderErrorKind::Other),
+            (
+                OpenAIApiErrorKind::Other("x".into()),
+                ProviderErrorKind::Other,
+            ),
+        ] {
+            assert_eq!(
+                api(StatusCode::BAD_REQUEST, api_kind.clone()).kind(),
+                expected,
+                "{api_kind:?}"
+            );
+            let event = OpenAIError::Provider {
+                kind: api_kind.clone(),
+                message: "m".into(),
+            };
+            assert_eq!(event.kind(), expected, "{api_kind:?}");
+        }
         assert!(
             api(StatusCode::BAD_REQUEST, OpenAIApiErrorKind::ContextOverflow).is_context_overflow()
+        );
+        assert!(
+            !api(StatusCode::BAD_REQUEST, OpenAIApiErrorKind::InvalidRequest).is_context_overflow()
+        );
+        let interrupted = OpenAIError::Interrupted {
+            message: "m".into(),
+            source: None,
+        };
+        assert_eq!(interrupted.kind(), ProviderErrorKind::Interrupted);
+        assert_eq!(
+            OpenAIError::UnsupportedContent { kind: "document" }.kind(),
+            ProviderErrorKind::InvalidRequest
+        );
+        assert_eq!(
+            OpenAIError::Config("x".into()).kind(),
+            ProviderErrorKind::Other
         );
     }
 }

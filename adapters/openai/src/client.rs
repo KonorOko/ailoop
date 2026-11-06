@@ -1,12 +1,39 @@
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ailoop_core::CompletionClient;
 use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::{Client as HttpClient, RequestBuilder, Url};
 
+use crate::azure::{AzureAuth, TokenProvider};
 use crate::errors::OpenAIError;
 use crate::model::OpenAIChatModel;
+
+/// How requests are authenticated.
+#[derive(Clone)]
+pub(crate) enum Auth {
+    /// No credentials: local servers.
+    None,
+    /// `Authorization: Bearer <token>`: OpenAI, OpenRouter, a fixed Azure
+    /// token.
+    Bearer(String),
+    /// `api-key: <key>`: an Azure resource key.
+    AzureKey(String),
+    /// `Authorization: Bearer <token>` from a provider, per request.
+    Provider(Arc<dyn TokenProvider>),
+}
+
+impl Auth {
+    fn label(&self) -> &'static str {
+        match self {
+            Auth::None => "none",
+            Auth::Bearer(_) => "bearer <redacted>",
+            Auth::AzureKey(_) => "api-key <redacted>",
+            Auth::Provider(_) => "token provider",
+        }
+    }
+}
 
 /// Which body field carries [`ChatRequest::max_tokens`](ailoop_core::ChatRequest::max_tokens).
 ///
@@ -39,11 +66,16 @@ pub enum MaxTokensField {
 ///
 /// The API key is optional: without one no `Authorization` header is
 /// sent, which is what local servers expect.
+///
+/// Azure OpenAI is built with [`azure`](Self::azure), which targets the
+/// resource's v1 API (`{endpoint}/openai/v1`) and authenticates with an
+/// [`AzureAuth`].
 #[derive(Clone)]
 pub struct OpenAIClient {
     pub(crate) http_client: HttpClient,
     pub(crate) base_url: String,
-    pub(crate) api_key: Option<String>,
+    pub(crate) auth: Auth,
+    pub(crate) azure: bool,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) max_tokens_field: MaxTokensField,
     pub(crate) stream_usage: bool,
@@ -54,7 +86,8 @@ impl std::fmt::Debug for OpenAIClient {
         // The key never reaches logs.
         f.debug_struct("OpenAIClient")
             .field("base_url", &self.base_url)
-            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("auth", &self.auth.label())
+            .field("azure", &self.azure)
             .field(
                 "headers",
                 &self.headers.iter().map(|(n, _)| n).collect::<Vec<_>>(),
@@ -79,6 +112,16 @@ impl OpenAIClient {
     /// base URL. Optional; defaults to [`OPENAI_BASE_URL`](Self::OPENAI_BASE_URL).
     pub const BASE_URL_ENV: &'static str = "OPENAI_BASE_URL";
 
+    /// Environment variable [`azure_from_env`](Self::azure_from_env)
+    /// reads for the resource endpoint.
+    pub const AZURE_ENDPOINT_ENV: &'static str = "AZURE_OPENAI_ENDPOINT";
+    /// Environment variable [`azure_from_env`](Self::azure_from_env)
+    /// reads for API-key auth.
+    pub const AZURE_API_KEY_ENV: &'static str = "AZURE_OPENAI_API_KEY";
+    /// Environment variable [`azure_from_env`](Self::azure_from_env)
+    /// reads for fixed bearer-token auth.
+    pub const AZURE_TOKEN_ENV: &'static str = "AZURE_OPENAI_TOKEN";
+
     /// OpenAI's own API.
     pub const OPENAI_BASE_URL: &'static str = "https://api.openai.com/v1";
     /// OpenRouter's OpenAI-compatible API.
@@ -100,7 +143,8 @@ impl OpenAIClient {
         Self {
             http_client: default_http_client(),
             base_url,
-            api_key: None,
+            auth: Auth::None,
+            azure: false,
             headers: Vec::new(),
             max_tokens_field,
             stream_usage: true,
@@ -127,6 +171,87 @@ impl OpenAIClient {
         Self::new(Self::LM_STUDIO_BASE_URL)
     }
 
+    /// Azure OpenAI's v1 API on the resource at `endpoint`
+    /// (`https://my-resource.openai.azure.com`). Requests go to
+    /// `{endpoint}/openai/v1/...`, without an `api-version` parameter, and
+    /// the model name passed to [`model`](Self::model) is the
+    /// **deployment** name.
+    ///
+    /// A pasted endpoint that already ends in `/openai` or `/openai/v1`
+    /// is accepted. The output limit is sent as `max_completion_tokens`,
+    /// which Azure documents as replacing the deprecated `max_tokens`
+    /// (rejected by the o-series reasoning models); override with
+    /// [`max_tokens_field`](Self::max_tokens_field).
+    ///
+    /// [`list_models`](Self::list_models) on Azure lists the base models
+    /// the resource can deploy, not your deployments, so its ids are not
+    /// valid for [`model`](Self::model). [`model_capabilities`](Self::model_capabilities)
+    /// answers `None` for both fields without sending any request.
+    pub fn azure(endpoint: impl Into<String>, auth: AzureAuth) -> Self {
+        let endpoint = endpoint.into();
+        let mut root = endpoint.trim().trim_end_matches('/');
+        for suffix in ["/openai/v1", "/openai"] {
+            if let Some(stripped) = root.strip_suffix(suffix) {
+                root = stripped.trim_end_matches('/');
+                break;
+            }
+        }
+        let auth = match auth {
+            AzureAuth::ApiKey(key) => Auth::AzureKey(key.trim().to_string()),
+            AzureAuth::Token(token) => Auth::Bearer(token.trim().to_string()),
+            AzureAuth::Provider(provider) => Auth::Provider(provider),
+        };
+        Self {
+            http_client: default_http_client(),
+            base_url: format!("{root}/openai/v1"),
+            auth,
+            azure: true,
+            headers: Vec::new(),
+            max_tokens_field: MaxTokensField::MaxCompletionTokens,
+            stream_usage: true,
+        }
+    }
+
+    /// Build an Azure client from the environment. Reads:
+    ///
+    /// - `AZURE_OPENAI_ENDPOINT` (required), the resource endpoint.
+    /// - Exactly one of `AZURE_OPENAI_API_KEY` or `AZURE_OPENAI_TOKEN`.
+    ///
+    /// Loads `.env` via `dotenvy` if present. Fails with
+    /// [`OpenAIError::Config`] when the endpoint is missing, or when both
+    /// or neither credential is set. For Entra ID with refreshing tokens,
+    /// use [`azure`](Self::azure) with [`AzureAuth::Provider`].
+    pub fn azure_from_env() -> Result<Self, OpenAIError> {
+        dotenvy::dotenv().ok();
+        let read = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        };
+        let endpoint = read(Self::AZURE_ENDPOINT_ENV).ok_or_else(|| {
+            OpenAIError::Config(format!("{} is required", Self::AZURE_ENDPOINT_ENV))
+        })?;
+        let auth = match (read(Self::AZURE_API_KEY_ENV), read(Self::AZURE_TOKEN_ENV)) {
+            (Some(_), Some(_)) => {
+                return Err(OpenAIError::Config(format!(
+                    "{} and {} are mutually exclusive",
+                    Self::AZURE_API_KEY_ENV,
+                    Self::AZURE_TOKEN_ENV
+                )));
+            }
+            (Some(key), None) => AzureAuth::ApiKey(key),
+            (None, Some(token)) => AzureAuth::Token(token),
+            (None, None) => {
+                return Err(OpenAIError::Config(format!(
+                    "one of {} or {} is required",
+                    Self::AZURE_API_KEY_ENV,
+                    Self::AZURE_TOKEN_ENV
+                )));
+            }
+        };
+        Ok(Self::azure(endpoint, auth))
+    }
+
     /// Build a client from the environment. Reads `OPENAI_BASE_URL`
     /// (optional, defaults to OpenAI) and `OPENAI_API_KEY` (optional).
     /// Loads `.env` via `dotenvy` if present.
@@ -142,7 +267,7 @@ impl OpenAIClient {
             Ok(key) => client.api_key(key),
             Err(_) => client,
         };
-        if client.api_key.is_none()
+        if matches!(client.auth, Auth::None)
             && host_of(&client.base_url).as_deref() == Some("api.openai.com")
         {
             return Err(OpenAIError::Config(format!(
@@ -156,10 +281,15 @@ impl OpenAIClient {
 
     /// Set the API key, sent as `Authorization: Bearer <key>`. An empty
     /// or blank key counts as no key, so a settings field the user left
-    /// empty can be passed through unchanged.
+    /// empty can be passed through unchanged. Replaces any earlier
+    /// credentials, an [`AzureAuth`] included.
     pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
         let key = api_key.into().trim().to_string();
-        self.api_key = (!key.is_empty()).then_some(key);
+        self.auth = if key.is_empty() {
+            Auth::None
+        } else {
+            Auth::Bearer(key)
+        };
         self
     }
 
@@ -168,7 +298,7 @@ impl OpenAIClient {
         match api_key {
             Some(key) => self.api_key(key),
             None => Self {
-                api_key: None,
+                auth: Auth::None,
                 ..self
             },
         }
@@ -219,6 +349,11 @@ impl OpenAIClient {
         is_local_url(&self.base_url)
     }
 
+    /// Whether the client was built with [`azure`](Self::azure).
+    pub fn is_azure(&self) -> bool {
+        self.azure
+    }
+
     /// Take ownership and produce a chat model in one step.
     pub fn model(self, model: impl Into<String>) -> OpenAIChatModel {
         OpenAIChatModel::new(self, model)
@@ -237,13 +372,25 @@ impl OpenAIClient {
             .to_string()
     }
 
-    /// Apply the key and the extra headers to `builder`.
-    pub(crate) fn authorize(
+    /// Apply the credentials and the extra headers to `builder`. A
+    /// [`TokenProvider`] is asked for a token here, so its errors
+    /// surface before the request is sent.
+    pub(crate) async fn authorize(
         &self,
         mut builder: RequestBuilder,
     ) -> Result<RequestBuilder, OpenAIError> {
-        if let Some(key) = &self.api_key {
-            builder = builder.bearer_auth(key);
+        match &self.auth {
+            Auth::None => {}
+            Auth::Bearer(token) => builder = builder.bearer_auth(token),
+            Auth::AzureKey(key) => {
+                let value = HeaderValue::from_str(key)
+                    .map_err(|_| OpenAIError::Config("invalid Azure API key".into()))?;
+                builder = builder.header("api-key", value);
+            }
+            Auth::Provider(provider) => {
+                let token = provider.token().await?;
+                builder = builder.bearer_auth(token.trim());
+            }
         }
         for (name, value) in &self.headers {
             let name = HeaderName::from_bytes(name.as_bytes())
@@ -381,7 +528,7 @@ mod tests {
         assert_eq!(openai.base_url(), OpenAIClient::OPENAI_BASE_URL);
         assert_eq!(openai.max_tokens_field, MaxTokensField::MaxCompletionTokens);
         let ollama = OpenAIClient::ollama();
-        assert!(ollama.api_key.is_none());
+        assert!(matches!(ollama.auth, Auth::None));
         assert!(ollama.is_local());
         assert_eq!(ollama.max_tokens_field, MaxTokensField::MaxTokens);
         assert_eq!(ollama.server_root(), "http://localhost:11434");
@@ -393,14 +540,81 @@ mod tests {
 
     #[test]
     fn blank_key_counts_as_none_and_debug_hides_it() {
-        assert!(OpenAIClient::lm_studio().api_key("  ").api_key.is_none());
+        assert!(matches!(
+            OpenAIClient::lm_studio().api_key("  ").auth,
+            Auth::None
+        ));
         let client = OpenAIClient::openai("sk-secret");
         assert!(!format!("{client:?}").contains("sk-secret"));
-        assert!(
+        assert!(matches!(
             OpenAIClient::openai("sk")
                 .maybe_api_key(None::<String>)
-                .api_key
-                .is_none()
+                .auth,
+            Auth::None
+        ));
+    }
+
+    #[test]
+    fn azure_endpoint_and_defaults() {
+        for endpoint in [
+            "https://res.openai.azure.com",
+            "https://res.openai.azure.com/",
+            " https://res.openai.azure.com/openai/ ",
+            "https://res.openai.azure.com/openai/v1",
+        ] {
+            let client = OpenAIClient::azure(endpoint, AzureAuth::ApiKey("k".into()));
+            assert_eq!(
+                client.base_url(),
+                "https://res.openai.azure.com/openai/v1",
+                "{endpoint}"
+            );
+        }
+        let client = OpenAIClient::azure(
+            "https://res.openai.azure.com",
+            AzureAuth::ApiKey("k".into()),
         );
+        assert!(client.is_azure());
+        assert!(!client.is_local());
+        assert_eq!(client.max_tokens_field, MaxTokensField::MaxCompletionTokens);
+        assert!(matches!(client.auth, Auth::AzureKey(_)));
+        assert_eq!(
+            client.endpoint("chat/completions"),
+            "https://res.openai.azure.com/openai/v1/chat/completions"
+        );
+        let by_token =
+            OpenAIClient::azure("https://res.openai.azure.com", AzureAuth::Token("t".into()));
+        assert!(matches!(by_token.auth, Auth::Bearer(_)));
+        assert!(!OpenAIClient::ollama().is_azure());
+    }
+
+    #[test]
+    fn azure_debug_hides_secrets() {
+        let client = OpenAIClient::azure(
+            "https://res.openai.azure.com",
+            AzureAuth::ApiKey("azure-secret".into()),
+        );
+        assert!(!format!("{client:?}").contains("azure-secret"));
+        assert!(!format!("{:?}", AzureAuth::Token("tok-secret".into())).contains("tok-secret"));
+    }
+
+    struct StaticProvider(&'static str);
+
+    #[async_trait::async_trait]
+    impl TokenProvider for StaticProvider {
+        async fn token(&self) -> Result<String, OpenAIError> {
+            Ok(self.0.into())
+        }
+    }
+
+    #[test]
+    fn provider_auth_clones_by_refcount() {
+        let provider: Arc<dyn TokenProvider> = Arc::new(StaticProvider("x"));
+        let client = OpenAIClient::azure(
+            "https://res.openai.azure.com",
+            AzureAuth::Provider(Arc::clone(&provider)),
+        );
+        assert_eq!(Arc::strong_count(&provider), 2);
+        let _copy = client.clone();
+        assert_eq!(Arc::strong_count(&provider), 3);
     }
 }

@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
@@ -83,8 +83,15 @@ pub(crate) fn classify(
         Some(StatusCode::UNAUTHORIZED) => return OpenAIApiErrorKind::Authentication,
         Some(StatusCode::FORBIDDEN) => return OpenAIApiErrorKind::Permission,
         Some(StatusCode::TOO_MANY_REQUESTS) => return OpenAIApiErrorKind::RateLimit,
+        Some(StatusCode::PAYLOAD_TOO_LARGE) => return OpenAIApiErrorKind::RequestTooLarge,
         Some(StatusCode::NOT_FOUND) => {
-            return if has("model_not_found") || message.contains("model") {
+            // Azure: `DeploymentNotFound`; on Azure the deployment is
+            // the model.
+            return if has("model_not_found")
+                || has("DeploymentNotFound")
+                || message.contains("model")
+                || message.contains("deployment")
+            {
                 OpenAIApiErrorKind::ModelNotFound
             } else {
                 OpenAIApiErrorKind::NotFound
@@ -95,13 +102,20 @@ pub(crate) fn classify(
     }
 
     // No decisive status (a stream event, or a 400/422): use the code.
+    // Azure mixes OpenAI's snake_case codes with PascalCase ones.
     match code {
-        "invalid_api_key" | "401" => OpenAIApiErrorKind::Authentication,
-        "403" => OpenAIApiErrorKind::Permission,
+        "invalid_api_key" | "401" | "Unauthorized" => OpenAIApiErrorKind::Authentication,
+        "403" | "PermissionDenied" => OpenAIApiErrorKind::Permission,
         "rate_limit_exceeded" | "429" => OpenAIApiErrorKind::RateLimit,
-        "model_not_found" => OpenAIApiErrorKind::ModelNotFound,
-        "content_filter" | "content_policy_violation" => OpenAIApiErrorKind::ContentFilter,
-        "server_error" | "500" | "502" | "503" => OpenAIApiErrorKind::ServerError,
+        "model_not_found" | "DeploymentNotFound" => OpenAIApiErrorKind::ModelNotFound,
+        "content_filter" | "content_policy_violation" | "ResponsibleAIPolicyViolation" => {
+            OpenAIApiErrorKind::ContentFilter
+        }
+        "413" | "request_too_large" => OpenAIApiErrorKind::RequestTooLarge,
+        "server_error" | "InternalServerError" | "500" | "502" | "503" => {
+            OpenAIApiErrorKind::ServerError
+        }
+        "invalid_request_error" | "BadRequest" => OpenAIApiErrorKind::InvalidRequest,
         _ => match error_type {
             "server_error" => OpenAIApiErrorKind::ServerError,
             "authentication_error" => OpenAIApiErrorKind::Authentication,
@@ -178,7 +192,6 @@ pub(crate) fn classify_http_error(
         message,
         code: fields.code.or(fields.error_type),
         retry_after,
-        retry_at: retry_after.map(|d| SystemTime::now() + d),
     }
 }
 
@@ -485,8 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_error_carries_retry_time() {
-        let before = SystemTime::now();
+    fn rate_limit_error_carries_retry_delay() {
         let err = classify_http_error(
             StatusCode::TOO_MANY_REQUESTS,
             &headers(&[("retry-after", "30")]),
@@ -494,14 +506,117 @@ mod tests {
             ALL,
         );
         match err {
+            OpenAIError::Api { retry_after, .. } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(30)));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_too_large_from_status() {
+        assert_eq!(
+            kind_of(413, "<html>too big</html>", ALL),
+            OpenAIApiErrorKind::RequestTooLarge
+        );
+    }
+
+    // Azure OpenAI bodies, ported from the former `ailoop-azure-openai`.
+
+    #[test]
+    fn azure_rate_limit_with_retry_after_ms() {
+        let body =
+            r#"{"error":{"code":"rate_limit_exceeded","message":"slow down","type":"requests"}}"#;
+        let err = classify_http_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers(&[("retry-after-ms", "2500"), ("retry-after", "3")]),
+            body.into(),
+            ALL,
+        );
+        match err {
             OpenAIError::Api {
+                status,
+                kind,
+                message,
                 retry_after,
-                retry_at,
                 ..
             } => {
-                assert_eq!(retry_after, Some(Duration::from_secs(30)));
-                let at = retry_at.unwrap();
-                assert!(at >= before + Duration::from_secs(30));
+                assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+                assert_eq!(kind, OpenAIApiErrorKind::RateLimit);
+                assert_eq!(message, "slow down");
+                assert_eq!(retry_after, Some(Duration::from_millis(2500)));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn azure_deployment_not_found_is_model_not_found() {
+        let body = r#"{"error":{"code":"DeploymentNotFound","message":"The API deployment for this resource does not exist."}}"#;
+        assert_eq!(kind_of(404, body, ALL), OpenAIApiErrorKind::ModelNotFound);
+        let terse = r#"{"error":{"code":"DeploymentNotFound","message":"no such thing"}}"#;
+        assert_eq!(kind_of(404, terse, ALL), OpenAIApiErrorKind::ModelNotFound);
+    }
+
+    #[test]
+    fn azure_content_filter() {
+        let body = r#"{"error":{"message":"The response was filtered due to the prompt triggering Azure OpenAI's content management policy.","type":null,"param":"prompt","code":"content_filter","status":400,"innererror":{"code":"ResponsibleAIPolicyViolation"}}}"#;
+        assert_eq!(kind_of(400, body, ALL), OpenAIApiErrorKind::ContentFilter);
+        let simple = r#"{"error":{"code":"content_filter","message":"blocked"}}"#;
+        assert_eq!(kind_of(400, simple, ALL), OpenAIApiErrorKind::ContentFilter);
+    }
+
+    /// Bodies Azure returns when the input exceeds the deployment's
+    /// context window, as reported on Microsoft Q&A
+    /// (<https://learn.microsoft.com/en-us/answers/questions/2280883/azure-openai-model-gpt-4-1-context-window-exceeded>)
+    /// and in <https://github.com/Azure/azure-sdk-for-python/issues/40986>.
+    #[test]
+    fn azure_context_length_exceeded() {
+        let input_exceeds = r#"{"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","type":"invalid_request_error","param":"input","code":"context_length_exceeded"}}"#;
+        let max_context = r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, you requested 1124171 tokens (124171 in the messages, 1000000 in the completion). Please reduce the length of the messages or completion.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}"#;
+        for body in [input_exceeds, max_context] {
+            assert_eq!(kind_of(400, body, ALL), OpenAIApiErrorKind::ContextOverflow);
+        }
+    }
+
+    #[test]
+    fn azure_codes_without_a_decisive_status() {
+        let invalid = r#"{"error":{"message":"Unrecognized request argument supplied: foo","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}"#;
+        assert_eq!(
+            kind_of(400, invalid, ALL),
+            OpenAIApiErrorKind::InvalidRequest
+        );
+        let future = r#"{"error":{"code":"FutureCode","message":"x"}}"#;
+        assert_eq!(
+            kind_of(418, future, ALL),
+            OpenAIApiErrorKind::Other("FutureCode".into())
+        );
+        // Older Azure API versions omit `code`.
+        let no_code = r#"{"error":{"message":"some message"}}"#;
+        assert_eq!(
+            kind_of(418, no_code, ALL),
+            OpenAIApiErrorKind::Other(String::new())
+        );
+    }
+
+    #[test]
+    fn azure_front_door_html_keeps_status_and_body() {
+        let err = classify_http_error(
+            StatusCode::BAD_GATEWAY,
+            &HeaderMap::new(),
+            "<html>Azure Front Door 502</html>".into(),
+            ALL,
+        );
+        match err {
+            OpenAIError::Api {
+                status,
+                kind,
+                message,
+                ..
+            } => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY);
+                assert_eq!(kind, OpenAIApiErrorKind::ServerError);
+                assert_eq!(message, "<html>Azure Front Door 502</html>");
             }
             other => panic!("{other:?}"),
         }
