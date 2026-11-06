@@ -29,6 +29,7 @@ decoupled from any single vendor.
 | `ailoop-core`         | Message, stream, and provider trait definitions    |
 | `ailoop-anthropic`    | Anthropic Messages API adapter                     |
 | `ailoop-azure-openai` | Azure OpenAI v1 API adapter (Chat Completions)     |
+| `ailoop-openai`       | OpenAI Chat Completions, also OpenRouter, Ollama, LM Studio |
 | `ailoop-history`      | Conversation history and compaction (formerly `ailoop-context`) |
 | `ailoop-mcp`          | MCP (Model Context Protocol) adapter (stdio MVP)   |
 | `ailoop-prompts`      | Composable system prompt utilities                 |
@@ -147,10 +148,12 @@ A provider is anything that implements `CompletionClient` and `CompletionModel`
 from `ailoop-core`. Currently shipped:
 
 - **Anthropic** — `ailoop-anthropic`
+- **OpenAI and compatible servers** — `ailoop-openai` (Chat Completions, for
+  OpenAI, OpenRouter, Ollama, LM Studio, vLLM and llama.cpp)
 - **Azure OpenAI** — `ailoop-azure-openai` (Chat Completions v1; Responses API
   pending)
 
-Other providers (OpenAI public, Bedrock, local models, etc.) are not yet
+Other providers (Bedrock, Gemini's native API, etc.) are not yet
 implemented.
 
 ## Documentation
