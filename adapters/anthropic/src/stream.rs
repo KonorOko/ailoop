@@ -39,7 +39,10 @@ where
     let stream = try_stream! {
         let mut events = events;
         let mut blocks: HashMap<u32, BlockState> = HashMap::new();
-        let mut final_stop = FinishReason::EndTurn;
+        // Set by the `message_delta` that carries a `stop_reason`; a
+        // stream that never gets one did not finish normally.
+        let mut final_stop: Option<FinishReason> = None;
+        let mut saw_message_stop = false;
         let mut usage = Usage::default();
         let mut service_tier: Option<String> = None;
 
@@ -149,7 +152,9 @@ where
                     }
                 }
                 AnthropicEvent::MessageDelta { delta, usage: u } => {
-                    final_stop = map_stop_reason(&delta.stop_reason);
+                    if delta.stop_reason.is_some() {
+                        final_stop = Some(map_stop_reason(&delta.stop_reason));
+                    }
                     usage.output_tokens = u.output_tokens;
                     if u.cache_read_input_tokens > 0 {
                         usage.cached_input_tokens = u.cache_read_input_tokens;
@@ -162,7 +167,10 @@ where
                         );
                     }
                 }
-                AnthropicEvent::MessageStop => {}
+                AnthropicEvent::MessageStop => {
+                    saw_message_stop = true;
+                    break;
+                }
                 AnthropicEvent::Ping => { }
                 AnthropicEvent::Error { error } => {
                     Err(AnthropicError::Provider {
@@ -172,8 +180,19 @@ where
                 }
             }
         }
+        // Without both signals the body may have been cut short, so it
+        // must not look like a complete turn.
+        let reason = match (saw_message_stop, final_stop) {
+            (true, Some(reason)) => reason,
+            (true, None) => Err(AnthropicError::Interrupted {
+                message: "message_stop arrived without a stop_reason".to_string(),
+            })?,
+            (false, _) => Err(AnthropicError::Interrupted {
+                message: "stream ended without message_stop".to_string(),
+            })?,
+        };
         yield StreamChunk::TurnFinished {
-            reason: final_stop,
+            reason,
             usage,
             service_tier,
         };
@@ -794,5 +813,115 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, StreamChunk::ToolCallMalformed { .. }))
         );
+    }
+
+    /// Runs `events` and returns what came before the error, plus the
+    /// error itself. Panics if the stream finishes without one.
+    async fn run_until_error(
+        events: Vec<Result<AnthropicEvent, AnthropicError>>,
+    ) -> (Vec<StreamChunk>, AnthropicError) {
+        let mut chunks = Vec::new();
+        let mut s = process_events(stream::iter(events));
+        while let Some(item) = s.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    assert!(s.next().await.is_none(), "error must end the stream");
+                    return (chunks, e);
+                }
+            }
+        }
+        panic!("expected an error, got only {chunks:?}");
+    }
+
+    /// A body cut off mid-turn (no `message_delta`, no `message_stop`)
+    /// must not look like a complete `EndTurn`: the text received so far
+    /// is still delivered, then the stream fails with `Interrupted`.
+    #[tokio::test]
+    async fn stream_without_message_stop_is_interrupted() {
+        let events = vec![
+            ok(AnthropicEvent::MessageStart {
+                message: MessageStartPayload {
+                    usage: MessageStartUsage::default(),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockStart {
+                index: 0,
+                content_block: AnthropicBlock::Text {
+                    text: String::new(),
+                },
+            }),
+            ok(AnthropicEvent::ContentBlockDelta {
+                index: 0,
+                delta: AnthropicDelta::TextDelta {
+                    text: "partial".into(),
+                },
+            }),
+        ];
+
+        let (chunks, err) = run_until_error(events).await;
+
+        assert!(matches!(
+            chunks.as_slice(),
+            [StreamChunk::TextDelta { delta }] if delta == "partial"
+        ));
+        assert!(matches!(err, AnthropicError::Interrupted { .. }), "{err:?}");
+        assert_eq!(
+            ailoop_core::ProviderError::kind(&err),
+            ailoop_core::ProviderErrorKind::Interrupted
+        );
+    }
+
+    /// `message_delta` with its `stop_reason` arrived but the body ended
+    /// before `message_stop`: still interrupted.
+    #[tokio::test]
+    async fn stop_reason_without_message_stop_is_interrupted() {
+        let mut events = tool_use_turn(&[r#"{"path": "a.txt"}"#], "tool_use");
+        assert!(matches!(
+            events.pop(),
+            Some(Ok(AnthropicEvent::MessageStop))
+        ));
+
+        let (chunks, err) = run_until_error(events).await;
+
+        assert!(
+            chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::ToolCallFinished { .. }))
+        );
+        assert!(
+            !chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::TurnFinished { .. }))
+        );
+        assert!(matches!(err, AnthropicError::Interrupted { .. }), "{err:?}");
+    }
+
+    /// `message_stop` with no `stop_reason` before it: either no
+    /// `message_delta` at all, or one whose `stop_reason` is null.
+    #[tokio::test]
+    async fn message_stop_without_stop_reason_is_interrupted() {
+        let start = || {
+            ok(AnthropicEvent::MessageStart {
+                message: MessageStartPayload {
+                    usage: MessageStartUsage::default(),
+                },
+            })
+        };
+        let no_delta = vec![start(), ok(AnthropicEvent::MessageStop)];
+        let null_reason = vec![
+            start(),
+            ok(AnthropicEvent::MessageDelta {
+                delta: MessageDeltaPayload { stop_reason: None },
+                usage: UsageDelta::default(),
+            }),
+            ok(AnthropicEvent::MessageStop),
+        ];
+
+        for events in [no_delta, null_reason] {
+            let (chunks, err) = run_until_error(events).await;
+            assert!(chunks.is_empty(), "{chunks:?}");
+            assert!(matches!(err, AnthropicError::Interrupted { .. }), "{err:?}");
+        }
     }
 }
