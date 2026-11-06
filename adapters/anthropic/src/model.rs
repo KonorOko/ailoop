@@ -3,6 +3,7 @@ use crate::error_body::{classify_http_error, parse_retry_after};
 use crate::errors::AnthropicError;
 use crate::request::build_body;
 use crate::stream::process_response;
+use crate::thinking::{Shape, ThinkingMode};
 
 use ailoop_core::{ChatRequest, CompletionModel, StreamChunk};
 use futures::stream::BoxStream;
@@ -25,6 +26,7 @@ use futures::stream::BoxStream;
 pub struct AnthropicChatModel {
     client: AnthropicClient,
     model: String,
+    thinking_mode: Option<ThinkingMode>,
 }
 
 impl AnthropicChatModel {
@@ -36,7 +38,23 @@ impl AnthropicChatModel {
         Self {
             client,
             model: model.into(),
+            thinking_mode: None,
         }
+    }
+
+    /// Force the wire shape used for
+    /// [`ChatRequest::reasoning_effort`](ailoop_core::ChatRequest::reasoning_effort).
+    ///
+    /// Without this, the shape comes from the model id: Claude 4.5 and
+    /// earlier (`claude-haiku-4-5`, `claude-sonnet-4-5`,
+    /// `claude-opus-4-5`, `claude-opus-4-1`, `claude-*-4-0`) and the
+    /// whole `claude-3-*` family use [`ThinkingMode::Budget`]; every
+    /// other id, including ones the adapter does not know, uses
+    /// [`ThinkingMode::Adaptive`]. Set it for an id the list cannot
+    /// read, such as an alias behind a proxy.
+    pub fn thinking_mode(mut self, mode: ThinkingMode) -> Self {
+        self.thinking_mode = Some(mode);
+        self
     }
 }
 
@@ -56,7 +74,8 @@ impl CompletionModel for AnthropicChatModel {
         &self,
         req: ChatRequest,
     ) -> Result<BoxStream<'static, Result<StreamChunk, AnthropicError>>, AnthropicError> {
-        let body = build_body(&self.model, &req);
+        let shape = Shape::resolve(&self.model, self.thinking_mode);
+        let body = build_body(&self.model, &req, shape);
 
         let mut req_builder = self
             .client
