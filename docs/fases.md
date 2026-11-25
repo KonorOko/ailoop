@@ -1,14 +1,24 @@
 # Fases
 
-Alcance: llevar ailoop a konor-flujo y resolver los FR-15 a FR-18 que pidió TECgpt. El FR-9 (interrumpir al modelo y seguir en el mismo run) queda para 1.x.
+Alcance: llevar ailoop a konor-flujo, resolver los FR-15 a FR-18 que pidió TECgpt y lo que falta del FR 5 de konor-kit. El FR-9 de TECgpt (interrumpir al modelo y seguir en el mismo run) queda para 1.x.
+
+## Ya resuelto en `main`
+
+De los FR de konor-kit, ya están mergeados en `origin/main` (`28a6535`):
+
+- **FR 1**: `ProviderErrorKind` y `ProviderError::kind` en `ailoop-core/src/provider_error.rs`, con el mapeo en `ailoop-anthropic` y `ailoop-openai`, y `EngineError::provider_kind` (PR #68 y #69).
+- **FR 2**: los marcadores de `ScriptedError` para cada `ProviderErrorKind`, `ScriptedError::of` y un `Retryable` que concuerda con ellos (`ailoop-core/src/testing.rs`).
+- **FR 3**: adaptive thinking con `output_config.effort` en los modelos actuales y `AnthropicChatModel::server_fallbacks` (PR #67 y #72).
+- **FR 4**: `BoxedModel` y `BoxedError` en `ailoop-core/src/boxed.rs` (PR #73).
+- **FR 5, parte de OpenAI**: `OpenAIClient::list_models` y `OpenAIClient::model_capabilities` (`adapters/openai/src/models.rs`). El resto es la Fase 6.
 
 ## Medición
 
-2026-11-25, sobre `main` (`74ff569`), con `<skill>` = la carpeta de konor-flujo:
+2026-11-25, sobre `origin/main` (`28a6535`), con `<skill>` = la carpeta de konor-flujo:
 
-- `node <skill>/base/rust/comentarios.mjs --medir .`: 8878 líneas de comentario en 118 archivos. De esas, unas 7929 son rustdoc (`///`, `//!`) y unas 990 son `//`. Por carpeta: `ailoop/src` 2708, `ailoop-core/src` 2056, `ailoop/tests` 937, `ailoop-history/src` 745, `ailoop-tools/src` 515, `adapters/anthropic` 486, `adapters/azure-openai` 477, `adapters/openai` 444, `adapters/mcp` 200, el resto menos de 110 cada una.
-- `node <skill>/base/rust/avisos.mjs --medir .`: 710 avisos en 67 archivos, de ellos 689 `clippy::unwrap_used` (333 en `ailoop/tests`), 10 `let_underscore_must_use`, 6 `allow_attributes_without_reason`, 3 `allow_attributes` y 2 `collapsible_match`.
-- Supresiones: `#![allow(dead_code)]` en `adapters/azure-openai/src/events.rs`, `adapters/openai/src/events.rs` y `adapters/openai/tests/support/mod.rs`; `#[allow(unused_variables)]` en `ailoop-core/src/middleware.rs:87` y en el código que genera `ailoop-derive/src/lib.rs:708`; `#[allow(clippy::too_many_arguments)]` en `ailoop/src/engine.rs:333` y `:841`.
+- `node <skill>/base/rust/comentarios.mjs --medir .`: 9023 líneas de comentario en 115 archivos. De esas, unas 8121 son rustdoc (`///`, `//!`) y unas 942 son `//`. Por carpeta: `ailoop/src` 2720, `ailoop-core/src` 2286, `ailoop/tests` 940, `ailoop-history/src` 763, `adapters/anthropic` 657, `adapters/openai` 622, `ailoop-tools/src` 515, `adapters/mcp` 200, el resto menos de 110 cada una.
+- `node <skill>/base/rust/avisos.mjs --medir .`: 673 avisos en 66 archivos, de ellos 653 `clippy::unwrap_used` (333 en `ailoop/tests`), 10 `let_underscore_must_use`, 5 `allow_attributes_without_reason`, 3 `allow_attributes` y 2 `collapsible_match`.
+- Supresiones: `#![allow(dead_code)]` en `adapters/openai/src/events.rs` y `adapters/openai/tests/support/mod.rs`; `#[allow(unused_variables)]` en `ailoop-core/src/middleware.rs:87` y en el código que genera `ailoop-derive/src/lib.rs:708`; `#[allow(clippy::too_many_arguments)]` en `ailoop/src/engine.rs:333` y `:841`.
 
 ## Fase 1: Base de konor-flujo y CLAUDE.md
 
@@ -135,7 +145,7 @@ Depende de: Fase 1
 Estado: pendiente
 Depende de: Fase 1
 
-**Objetivo.** Los cerca de 990 comentarios `//` que registró la Fase 1 bajan a los que deja la regla de «Comentarios» de konor-flujo. El rustdoc no se toca.
+**Objetivo.** Los cerca de 940 comentarios `//` que registró la Fase 1 bajan a los que deja la regla de «Comentarios» de konor-flujo. El rustdoc no se toca.
 
 **Hecha cuando.** `.comentarios.json` queda en lo que permiten la regla y los `// SAFETY:`, `cargo test --workspace` pasa sin cambios de comportamiento, y cada porqué que importaba quedó en el informe para ir a un tipo, un `assert` o una prueba.
 
@@ -147,9 +157,37 @@ Depende de: Fase 1
 
 **Encargos previstos.** Uno por carpeta: `ailoop/src`, `ailoop-core/src`, `ailoop/tests`, `ailoop-history/src`, `ailoop-tools/src`, los adaptadores, y el resto junto.
 
+## Fase 6: Qué puede hacer un modelo y qué modelos ofrece una clave (FR 5 de konor-kit)
+
+Estado: pendiente
+Depende de: Fase 1
+
+**Objetivo.** Una app pregunta a cualquier `CompletionModel`, también a un `BoxedModel`, si acepta imágenes y tools sin conocer el adaptador. `ailoop-anthropic` lista los modelos de una clave, como ya lo hace `ailoop-openai`.
+
+**Hecha cuando.**
+- `CompletionModel::supports` devuelve `None` en un modelo que no lo implementa, y `BoxedModel` reenvía lo que dice el modelo que envuelve (pruebas en `ailoop-core`).
+- `AnthropicChatModel` responde según su tabla de modelos, y `None` para un id que no conoce.
+- `ailoop-openai` responde lo que le dieron (con `model_capabilities` o a mano), y `None` si nadie se lo dijo; nunca lo adivina por el nombre.
+- `AnthropicClient::list_models` contra un servidor falso, con sus errores clasificados con `ProviderErrorKind`, igual que `adapters/openai/tests/fake_server.rs`.
+
+**Qué leer.** `ailoop-core/src/traits.rs`, `ailoop-core/src/boxed.rs`, `Capability` en `ailoop-core/src/provider_error.rs`, `adapters/openai/src/models.rs` y la tabla de modelos de `adapters/anthropic` (la de adaptive thinking, en `thinking.rs` y `request.rs`).
+
+**Decisiones tomadas.**
+- `CompletionModel::supports(&self, capability: Capability) -> Option<bool>`, con `None` por defecto. Reusa el `Capability` que ya existe (`Images`, `Tools`) en vez de un tipo nuevo. Es síncrono: responde lo que el adaptador ya sabe, sin ir a la red.
+- `ailoop-openai`: el modelo guarda las capacidades que le pasen (por ejemplo, las que devolvió `model_capabilities`) con un método del builder, y `supports` las devuelve.
+- `ailoop-anthropic`: `supports` sale de la tabla de modelos que vive junto a los ids. `list_models` llama al endpoint de modelos de Anthropic. El primer encargo confirma qué devuelve hoy ese endpoint y si dice capacidades; si no las dice, `list_models` devuelve ids y nombres, y las capacidades salen de la tabla.
+
+**Fuera de alcance.** Pedir las capacidades a la red desde `supports`. Capacidades más allá de imágenes y tools.
+
+**Encargos previstos.**
+- Confirmar el endpoint de modelos de Anthropic y anotar su forma en el informe.
+- `CompletionModel::supports` y su reenvío en `BoxedModel`.
+- `supports` en `ailoop-openai`, con el método del builder.
+- `supports` en `ailoop-anthropic` desde la tabla, y `AnthropicClient::list_models` con su servidor falso.
+- Rustdoc, README de los adaptadores y CHANGELOG.
+
 ## Fuera de alcance de todo el plan
 
-- FR-9, interrumpir al modelo y seguir en el mismo run: pospuesto a 1.x.
+- FR-9 de TECgpt, interrumpir al modelo y seguir en el mismo run: pospuesto a 1.x.
 - Lo que TECgpt resuelve de su lado: el trace sin `run_finished` al detener, usar `concurrency_safe` y `ctx.progress`, y lo que su lista anota como «No son FR».
-- Los detalles de Nolar (hover del header, Ctrl/Cmd+jk, scroll del chat de IA, reescribir con `lo_escrito`): van en el repo de Nolar.
 - Preparar y publicar la siguiente rc.
